@@ -1,0 +1,182 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+
+  <!-- ============================ COMPROBANTES (account.move) ============================ -->
+  <record id="view_move_list_l10n_pe_ne" model="ir.ui.view">
+    <field name="name">account.move.list.l10n.pe.ne</field>
+    <field name="model">account.move</field>
+    <field name="arch" type="xml">
+      <list string="Comprobantes electrónicos" create="false"
+            decoration-success="l10n_pe_biller_state == 'enviado'"
+            decoration-muted="l10n_pe_biller_state == 'anulado'"
+            decoration-danger="l10n_pe_biller_state in ('rechazado','error')">
+        <field name="l10n_pe_ne_tipo_doc" string="Tipo" optional="show"/>
+        <field name="name" string="Documento"/>
+        <field name="invoice_date" string="Fecha"/>
+        <field name="partner_id"/>
+        <field name="company_id" groups="base.group_multi_company" optional="hide"/>
+        <field name="amount_total" string="Total" sum="Total"/>
+        <field name="currency_id" column_invisible="True"/>
+        <field name="l10n_pe_biller_state" string="Estado" widget="badge"
+               decoration-success="l10n_pe_biller_state == 'enviado'"
+               decoration-warning="l10n_pe_biller_state == 'anulado'"
+               decoration-danger="l10n_pe_biller_state in ('rechazado','error')"/>
+        <field name="l10n_pe_biller_message" string="Mensaje" optional="hide"/>
+        <field name="l10n_pe_biller_xml" column_invisible="True"/>
+        <field name="l10n_pe_biller_cdr" column_invisible="True"/>
+        <button name="action_l10n_pe_download_pdf" type="object" icon="fa-file-pdf-o"
+                title="Descargar PDF" invisible="not l10n_pe_biller_xml"/>
+        <button name="action_l10n_pe_download_xml" type="object" icon="fa-file-code-o"
+                title="Descargar XML firmado" invisible="not l10n_pe_biller_xml"/>
+        <button name="action_l10n_pe_download_cdr" type="object" icon="fa-file-archive-o"
+                title="Descargar CDR (zip)" invisible="not l10n_pe_biller_cdr"/>
+      </list>
+    </field>
+  </record>
+
+  <record id="view_move_search_l10n_pe_ne" model="ir.ui.view">
+    <field name="name">account.move.search.l10n.pe.ne</field>
+    <field name="model">account.move</field>
+    <field name="arch" type="xml">
+      <search string="Comprobantes electrónicos">
+        <field name="name" string="Documento"/>
+        <field name="partner_id"/>
+        <field name="l10n_pe_biller_message"/>
+        <filter name="f_enviado" string="Aceptados/Enviados" domain="[('l10n_pe_biller_state', '=', 'enviado')]"/>
+        <filter name="f_anulado" string="Anulados" domain="[('l10n_pe_biller_state', '=', 'anulado')]"/>
+        <filter name="f_rechazado" string="Rechazados/Error"
+                domain="[('l10n_pe_biller_state', 'in', ('rechazado', 'error'))]"/>
+        <separator/>
+        <filter name="f_fecha" string="Fecha" date="invoice_date"/>
+        <group>
+          <filter name="g_estado" string="Estado" context="{'group_by': 'l10n_pe_biller_state'}"/>
+          <filter name="g_tipo" string="Tipo de documento" context="{'group_by': 'l10n_pe_ne_tipo_doc'}"/>
+          <filter name="g_partner" string="Cliente" context="{'group_by': 'partner_id'}"/>
+          <filter name="g_fecha" string="Mes" context="{'group_by': 'invoice_date:month'}"/>
+        </group>
+      </search>
+    </field>
+  </record>
+
+  <record id="action_l10n_pe_ne_comprobantes" model="ir.actions.act_window">
+    <field name="name">Comprobantes electrónicos</field>
+    <field name="res_model">account.move</field>
+    <field name="view_mode">list,form</field>
+    <field name="search_view_id" ref="view_move_search_l10n_pe_ne"/>
+    <field name="domain">[('l10n_pe_biller_state', '!=', 'por_enviar')]</field>
+    <field name="context">{'create': False}</field>
+    <field name="help" type="html">
+      <p class="o_view_nocontent_smiling_face">No hay comprobantes enviados todavía</p>
+      <p>Aquí verás las facturas, boletas, notas de crédito y débito enviadas a SUNAT,
+        con su estado y la descarga del XML firmado, el CDR y el PDF.</p>
+    </field>
+  </record>
+
+  <record id="view_move_list_l10n_pe_ne_action" model="ir.actions.act_window.view">
+    <field name="sequence" eval="1"/>
+    <field name="view_mode">list</field>
+    <field name="view_id" ref="view_move_list_l10n_pe_ne"/>
+    <field name="act_window_id" ref="action_l10n_pe_ne_comprobantes"/>
+  </record>
+
+  <!-- Descarga masiva (ZIP) desde el menú Acción de la lista -->
+  <record id="action_l10n_pe_ne_download_zip" model="ir.actions.server">
+    <field name="name">Descargar XML/CDR/PDF (ZIP)</field>
+    <field name="model_id" ref="account.model_account_move"/>
+    <field name="binding_model_id" ref="account.model_account_move"/>
+    <field name="binding_view_types">list</field>
+    <field name="state">code</field>
+    <field name="code">action = records.action_l10n_pe_download_zip()</field>
+  </record>
+
+  <!-- ===================== RETENCIONES / PERCEPCIONES (account.payment) ===================== -->
+  <record id="view_payment_list_l10n_pe_ne" model="ir.ui.view">
+    <field name="name">account.payment.list.l10n.pe.ne</field>
+    <field name="model">account.payment</field>
+    <field name="arch" type="xml">
+      <list string="Retenciones y percepciones" create="false">
+        <field name="name" string="Pago"/>
+        <field name="date" string="Fecha"/>
+        <field name="partner_id"/>
+        <field name="amount" string="Monto"/>
+        <field name="currency_id" column_invisible="True"/>
+        <field name="l10n_pe_ret_serie" optional="show"/>
+        <field name="l10n_pe_ret_correlativo" optional="hide"/>
+        <field name="l10n_pe_ret_state" string="Retención" widget="badge"
+               decoration-success="l10n_pe_ret_state == 'enviado'"
+               decoration-danger="l10n_pe_ret_state in ('rechazado','error')"/>
+        <field name="l10n_pe_per_state" string="Percepción" widget="badge"
+               decoration-success="l10n_pe_per_state == 'enviado'"
+               decoration-danger="l10n_pe_per_state in ('rechazado','error')"/>
+        <field name="l10n_pe_ret_xml" column_invisible="True"/>
+        <field name="l10n_pe_per_xml" column_invisible="True"/>
+        <button name="action_l10n_pe_download_ret_pdf" type="object" icon="fa-file-pdf-o"
+                title="PDF retención" invisible="not l10n_pe_ret_xml"/>
+        <button name="action_l10n_pe_download_ret_xml" type="object" icon="fa-file-code-o"
+                title="XML retención" invisible="not l10n_pe_ret_xml"/>
+        <button name="action_l10n_pe_download_per_pdf" type="object" icon="fa-file-pdf-o"
+                title="PDF percepción" invisible="not l10n_pe_per_xml"/>
+        <button name="action_l10n_pe_download_per_xml" type="object" icon="fa-file-code-o"
+                title="XML percepción" invisible="not l10n_pe_per_xml"/>
+      </list>
+    </field>
+  </record>
+
+  <record id="view_payment_search_l10n_pe_ne" model="ir.ui.view">
+    <field name="name">account.payment.search.l10n.pe.ne</field>
+    <field name="model">account.payment</field>
+    <field name="arch" type="xml">
+      <search string="Retenciones y percepciones">
+        <field name="name"/>
+        <field name="partner_id"/>
+        <filter name="f_ret" string="Retenciones" domain="[('l10n_pe_ret_state', '!=', 'por_enviar')]"/>
+        <filter name="f_per" string="Percepciones" domain="[('l10n_pe_per_state', '!=', 'por_enviar')]"/>
+        <group>
+          <filter name="g_partner" string="Contraparte" context="{'group_by': 'partner_id'}"/>
+          <filter name="g_fecha" string="Mes" context="{'group_by': 'date:month'}"/>
+        </group>
+      </search>
+    </field>
+  </record>
+
+  <record id="action_l10n_pe_ne_otroscpe" model="ir.actions.act_window">
+    <field name="name">Retenciones / Percepciones</field>
+    <field name="res_model">account.payment</field>
+    <field name="view_mode">list,form</field>
+    <field name="search_view_id" ref="view_payment_search_l10n_pe_ne"/>
+    <field name="domain">['|', ('l10n_pe_ret_state', '!=', 'por_enviar'), ('l10n_pe_per_state', '!=', 'por_enviar')]</field>
+    <field name="context">{'create': False}</field>
+    <field name="help" type="html">
+      <p class="o_view_nocontent_smiling_face">No hay retenciones ni percepciones emitidas</p>
+      <p>Aquí verás los comprobantes de retención (20) y percepción (40) emitidos, con la
+        descarga de su XML firmado, CDR y PDF.</p>
+    </field>
+  </record>
+
+  <record id="view_payment_list_l10n_pe_ne_action" model="ir.actions.act_window.view">
+    <field name="sequence" eval="1"/>
+    <field name="view_mode">list</field>
+    <field name="view_id" ref="view_payment_list_l10n_pe_ne"/>
+    <field name="act_window_id" ref="action_l10n_pe_ne_otroscpe"/>
+  </record>
+
+  <!-- ================================ MENÚS ================================ -->
+  <menuitem id="menu_l10n_pe_ne_root"
+            name="Comprobantes SUNAT"
+            parent="account.menu_finance"
+            sequence="90"
+            groups="account.group_account_invoice"/>
+
+  <menuitem id="menu_l10n_pe_ne_comprobantes"
+            name="Comprobantes electrónicos"
+            parent="menu_l10n_pe_ne_root"
+            action="action_l10n_pe_ne_comprobantes"
+            sequence="10"/>
+
+  <menuitem id="menu_l10n_pe_ne_otroscpe"
+            name="Retenciones / Percepciones"
+            parent="menu_l10n_pe_ne_root"
+            action="action_l10n_pe_ne_otroscpe"
+            sequence="20"/>
+
+</odoo>

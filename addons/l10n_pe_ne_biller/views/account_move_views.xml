@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+  <record id="view_move_form_l10n_pe_biller" model="ir.ui.view">
+    <field name="name">account.move.form.l10n.pe.biller</field>
+    <field name="model">account.move</field>
+    <field name="inherit_id" ref="account.view_move_form"/>
+    <field name="arch" type="xml">
+      <xpath expr="//header" position="inside">
+        <button name="action_l10n_pe_send_to_biller" type="object"
+                string="Enviar al Facturador" class="btn-primary"
+                invisible="move_type not in ('out_invoice', 'out_refund') or state != 'posted' or l10n_pe_biller_state in ('enviado', 'anulado')"/>
+        <button name="action_l10n_pe_send_baja" type="object"
+                string="Comunicar Baja" class="btn-secondary"
+                confirm="Esto comunicará a SUNAT la baja (anulación) del comprobante. ¿Continuar?"
+                invisible="l10n_pe_biller_state != 'enviado'"/>
+        <button name="action_l10n_pe_download_pdf" type="object"
+                string="Descargar PDF" class="btn-secondary" icon="fa-file-pdf-o"
+                invisible="not l10n_pe_biller_xml"/>
+        <button name="action_l10n_pe_download_xml" type="object"
+                string="Descargar XML" class="btn-secondary" icon="fa-file-code-o"
+                invisible="not l10n_pe_biller_xml"/>
+        <button name="action_l10n_pe_download_cdr" type="object"
+                string="Descargar CDR" class="btn-secondary" icon="fa-file-archive-o"
+                invisible="not l10n_pe_biller_cdr"/>
+        <field name="l10n_pe_biller_state" widget="statusbar"
+               statusbar_visible="por_enviar,enviado,anulado"/>
+      </xpath>
+      <xpath expr="//field[@name='invoice_date']" position="after">
+        <field name="l10n_pe_serie"/>
+        <field name="l10n_pe_correlativo"/>
+        <field name="l10n_pe_motivo_code"
+               invisible="move_type not in ('out_refund',) and not debit_origin_id"/>
+        <field name="l10n_pe_ne_detraccion" invisible="move_type != 'out_invoice'"/>
+        <field name="l10n_pe_ne_detraccion_code" invisible="not l10n_pe_ne_detraccion"/>
+        <field name="l10n_pe_ne_detraccion_rate" invisible="not l10n_pe_ne_detraccion"/>
+        <field name="l10n_pe_ne_detraccion_medio_pago" invisible="not l10n_pe_ne_detraccion"/>
+        <field name="l10n_pe_ne_percepcion" invisible="move_type != 'out_invoice'"/>
+        <field name="l10n_pe_ne_percepcion_rate" invisible="not l10n_pe_ne_percepcion"/>
+        <field name="l10n_pe_ne_anticipo_total" invisible="move_type != 'out_invoice'"/>
+        <field name="l10n_pe_ne_anticipo_doc" invisible="not l10n_pe_ne_anticipo_total"/>
+        <field name="l10n_pe_ne_anticipo_tipo" invisible="not l10n_pe_ne_anticipo_total"/>
+        <field name="l10n_pe_ne_baja_motivo" invisible="l10n_pe_biller_state not in ('enviado', 'anulado')"/>
+        <field name="l10n_pe_ne_baja_doc" readonly="1" invisible="not l10n_pe_ne_baja_doc"/>
+        <field name="l10n_pe_biller_xml" readonly="1" invisible="not l10n_pe_biller_xml"/>
+        <field name="l10n_pe_biller_cdr" readonly="1" invisible="not l10n_pe_biller_cdr"/>
+        <field name="l10n_pe_biller_pdf" readonly="1" invisible="not l10n_pe_biller_pdf"/>
+        <field name="l10n_pe_biller_message" readonly="1" invisible="not l10n_pe_biller_message"/>
+      </xpath>
+    </field>
+  </record>
+</odoo>

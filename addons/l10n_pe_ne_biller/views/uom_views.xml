@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="uom_form_view_ne_code" model="ir.ui.view">
+        <field name="name">uom.uom.form.l10n_pe_ne</field>
+        <field name="model">uom.uom</field>
+        <field name="inherit_id" ref="uom.product_uom_form_view"/>
+        <field name="arch" type="xml">
+            <field name="name" position="after">
+                <field name="l10n_pe_ne_unit_code"/>
+            </field>
+        </field>
+    </record>
+</odoo>

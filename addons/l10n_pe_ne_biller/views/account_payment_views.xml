@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+  <record id="view_account_payment_form_l10n_pe_ret" model="ir.ui.view">
+    <field name="name">account.payment.form.l10n.pe.ret</field>
+    <field name="model">account.payment</field>
+    <field name="inherit_id" ref="account.view_account_payment_form"/>
+    <field name="arch" type="xml">
+      <xpath expr="//header" position="inside">
+        <button name="action_l10n_pe_send_retencion" type="object"
+                string="Emitir Retención" class="btn-primary"
+                invisible="payment_type != 'outbound' or partner_type != 'supplier' or l10n_pe_ret_state == 'enviado'"/>
+        <field name="l10n_pe_ret_state" widget="statusbar" statusbar_visible="por_enviar,enviado"
+               invisible="payment_type != 'outbound' or partner_type != 'supplier'"/>
+        <button name="action_l10n_pe_download_ret_pdf" type="object" string="PDF Retención"
+                class="btn-secondary" icon="fa-file-pdf-o" invisible="not l10n_pe_ret_xml"/>
+        <button name="action_l10n_pe_download_ret_xml" type="object" string="XML Retención"
+                class="btn-secondary" icon="fa-file-code-o" invisible="not l10n_pe_ret_xml"/>
+        <button name="action_l10n_pe_download_ret_cdr" type="object" string="CDR Retención"
+                class="btn-secondary" icon="fa-file-archive-o" invisible="not l10n_pe_ret_cdr"/>
+        <button name="action_l10n_pe_send_percepcion" type="object"
+                string="Emitir Percepción" class="btn-primary"
+                invisible="payment_type != 'inbound' or partner_type != 'customer' or l10n_pe_per_state == 'enviado'"/>
+        <field name="l10n_pe_per_state" widget="statusbar" statusbar_visible="por_enviar,enviado"
+               invisible="payment_type != 'inbound' or partner_type != 'customer'"/>
+        <button name="action_l10n_pe_download_per_pdf" type="object" string="PDF Percepción"
+                class="btn-secondary" icon="fa-file-pdf-o" invisible="not l10n_pe_per_xml"/>
+        <button name="action_l10n_pe_download_per_xml" type="object" string="XML Percepción"
+                class="btn-secondary" icon="fa-file-code-o" invisible="not l10n_pe_per_xml"/>
+        <button name="action_l10n_pe_download_per_cdr" type="object" string="CDR Percepción"
+                class="btn-secondary" icon="fa-file-archive-o" invisible="not l10n_pe_per_cdr"/>
+      </xpath>
+      <xpath expr="//field[@name='date']" position="after">
+        <field name="l10n_pe_ret_serie"
+               invisible="payment_type != 'outbound' or partner_type != 'supplier'"/>
+        <field name="l10n_pe_ret_correlativo"
+               invisible="payment_type != 'outbound' or partner_type != 'supplier'"/>
+        <field name="l10n_pe_ret_xml" readonly="1" invisible="not l10n_pe_ret_xml"/>
+        <field name="l10n_pe_ret_cdr" readonly="1" invisible="not l10n_pe_ret_cdr"/>
+        <field name="l10n_pe_ret_pdf" readonly="1" invisible="not l10n_pe_ret_pdf"/>
+        <field name="l10n_pe_ret_message" readonly="1" invisible="not l10n_pe_ret_message"/>
+        <field name="l10n_pe_per_serie"
+               invisible="payment_type != 'inbound' or partner_type != 'customer'"/>
+        <field name="l10n_pe_per_correlativo"
+               invisible="payment_type != 'inbound' or partner_type != 'customer'"/>
+        <field name="l10n_pe_per_xml" readonly="1" invisible="not l10n_pe_per_xml"/>
+        <field name="l10n_pe_per_cdr" readonly="1" invisible="not l10n_pe_per_cdr"/>
+        <field name="l10n_pe_per_pdf" readonly="1" invisible="not l10n_pe_per_pdf"/>
+        <field name="l10n_pe_per_message" readonly="1" invisible="not l10n_pe_per_message"/>
+      </xpath>
+    </field>
+  </record>
+</odoo>

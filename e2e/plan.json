@@ -1,0 +1,1226 @@
+[
+{
+"id": "FAC-GRAV-IGV",
+"doc": "factura",
+"title": "Factura venta interna gravada IGV 18% a RUC",
+"partner": "ruc",
+"lines": [
+{
+"tax": "gravado",
+"price": 100,
+"qty": 1,
+"discount": 0,
+"uom": "NIU",
+"bags": 0
+}
+],
+"flags": {
+"serie": "F001"
+},
+"expected": "accepted",
+"source": "addon test_documents.test_factura_ruc + enterprise invoice.xml",
+"iteration": 1
+},
+{
+"id": "FAC-GRAV-MULTI",
+"doc": "factura",
+"title": "Factura gravada multi-linea (3 items NIU)",
+"partner": "ruc",
+"lines": [
+{
+"tax": "gravado",
+"price": 200,
+"qty": 5,
+"discount": 0,
+"uom": "NIU",
+"bags": 0
+},
+{
+"tax": "gravado",
+"price": 50,
+"qty": 2,
+"discount": 0,
+"uom": "NIU",
+"bags": 0
+},
+{
+"tax": "gravado",
+"price": 12.5,
+"qty": 4,
+"discount": 0,
+"uom": "NIU",
+"bags": 0
+}
+],
+"flags": {
+"serie": "F001"
+},
+"expected": "accepted",
+"source": "addon account_move_biller (operacion mixta multi-linea)",
+"iteration": 1
+},
+{
+"id": "BOL-DNI-GRAV",
+"doc": "boleta",
+"title": "Boleta gravada a cliente con DNI",
+"partner": "dni",
+"lines": [
+{
+"tax": "gravado",
+"price": 80,
+"qty": 2,
+"discount": 0,
+"uom": "NIU",
+"bags": 0
+}
+],
+"flags": {
+"serie": "B001"
+},
+"expected": "accepted",
+"source": "addon test_documents.test_boleta_dni",
+"iteration": 1
+},
+{
+"id": "BOL-CONSFINAL",
+"doc": "boleta",
+"title": "Boleta consumidor final (sin documento, monto bajo)",
+"partner": "none",
+"lines": [
+{
+"tax": "gravado",
+"price": 25,
+"qty": 1,
+"discount": 0,
+"uom": "NIU",
+"bags": 0
+}
+],
+"flags": {
+"serie": "B001"
+},
+"expected": "accepted",
+"source": "addon RC consumidor final tipDocUsuario=0; greenter boleta consumidor",
+"iteration": 1
+},
+{
+"id": "NC-MOT01-ANULA",
+"doc": "nc",
+"title": "Nota de credito motivo 01 (anulacion de la operacion) sobre factura",
+"partner": "ruc",
+"lines": [
+{
+"tax": "gravado",
+"price": 100,
+"qty": 1,
+"discount": 0,
+"uom": "NIU",
+"bags": 0
+}
+],
+"flags": {
+"motivo": "01",
+"serie": "FC01"
+},
+"expected": "accepted",
+"source": "addon test_documents.test_nota_credito + enterprise credit_note.xml",
+"iteration": 1
+},
+{
+"id": "ND-MOT02-AUMENTO",
+"doc": "nd",
+"title": "Nota de debito motivo 02 (aumento en el valor) sobre factura",
+"partner": "ruc",
+"lines": [
+{
+"tax": "gravado",
+"price": 100,
+"qty": 1,
+"discount": 0,
+"uom": "NIU",
+"bags": 0
+}
+],
+"flags": {
+"motivo": "02",
+"serie": "FD01"
+},
+"expected": "accepted",
+"source": "addon test_documents.test_nota_debito",
+"iteration": 1
+},
+{
+"id": "TRI-EXONERADO",
+"doc": "factura",
+"title": "Factura exonerada IGV (cat 07=20, EXO 9997)",
+"partner": "ruc",
+"lines": [
+{
+"tax": "exonerado",
+"price": 150,
+"qty": 2,
+"discount": 0,
+"uom": "NIU",
+"bags": 0
+}
+],
+"flags": {
+"serie": "F001"
+},
+"expected": "accepted",
+"source": "addon test_affectation.test_exonerado + greenter exonerado",
+"iteration": 2
+},
+{
+"id": "TRI-INAFECTO",
+"doc": "factura",
+"title": "Factura inafecta IGV (cat 07=30, INA 9998)",
+"partner": "ruc",
+"lines": [
+{
+"tax": "inafecto",
+"price": 300,
+"qty": 1,
+"discount": 0,
+"uom": "NIU",
+"bags": 0
+}
+],
+"flags": {
+"serie": "F001"
+},
+"expected": "accepted",
+"source": "addon test_affectation TAX_CODE_MAP 9998->30 + greenter inafecto",
+"iteration": 2
+},
+{
+"id": "TRI-EXPORTACION",
+"doc": "factura",
+"title": "Factura exportacion (cat 07=40, EXP 9995, tipOperacion 0200)",
+"partner": "ruc",
+"lines": [
+{
+"tax": "exportacion",
+"price": 500,
+"qty": 3,
+"discount": 0,
+"uom": "NIU",
+"bags": 0
+}
+],
+"flags": {
+"serie": "F001"
+},
+"expected": "accepted",
+"source": "addon test_affectation (todas exportacion->tipOperacion 0200) + greenter export",
+"iteration": 2
+},
+{
+"id": "TRI-GRATUITO",
+"doc": "factura",
+"title": "Factura gratuita (cat 07=11, GRA 9996, leyenda 1002)",
+"partner": "ruc",
+"lines": [
+{
+"tax": "gratuito",
+"price": 100,
+"qty": 1,
+"discount": 0,
+"uom": "NIU",
+"bags": 0
+}
+],
+"flags": {
+"serie": "F001"
+},
+"expected": "accepted",
+"source": "addon TAX_CODE_MAP 9996->11 + enterprise invoice_free.xml + greenter gratuito",
+"iteration": 2
+},
+{
+"id": "TRI-IVAP",
+"doc": "factura",
+"title": "Factura IVAP arroz pilado (cat 07=17, 1016)",
+"partner": "ruc",
+"lines": [
+{
+"tax": "ivap",
+"price": 200,
+"qty": 10,
+"discount": 0,
+"uom": "KGM",
+"bags": 0
+}
+],
+"flags": {
+"serie": "F001"
+},
+"expected": "accepted",
+"source": "addon TAX_CODE_MAP 1016->17 + enterprise IVAP + greenter IVAP",
+"iteration": 2
+},
+{
+"id": "TRI-MIXTO-2",
+"doc": "factura",
+"title": "Factura mixta gravado + exonerado (dos tributos cabecera)",
+"partner": "ruc",
+"lines": [
+{
+"tax": "gravado",
+"price": 100,
+"qty": 1,
+"discount": 0,
+"uom": "NIU",
+"bags": 0
+},
+{
+"tax": "exonerado",
+"price": 80,
+"qty": 1,
+"discount": 0,
+"uom": "NIU",
+"bags": 0
+}
+],
+"flags": {
+"serie": "F001"
+},
+"expected": "accepted",
+"source": "addon test_affectation.test_mixto_dos_tributos",
+"iteration": 2
+},
+{
+"id": "TRI-MIXTO-3",
+"doc": "factura",
+"title": "Factura mixta gravado + inafecto + exonerado",
+"partner": "ruc",
+"lines": [
+{
+"tax": "gravado",
+"price": 100,
+"qty": 1,
+"discount": 0,
+"uom": "NIU",
+"bags": 0
+},
+{
+"tax": "inafecto",
+"price": 60,
+"qty": 1,
+"discount": 0,
+"uom": "NIU",
+"bags": 0
+},
+{
+"tax": "exonerado",
+"price": 40,
+"qty": 1,
+"discount": 0,
+"uom": "NIU",
+"bags": 0
+}
+],
+"flags": {
+"serie": "F001"
+},
+"expected": "accepted",
+"source": "addon operacion mixta soportada (multiples categorias)",
+"iteration": 2
+},
+{
+"id": "BOL-EXONERADO",
+"doc": "boleta",
+"title": "Boleta exonerada (verifica IGV cero en categoria EXO)",
+"partner": "dni",
+"lines": [
+{
+"tax": "exonerado",
+"price": 50,
+"qty": 2,
+"discount": 0,
+"uom": "NIU",
+"bags": 0
+}
+],
+"flags": {
+"serie": "B001"
+},
+"expected": "accepted",
+"source": "addon test_baja.test_boleta_rc_exonerada_lleva_igv_cero (categoria EXO en boleta)",
+"iteration": 2
+},
+{
+"id": "DET-SPOT-037",
+"doc": "factura",
+"title": "Factura sujeta a detraccion cod 037 al 12% (Banco Nacion)",
+"partner": "ruc",
+"lines": [
+{
+"tax": "gravado",
+"price": 600,
+"qty": 1,
+"discount": 0,
+"uom": "NIU",
+"bags": 0
+}
+],
+"flags": {
+"detraccion": {
+"code": "037",
+"rate": 12
+},
+"serie": "F001"
+},
+"expected": "accepted",
+"source": "addon test_detraccion.test_detraccion (tipOperacion 1001, leyenda 2006)",
+"iteration": 3
+},
+{
+"id": "DET-SPOT-019",
+"doc": "factura",
+"title": "Factura detraccion arrendamiento cod 019 al 10%",
+"partner": "ruc",
+"lines": [
+{
+"tax": "gravado",
+"price": 990,
+"qty": 1,
+"discount": 0,
+"uom": "NIU",
+"bags": 0
+}
+],
+"flags": {
+"detraccion": {
+"code": "019",
+"rate": 10
+},
+"serie": "F001"
+},
+"expected": "accepted",
+"source": "enterprise invoice_detraction_with_decimal.xml (cod 019 10%)",
+"iteration": 3
+},
+{
+"id": "DET-MEDPAGO",
+"doc": "factura",
+"title": "Factura detraccion con medio de pago explicito cod 001",
+"partner": "ruc",
+"lines": [
+{
+"tax": "gravado",
+"price": 708,
+"qty": 1,
+"discount": 0,
+"uom": "NIU",
+"bags": 0
+}
+],
+"flags": {
+"detraccion": {
+"code": "037",
+"rate": 12,
+"medio_pago": "001"
+},
+"serie": "F001"
+},
+"expected": "accepted",
+"source": "addon detraccion codMedioPago 001 (cat 59)",
+"iteration": 3
+},
+{
+"id": "PERC-EN-FAC",
+"doc": "factura",
+"title": "Percepcion embebida en factura al 2% (variable global 51)",
+"partner": "ruc",
+"lines": [
+{
+"tax": "gravado",
+"price": 600,
+"qty": 1,
+"discount": 0,
+"uom": "NIU",
+"bags": 0
+}
+],
+"flags": {
+"percepcion": true,
+"serie": "F001"
+},
+"expected": "accepted",
+"source": "addon test_detraccion.test_percepcion_en_factura (tipOperacion 2001, var 51)",
+"iteration": 3
+},
+{
+"id": "ANT-REGULAR",
+"doc": "factura",
+"title": "Anticipo regularizado en factura gravada (variable global 04)",
+"partner": "ruc",
+"lines": [
+{
+"tax": "gravado",
+"price": 500,
+"qty": 1,
+"discount": 0,
+"uom": "NIU",
+"bags": 0
+}
+],
+"flags": {
+"anticipo": {
+"total": 118,
+"doc": "F001-00000100"
+},
+"serie": "F001"
+},
+"expected": "accepted",
+"source": "addon test_anticipo (var 04, relacionados, sumTotalAnticipos)",
+"iteration": 3
+},
+{
+"id": "ANT-BOLETA-DOC",
+"doc": "factura",
+"title": "Anticipo regularizado con doc origen boleta de anticipo (tipo 03)",
+"partner": "ruc",
+"lines": [
+{
+"tax": "gravado",
+"price": 1000,
+"qty": 1,
+"discount": 0,
+"uom": "NIU",
+"bags": 0
+}
+],
+"flags": {
+"anticipo": {
+"total": 236,
+"doc": "B001-00000050",
+"tipo": "03"
+},
+"serie": "F001"
+},
+"expected": "accepted",
+"source": "addon l10n_pe_ne_anticipo_tipo 03 (boleta anticipo)",
+"iteration": 3
+},
+{
+"id": "DESC-ITEM",
+"doc": "factura",
+"title": "Factura con descuento por item 10% (cat 53 cod 00)",
+"partner": "ruc",
+"lines": [
+{
+"tax": "gravado",
+"price": 500,
+"qty": 1,
+"discount": 10,
+"uom": "NIU",
+"bags": 0
+}
+],
+"flags": {
+"serie": "F001"
+},
+"expected": "accepted",
+"source": "addon test_descuento (adicionalDetalle codTipoVariable 00, linea neta)",
+"iteration": 3
+},
+{
+"id": "DESC-ITEM-MULTI",
+"doc": "factura",
+"title": "Factura descuento por item en varias lineas con porcentajes distintos",
+"partner": "ruc",
+"lines": [
+{
+"tax": "gravado",
+"price": 200,
+"qty": 2,
+"discount": 15,
+"uom": "NIU",
+"bags": 0
+},
+{
+"tax": "gravado",
+"price": 100,
+"qty": 1,
+"discount": 5,
+"uom": "NIU",
+"bags": 0
+}
+],
+"flags": {
+"serie": "F001"
+},
+"expected": "accepted",
+"source": "addon descuento nativo Odoo por linea",
+"iteration": 3
+},
+{
+"id": "DESC-BOLETA",
+"doc": "boleta",
+"title": "Boleta con descuento por item (descuento nativo en boleta)",
+"partner": "dni",
+"lines": [
+{
+"tax": "gravado",
+"price": 120,
+"qty": 1,
+"discount": 20,
+"uom": "NIU",
+"bags": 0
+}
+],
+"flags": {
+"serie": "B001"
+},
+"expected": "accepted",
+"source": "addon test_descuento aplicable a boleta",
+"iteration": 3
+},
+{
+"id": "DET-PERC-COMBO",
+"doc": "factura",
+"title": "Factura detraccion sobre operacion gravada de monto alto",
+"partner": "ruc",
+"lines": [
+{
+"tax": "gravado",
+"price": 2000,
+"qty": 3,
+"discount": 0,
+"uom": "NIU",
+"bags": 0
+}
+],
+"flags": {
+"detraccion": {
+"code": "037",
+"rate": 12
+},
+"serie": "F001"
+},
+"expected": "accepted",
+"source": "addon detraccion+gravado monto alto (mtoNetoPendientePago)",
+"iteration": 3
+},
+{
+"id": "ICBPER-BOLSAS",
+"doc": "factura",
+"title": "Factura con ICBPER (bolsas plasticas, tributo fijo 7152)",
+"partner": "ruc",
+"lines": [
+{
+"tax": "gravado",
+"price": 100,
+"qty": 1,
+"discount": 0,
+"uom": "NIU",
+"bags": 3
+}
+],
+"flags": {
+"serie": "F001"
+},
+"expected": "accepted",
+"source": "addon test_affectation.test_icbper (codTriIcbper 7152, ctdBolsas)",
+"iteration": 4
+},
+{
+"id": "ICBPER-BOLETA",
+"doc": "boleta",
+"title": "Boleta gravada con ICBPER (verifica sumImpVenta con ICBPER)",
+"partner": "dni",
+"lines": [
+{
+"tax": "gravado",
+"price": 50,
+"qty": 2,
+"discount": 0,
+"uom": "NIU",
+"bags": 2
+}
+],
+"flags": {
+"serie": "B001"
+},
+"expected": "accepted",
+"source": "addon ICBPER en boleta + RC tributosDocResumen 7152",
+"iteration": 4
+},
+{
+"id": "ISC-VALOR",
+"doc": "factura",
+"title": "Factura con ISC al valor 10% (sistema 01) + IGV sobre valor+ISC",
+"partner": "ruc",
+"lines": [
+{
+"tax": "isc",
+"price": 500,
+"qty": 1,
+"discount": 0,
+"uom": "NIU",
+"bags": 0
+}
+],
+"flags": {
+"serie": "F001"
+},
+"expected": "accepted",
+"source": "addon test_affectation.test_isc (tipSisISC 01, base IGV 550)",
+"iteration": 4
+},
+{
+"id": "ISC-FIJO",
+"doc": "factura",
+"title": "Factura con ISC monto fijo (sistema 02, amount_type fixed)",
+"partner": "ruc",
+"lines": [
+{
+"tax": "isc",
+"price": 300,
+"qty": 4,
+"discount": 0,
+"uom": "NIU",
+"bags": 0
+}
+],
+"flags": {
+"isc_type": "02",
+"serie": "F001"
+},
+"expected": "accepted",
+"source": "addon ISC monto fijo (isc = quantity x amount) + greenter cat 08",
+"iteration": 4
+},
+{
+"id": "UOM-KGM",
+"doc": "factura",
+"title": "Factura linea en kilogramos (codUnidadMedida KGM)",
+"partner": "ruc",
+"lines": [
+{
+"tax": "gravado",
+"price": 12,
+"qty": 25,
+"discount": 0,
+"uom": "KGM",
+"bags": 0
+}
+],
+"flags": {
+"serie": "F001"
+},
+"expected": "accepted",
+"source": "addon test_affectation.test_unidad_medida_kg",
+"iteration": 4
+},
+{
+"id": "UOM-MIXTO",
+"doc": "factura",
+"title": "Factura con unidades mixtas NIU + KGM + LTR",
+"partner": "ruc",
+"lines": [
+{
+"tax": "gravado",
+"price": 100,
+"qty": 1,
+"discount": 0,
+"uom": "NIU",
+"bags": 0
+},
+{
+"tax": "gravado",
+"price": 8,
+"qty": 10,
+"discount": 0,
+"uom": "KGM",
+"bags": 0
+},
+{
+"tax": "gravado",
+"price": 15,
+"qty": 5,
+"discount": 0,
+"uom": "LTR",
+"bags": 0
+}
+],
+"flags": {
+"serie": "F001"
+},
+"expected": "accepted",
+"source": "addon UOM_CODE_BY_XMLID (NIU/KGM/LTR)",
+"iteration": 4
+},
+{
+"id": "UOM-DEFAULT-NIU",
+"doc": "factura",
+"title": "Factura sin UoM mapeada cae a default NIU",
+"partner": "ruc",
+"lines": [
+{
+"tax": "gravado",
+"price": 100,
+"qty": 1,
+"discount": 0,
+"uom": "NIU",
+"bags": 0
+}
+],
+"flags": {
+"serie": "F001"
+},
+"expected": "accepted",
+"source": "addon test_affectation.test_unidad_medida_default_es_niu (DEFAULT_UNIT_CODE)",
+"iteration": 4
+},
+{
+"id": "RA-FACTURA",
+"doc": "ra",
+"title": "Comunicacion de baja RA de factura (01) dentro de plazo",
+"partner": "ruc",
+"lines": [
+{
+"tax": "gravado",
+"price": 100,
+"qty": 1,
+"discount": 0,
+"uom": "NIU",
+"bags": 0
+}
+],
+"flags": {
+"serie": "F001",
+"baja_motivo": "Error en datos del cliente"
+},
+"expected": "accepted",
+"source": "addon test_baja.test_baja_request (resumenBajas tipDocBaja 01)",
+"iteration": 5
+},
+{
+"id": "RA-NC",
+"doc": "ra",
+"title": "Comunicacion de baja RA de nota de credito (07)",
+"partner": "ruc",
+"lines": [
+{
+"tax": "gravado",
+"price": 100,
+"qty": 1,
+"discount": 0,
+"uom": "NIU",
+"bags": 0
+}
+],
+"flags": {
+"serie": "FC01",
+"motivo": "01",
+"baja_motivo": "NC emitida por error"
+},
+"expected": "accepted",
+"source": "addon RA anula tipos 01/03/07/08 (NC 07)",
+"iteration": 5
+},
+{
+"id": "RA-ND",
+"doc": "ra",
+"title": "Comunicacion de baja RA de nota de debito (08)",
+"partner": "ruc",
+"lines": [
+{
+"tax": "gravado",
+"price": 100,
+"qty": 1,
+"discount": 0,
+"uom": "NIU",
+"bags": 0
+}
+],
+"flags": {
+"serie": "FD01",
+"motivo": "02",
+"baja_motivo": "ND emitida por error"
+},
+"expected": "accepted",
+"source": "addon RA anula ND 08",
+"iteration": 5
+},
+{
+"id": "RC-BOLETA",
+"doc": "rc",
+"title": "Resumen diario RC anula boleta (03, tipEstado 3)",
+"partner": "dni",
+"lines": [
+{
+"tax": "gravado",
+"price": 80,
+"qty": 1,
+"discount": 0,
+"uom": "NIU",
+"bags": 0
+}
+],
+"flags": {
+"serie": "B001",
+"baja_motivo": "Anulacion de boleta"
+},
+"expected": "accepted",
+"source": "addon test_baja.test_boleta_rc_request (resumenDiario tipEstado 3)",
+"iteration": 5
+},
+{
+"id": "RC-BOLETA-CONSFINAL",
+"doc": "rc",
+"title": "RC anula boleta a consumidor final (tipDocUsuario 0)",
+"partner": "none",
+"lines": [
+{
+"tax": "gravado",
+"price": 30,
+"qty": 1,
+"discount": 0,
+"uom": "NIU",
+"bags": 0
+}
+],
+"flags": {
+"serie": "B001",
+"baja_motivo": "Anulacion boleta consumidor final"
+},
+"expected": "accepted",
+"source": "addon test_baja.test_boleta_rc_consumidor_final",
+"iteration": 5
+},
+{
+"id": "RET-IGV-3PCT",
+"doc": "retencion",
+"title": "Comprobante de retencion IGV 3% (regimen 01) sobre factura proveedor",
+"partner": "ruc",
+"lines": [
+{
+"tax": "gravado",
+"price": 1000,
+"qty": 1,
+"discount": 0,
+"uom": "NIU",
+"bags": 0
+}
+],
+"flags": {
+"serie": "R001",
+"regimen": "01",
+"rate": 3
+},
+"expected": "accepted",
+"source": "addon test_retencion.test_retencion_payload (R001, 3%, mtoTotRetencion 30)",
+"iteration": 6
+},
+{
+"id": "RET-MULTIDOC",
+"doc": "retencion",
+"title": "Retencion sobre pago que reconcilia dos facturas de proveedor",
+"partner": "ruc",
+"lines": [
+{
+"tax": "gravado",
+"price": 500,
+"qty": 1,
+"discount": 0,
+"uom": "NIU",
+"bags": 0
+},
+{
+"tax": "gravado",
+"price": 800,
+"qty": 1,
+"discount": 0,
+"uom": "NIU",
+"bags": 0
+}
+],
+"flags": {
+"serie": "R001",
+"regimen": "01",
+"rate": 3,
+"multi_doc": true
+},
+"expected": "accepted",
+"source": "addon retencion detalle por bill (mtoRetDocRelacionado por doc)",
+"iteration": 6
+},
+{
+"id": "PER-IGV-2PCT",
+"doc": "percepcion",
+"title": "Comprobante de percepcion venta interna 2% (regimen 01) sobre venta reconciliada",
+"partner": "ruc",
+"lines": [
+{
+"tax": "gravado",
+"price": 1000,
+"qty": 1,
+"discount": 0,
+"uom": "NIU",
+"bags": 0
+}
+],
+"flags": {
+"serie": "P001",
+"regimen": "01",
+"rate": 2
+},
+"expected": "accepted",
+"source": "addon test_retencion.test_percepcion_payload (P001, 2%, mtoTotPercepcion 20)",
+"iteration": 6
+},
+{
+"id": "PER-MULTIDOC",
+"doc": "percepcion",
+"title": "Percepcion sobre cobro que reconcilia dos ventas",
+"partner": "ruc",
+"lines": [
+{
+"tax": "gravado",
+"price": 600,
+"qty": 1,
+"discount": 0,
+"uom": "NIU",
+"bags": 0
+},
+{
+"tax": "gravado",
+"price": 400,
+"qty": 1,
+"discount": 0,
+"uom": "NIU",
+"bags": 0
+}
+],
+"flags": {
+"serie": "P001",
+"regimen": "01",
+"rate": 2,
+"multi_doc": true
+},
+"expected": "accepted",
+"source": "addon percepcion detalle por invoice (mtoPerDocRelacionado)",
+"iteration": 6
+},
+{
+"id": "NEG-ANT-NOGRAV",
+"doc": "factura",
+"title": "Anticipo sobre operacion exonerada (no gravada) debe rechazar",
+"partner": "ruc",
+"lines": [
+{
+"tax": "exonerado",
+"price": 500,
+"qty": 1,
+"discount": 0,
+"uom": "NIU",
+"bags": 0
+}
+],
+"flags": {
+"anticipo": {
+"total": 118,
+"doc": "F001-00000100"
+},
+"serie": "F001"
+},
+"expected": "rejected:_l10n_pe_check_anticipo UserError operacion no gravada/mixta",
+"source": "addon test_anticipo (guarda anticipo solo IGV 1000 o IVAP 1016)",
+"iteration": 7
+},
+{
+"id": "NEG-ANT-SINDOC",
+"doc": "factura",
+"title": "Anticipo sin documento relacionado debe rechazar",
+"partner": "ruc",
+"lines": [
+{
+"tax": "gravado",
+"price": 500,
+"qty": 1,
+"discount": 0,
+"uom": "NIU",
+"bags": 0
+}
+],
+"flags": {
+"anticipo": {
+"total": 118,
+"doc": ""
+},
+"serie": "F001"
+},
+"expected": "rejected:_l10n_pe_check_anticipo UserError falta l10n_pe_ne_anticipo_doc",
+"source": "addon _l10n_pe_check_anticipo (doc obligatorio)",
+"iteration": 7
+},
+{
+"id": "NEG-ANT-MAYOR",
+"doc": "factura",
+"title": "Anticipo mayor al total de la factura debe rechazar",
+"partner": "ruc",
+"lines": [
+{
+"tax": "gravado",
+"price": 100,
+"qty": 1,
+"discount": 0,
+"uom": "NIU",
+"bags": 0
+}
+],
+"flags": {
+"anticipo": {
+"total": 500,
+"doc": "F001-00000100"
+},
+"serie": "F001"
+},
+"expected": "rejected:_l10n_pe_check_anticipo UserError anticipo > total factura",
+"source": "addon _l10n_pe_check_anticipo (anticipo <= total)",
+"iteration": 7
+},
+{
+"id": "NEG-NC-DESCUENTO",
+"doc": "nc",
+"title": "Nota de credito con descuento en linea debe rechazar (prohibido SUNAT)",
+"partner": "ruc",
+"lines": [
+{
+"tax": "gravado",
+"price": 100,
+"qty": 1,
+"discount": 10,
+"uom": "NIU",
+"bags": 0
+}
+],
+"flags": {
+"motivo": "01",
+"serie": "FC01"
+},
+"expected": "rejected:Credit and Debit notes with discounts are not allowed in SUNAT",
+"source": "enterprise _check_document_type_discount UserError",
+"iteration": 7
+},
+{
+"id": "NEG-ND-DESCUENTO",
+"doc": "nd",
+"title": "Nota de debito con descuento en linea debe rechazar",
+"partner": "ruc",
+"lines": [
+{
+"tax": "gravado",
+"price": 100,
+"qty": 1,
+"discount": 5,
+"uom": "NIU",
+"bags": 0
+}
+],
+"flags": {
+"motivo": "02",
+"serie": "FD01"
+},
+"expected": "rejected:Credit and Debit notes with discounts are not allowed in SUNAT",
+"source": "enterprise _check_document_type_discount (07/08)",
+"iteration": 7
+},
+{
+"id": "NEG-BOL-700-SINDOC",
+"doc": "boleta",
+"title": "Boleta > S/700 a consumidor final sin documento debe rechazar",
+"partner": "none",
+"lines": [
+{
+"tax": "gravado",
+"price": 800,
+"qty": 1,
+"discount": 0,
+"uom": "NIU",
+"bags": 0
+}
+],
+"flags": {
+"serie": "B001"
+},
+"expected": "rejected:Boleta sobre S/700 exige documento de identidad del cliente",
+"source": "addon RC nota: boleta > S/700 exige identificacion; SUNAT rechaza",
+"iteration": 7
+},
+{
+"id": "NEG-RA-SINMOTIVO",
+"doc": "ra",
+"title": "Comunicacion de baja sin motivo debe rechazar",
+"partner": "ruc",
+"lines": [
+{
+"tax": "gravado",
+"price": 100,
+"qty": 1,
+"discount": 0,
+"uom": "NIU",
+"bags": 0
+}
+],
+"flags": {
+"serie": "F001",
+"baja_motivo": ""
+},
+"expected": "rejected:_l10n_pe_check_baja UserError motivo presente",
+"source": "addon test_baja.test_baja_sin_motivo_rechaza",
+"iteration": 7
+},
+{
+"id": "NEG-RA-FUERAPLAZO",
+"doc": "ra",
+"title": "Baja de factura fuera del plazo de 7 dias debe rechazar (exige NC)",
+"partner": "ruc",
+"lines": [
+{
+"tax": "gravado",
+"price": 100,
+"qty": 1,
+"discount": 0,
+"uom": "NIU",
+"bags": 0
+}
+],
+"flags": {
+"serie": "F001",
+"baja_motivo": "Anulacion tardia",
+"fuera_plazo": true
+},
+"expected": "rejected:_l10n_pe_check_baja UserError factura fuera de plazo baja_plazo_dias",
+"source": "addon test_baja.test_baja_fuera_de_plazo_rechaza",
+"iteration": 7
+},
+{
+"id": "NEG-RA-NOENVIADO",
+"doc": "ra",
+"title": "Baja de comprobante no enviado debe rechazar",
+"partner": "ruc",
+"lines": [
+{
+"tax": "gravado",
+"price": 100,
+"qty": 1,
+"discount": 0,
+"uom": "NIU",
+"bags": 0
+}
+],
+"flags": {
+"serie": "F001",
+"baja_motivo": "Anular borrador",
+"no_enviado": true
+},
+"expected": "rejected:_l10n_pe_check_baja UserError solo estado enviado/anulado",
+"source": "addon test_baja.test_baja_no_enviado_rechaza",
+"iteration": 7
+}
+]

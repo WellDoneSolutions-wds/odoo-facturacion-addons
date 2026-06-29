@@ -949,6 +949,14 @@ class AccountMove(models.Model):
                     headers=headers,
                     timeout=timeout,
                 )
+                _logger.info(
+                    "RESP %s -> POST %s/generator/%s -> HTTP %s | %s",
+                    move.name,
+                    base,
+                    endpoint,
+                    resp.status_code,
+                    resp.text[:500],
+                )
                 _logger.info("Respuesta: %s", resp.text)
             except requests.RequestException as exc:
                 move.l10n_pe_biller_state = "error"

@@ -1,0 +1,6 @@
+id,name,model_id:id,group_id:id,perm_read,perm_write,perm_create,perm_unlink
+access_ne_emisor_partner,ne.emisor.res.partner,base.model_res_partner,group_l10n_pe_ne_emisor,1,1,1,0
+access_ne_emisor_product_template,ne.emisor.product.template,product.model_product_template,group_l10n_pe_ne_emisor,1,1,1,0
+access_ne_emisor_product_product,ne.emisor.product.product,product.model_product_product,group_l10n_pe_ne_emisor,1,1,1,0
+access_ne_emisor_uom,ne.emisor.uom.uom,uom.model_uom_uom,group_l10n_pe_ne_emisor,1,1,1,0
+access_ne_emisor_gasto,ne.emisor.gasto,model_l10n_pe_ne_gasto,group_l10n_pe_ne_emisor,1,1,1,1

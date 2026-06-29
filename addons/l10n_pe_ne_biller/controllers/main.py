@@ -1,0 +1,600 @@
+# -*- coding: utf-8 -*-
+"""API HTTP del addon para la app React (NE Express).
+
+Reemplaza al BFF NestJS: React llama directo a Odoo, sin orquestador intermedio.
+Toda la lógica de negocio vive en los métodos públicos del modelo
+(``account.move`` / ``account.payment``); este controller solo:
+
+  * traduce HTTP ↔ método de modelo (mismas rutas y contratos que tenía el BFF),
+  * autentica con IDENTIDAD REAL de Odoo (login por usuario → API key nativa
+    ``res.users.apikeys`` con scope propio; el Bearer se valida en cada request),
+  * opera como el usuario autenticado (``with_user(uid)``), NO como superusuario,
+    de modo que ACLs y reglas multi-compañía (aislamiento por RUC) aplican,
+  * resuelve CORS para el origen del SPA.
+
+Rutas bajo ``/ne/api/...`` para que React solo cambie su URL base.
+"""
+import base64
+import datetime
+import json
+import logging
+
+import psycopg2
+
+from odoo import http
+from odoo.exceptions import AccessDenied, AccessError, UserError, ValidationError
+from odoo.http import request
+
+_logger = logging.getLogger(__name__)
+
+# Scope PROPIO de las API keys de NE Express. NUNCA None ni 'rpc': así estas keys
+# autentican solo este API y NO habilitan XML-RPC/JSON-RPC general de Odoo.
+_SCOPE = 'l10n_pe_ne'
+_KEY_NAME = 'NE Express'
+# Vida de la API key emitida en el login (re-login al expirar). Configurable en
+# caliente vía el param de sistema 'l10n_pe_ne.token_ttl_hours'; este es el default.
+_TTL_HOURS_DEFAULT = 12.0
+
+# Códigos pg de concurrencia que el `retrying` de Odoo sabe reintentar: NO los
+# tragamos (serialization_failure, deadlock_detected) → se relanzan.
+_PG_RETRY = ('40001', '40P01')
+
+# Mensaje amigable (ES) para constraints conocidas; el resto cae al texto pg legible.
+_CONSTRAINT_MSGS = {
+    'account_move_unique_name_latam': 'Ya existe un comprobante con ese número para ese cliente (número duplicado).',
+}
+
+# Tipo de archivo descargable → (content-type, extensión de archivo).
+_FILE_KINDS = {
+    'pdf': ('application/pdf', 'pdf'),
+    'xml': ('application/xml', 'xml'),
+    'cdr': ('application/zip', 'zip'),
+}
+
+# Decoradores comunes: type=http (JSON crudo, no envoltura JSON-RPC),
+# auth=public (la BD se resuelve por dbfilter; la identidad real la da el Bearer),
+# cors=* (Odoo resuelve el preflight OPTIONS e incluye Authorization), csrf desactivado.
+_GET = dict(type='http', auth='public', methods=['GET'], cors='*', csrf=False, save_session=False)
+_POST = dict(type='http', auth='public', methods=['POST'], cors='*', csrf=False, save_session=False)
+_PUT = dict(type='http', auth='public', methods=['PUT'], cors='*', csrf=False, save_session=False)
+_DEL = dict(type='http', auth='public', methods=['DELETE'], cors='*', csrf=False, save_session=False)
+
+
+class L10nPeNeApi(http.Controller):
+
+    # ------------------------------------------------------------------ utils
+    def _bearer(self):
+        auth = request.httprequest.headers.get('Authorization', '') or ''
+        return auth[7:].strip() if auth[:7].lower() == 'bearer ' else auth.strip()
+
+    def _identify(self):
+        """Valida el Bearer contra una API key nativa de Odoo con nuestro scope.
+        Devuelve el uid (int) o None. Lookup timing-safe por índice (raw SQL)."""
+        token = self._bearer()
+        if not token:
+            return None
+        return request.env['res.users.apikeys'].sudo()._check_credentials(scope=_SCOPE, key=token)
+
+    def _ttl_hours(self):
+        """Vida (horas) de la API key del login, desde el param de sistema
+        'l10n_pe_ne.token_ttl_hours' (default 12). Valor inválido/≤0 → default."""
+        raw = request.env['ir.config_parameter'].sudo().get_param(
+            'l10n_pe_ne.token_ttl_hours', _TTL_HOURS_DEFAULT)
+        try:
+            h = float(raw)
+        except (TypeError, ValueError):
+            h = _TTL_HOURS_DEFAULT
+        return h if h > 0 else _TTL_HOURS_DEFAULT
+
+    def _user(self, uid):
+        return request.env['res.users'].sudo().browse(uid)
+
+    def _move(self, uid):
+        u = self._user(uid)
+        return request.env['account.move'].with_user(uid).with_company(u.company_id)
+
+    def _payment(self, uid):
+        u = self._user(uid)
+        return request.env['account.payment'].with_user(uid).with_company(u.company_id)
+
+    def _gasto(self, uid):
+        u = self._user(uid)
+        return request.env['l10n_pe_ne.gasto'].with_user(uid).with_company(u.company_id)
+
+    def _body(self):
+        raw = request.httprequest.get_data() or b''
+        return json.loads(raw) if raw else {}
+
+    def _json(self, data, status=200):
+        return request.make_json_response(data, status=status)
+
+    def _err(self, exc, status=400):
+        return request.make_json_response({'message': str(exc) or 'Error en Odoo'}, status=status)
+
+    def _unauth(self):
+        return self._err('No autenticado o sesión expirada', status=401)
+
+    def _run(self, func):
+        """Ejecuta una operación que ESCRIBE y devuelve el resultado como JSON.
+
+        Fuerza el flush para que cualquier error diferido (constraints de BD,
+        validaciones) aflore AQUÍ y no en el commit final de Odoo —que daría un
+        500 HTML imposible de leer para React—. Traduce el error a un JSON 400
+        con mensaje legible (vía _fail), dejando la transacción limpia."""
+        try:
+            res = func()
+            request.env.cr.flush()  # surface deferred DB errors within this try
+            return self._json(res)
+        except Exception as e:  # noqa: BLE001 - el error se reenvía como JSON al cliente
+            return self._fail(e)
+
+    def _fail(self, e):
+        # Errores de concurrencia: relanzar para que el retrying de Odoo reintente.
+        if isinstance(e, psycopg2.OperationalError) and getattr(e, 'pgcode', None) in _PG_RETRY:
+            raise e
+        # Revertir para dejar la transacción limpia (si no, el commit final de Odoo
+        # volvería a fallar con 500) y responder con un mensaje legible.
+        request.env.cr.rollback()
+        # Cross-tenant / sin permiso: la regla multi-compañía nativa niega el acceso.
+        if isinstance(e, AccessError):
+            _logger.info('NE acceso denegado: %s', str(e).splitlines()[0] if str(e) else e)
+            return self._err('No tienes acceso a este recurso (puede pertenecer a otra empresa).', status=403)
+        if isinstance(e, (UserError, ValidationError)):
+            msg = (e.args[0] if e.args else str(e)) or 'Operación no válida'
+        elif isinstance(e, psycopg2.IntegrityError):
+            diag = getattr(e, 'diag', None)
+            cname = (getattr(diag, 'constraint_name', '') or '').strip()
+            if cname in _CONSTRAINT_MSGS:
+                msg = _CONSTRAINT_MSGS[cname]
+            else:
+                primary = (getattr(diag, 'message_primary', '') or '').strip()
+                detail = (getattr(diag, 'message_detail', '') or '').strip()
+                msg = 'No se pudo guardar: ' + (primary or 'viola una restricción de la base de datos')
+                if detail:
+                    msg += ' — ' + detail
+        else:
+            msg = str(e) or 'Error en Odoo'
+        _logger.warning('NE op falló: %s', msg)
+        return self._err(msg)
+
+    def _serve_file(self, uid, model, rec_id, kind, method, prefix):
+        ct_ext = _FILE_KINDS.get(kind)
+        if not ct_ext:
+            return self._err('Tipo de archivo no soportado', status=404)
+        u = self._user(uid)
+        rec = request.env[model].with_user(uid).with_company(u.company_id).browse(int(rec_id))
+        files = getattr(rec, method)() or {}
+        b64 = files.get(kind)
+        if not b64:
+            return self._err(f'El {prefix} {rec_id} no tiene {kind}', status=404)
+        ct, ext = ct_ext
+        return request.make_response(base64.b64decode(b64), headers=[
+            ('Content-Type', ct),
+            ('Content-Disposition', f'attachment; filename="{prefix}-{rec_id}.{ext}"'),
+        ])
+
+    # -------------------------------------------------------------- auth/sesión
+    @http.route('/ne/api/login', **_POST)
+    def login(self, **kw):
+        """Login por usuario+contraseña de Odoo → mintea una API key nativa (scope
+        propio, con expiración) y la devuelve en plano UNA vez. React la usará como
+        Bearer. No se crean cookies ni estado de sesión."""
+        try:
+            body = self._body()
+            login = (body.get('login') or '').strip()
+            password = body.get('password') or ''
+            if not login or not password:
+                return self._err('Indica usuario y contraseña', status=400)
+            try:
+                auth = request.env['res.users'].authenticate(
+                    {'type': 'password', 'login': login, 'password': password},
+                    {'interactive': False})
+            except AccessDenied:
+                return self._err('Credenciales inválidas', status=401)
+            uid = auth['uid'] if isinstance(auth, dict) else auth
+            if not uid:
+                return self._err('Credenciales inválidas', status=401)
+            user = self._user(uid)
+            exp = datetime.datetime.now() + datetime.timedelta(hours=self._ttl_hours())
+            # with_user(uid): la key se ata al uid real. sudo(): permite fijar el TTL
+            # (is_system por su) sin depender del límite del grupo del usuario.
+            token = request.env['res.users.apikeys'].with_user(uid).sudo()._generate(
+                _SCOPE, f'{_KEY_NAME} ({exp:%Y-%m-%d %H:%M})', exp)
+            return self._json({
+                'token': token,
+                'user': user.name,
+                'login': user.login,
+                'companyId': user.company_id.id,
+                'company': user.company_id.name,
+                'ruc': user.company_id.vat or '',
+                'isAdmin': user.has_group('base.group_system'),
+                'expires': exp.isoformat(),
+            })
+        except Exception as e:  # noqa: BLE001
+            _logger.exception('NE login error')
+            return self._err(e)
+
+    @http.route('/ne/api/whoami', **_GET)
+    def whoami(self, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        user = self._user(uid)
+        return self._json({
+            'user': user.name,
+            'login': user.login,
+            'companyId': user.company_id.id,
+            'company': user.company_id.name,
+            'ruc': user.company_id.vat or '',
+            'isAdmin': user.has_group('base.group_system'),
+        })
+
+    @http.route('/ne/api/logout', **_POST)
+    def logout(self, **kw):
+        """Revoca la API key del Bearer (borra la fila → revocación real)."""
+        token = self._bearer()
+        if token:
+            try:
+                request.env['res.users.apikeys'].sudo().revoke(token)
+            except Exception:  # noqa: BLE001 - token ya inválido/expirado: idempotente
+                pass
+        return self._json({'ok': True})
+
+    # ----------------------------------------------------------------- admin
+    @http.route('/ne/api/admin/tenants', **_GET)
+    def list_tenants(self, **kw):
+        """Lista los emisores/tenants (compañías + sus usuarios). Solo admin."""
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        if not self._user(uid).has_group('base.group_system'):
+            return self._err('Solo un administrador puede ver los emisores.', status=403)
+        try:
+            return self._json(request.env['res.company'].with_user(uid).l10n_pe_ne_list_tenants())
+        except Exception as e:  # noqa: BLE001
+            return self._fail(e)
+
+    @http.route('/ne/api/admin/tenants', **_POST)
+    def provision_tenant(self, **kw):
+        """Aprovisiona un emisor/tenant: compañía por RUC + usuario emisor.
+        Solo para administradores (base.group_system); un emisor normal → 403."""
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        if not self._user(uid).has_group('base.group_system'):
+            return self._err('Solo un administrador puede aprovisionar emisores.', status=403)
+        return self._run(lambda: request.env['res.company'].with_user(uid).l10n_pe_ne_provision_tenant(self._body()))
+
+    # ---------------------------------------------------------------- config
+    @http.route('/ne/api/config', **_GET)
+    def config(self, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        try:
+            return self._json(self._move(uid).l10n_pe_ne_config())
+        except Exception as e:  # noqa: BLE001
+            return self._fail(e)
+
+    @http.route('/ne/api/series', **_GET)
+    def series(self, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        try:
+            return self._json(self._move(uid).l10n_pe_ne_series())
+        except Exception as e:  # noqa: BLE001
+            return self._fail(e)
+
+    # ---------------------------------------------------------- datos negocio
+    @http.route('/ne/api/negocio', **_GET)
+    def negocio(self, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        try:
+            return self._json(self._move(uid).l10n_pe_ne_negocio())
+        except Exception as e:  # noqa: BLE001
+            return self._fail(e)
+
+    @http.route('/ne/api/negocio', **_PUT)
+    def update_negocio(self, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(lambda: self._move(uid).l10n_pe_ne_update_negocio(self._body()))
+
+    @http.route('/ne/api/distritos', **_GET)
+    def distritos(self, q=None, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        try:
+            return self._json(self._move(uid).l10n_pe_ne_buscar_distrito(q=q or None))
+        except Exception as e:  # noqa: BLE001
+            return self._fail(e)
+
+    @http.route('/ne/api/resumen', **_GET)
+    def resumen(self, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        try:
+            return self._json(self._move(uid).l10n_pe_ne_resumen())
+        except Exception as e:  # noqa: BLE001
+            return self._fail(e)
+
+    # --------------------------------------------------------------- reportes
+    @http.route('/ne/api/reportes/ple-ventas', **_GET)
+    def ple_ventas(self, periodo=None, **kw):
+        """PLE 14.1 (Registro de Ventas) del periodo YYYYMM. Devuelve
+        {filename, contentB64, count, total} — el txt que el contador sube a SUNAT."""
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        try:
+            return self._json(self._move(uid).l10n_pe_ne_ple_ventas(periodo))
+        except Exception as e:  # noqa: BLE001
+            return self._fail(e)
+
+    @http.route('/ne/api/reportes/rvie-reemplazo', **_GET)
+    def rvie_reemplazo(self, periodo=None, **kw):
+        """SIRE RVIE — archivo de reemplazo de la propuesta (ZIP) del periodo YYYYMM."""
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        try:
+            return self._json(self._move(uid).l10n_pe_ne_rvie_reemplazo(periodo))
+        except Exception as e:  # noqa: BLE001
+            return self._fail(e)
+
+    @http.route('/ne/api/reportes/dashboard', **_GET)
+    def dashboard(self, periodo=None, **kw):
+        """Datos del dashboard: serie diaria de ventas + desglose por tipo + KPIs."""
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        try:
+            return self._json(self._move(uid).l10n_pe_ne_dashboard(periodo))
+        except Exception as e:  # noqa: BLE001
+            return self._fail(e)
+
+    @http.route('/ne/api/reportes/ventas', **_GET)
+    def reporte_ventas(self, periodo=None, **kw):
+        """Reportes de ventas: resumen, hoy, top por producto y por cliente."""
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        try:
+            return self._json(self._move(uid).l10n_pe_ne_reporte_ventas(periodo))
+        except Exception as e:  # noqa: BLE001
+            return self._fail(e)
+
+    @http.route('/ne/api/reportes/export', **_GET)
+    def export(self, tipo='ventas', periodo=None, **kw):
+        """Centro de descargas: exporta ventas|productos|clientes a XLSX (base64)."""
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        try:
+            return self._json(self._move(uid).l10n_pe_ne_export(tipo, periodo))
+        except Exception as e:  # noqa: BLE001
+            return self._fail(e)
+
+    # ----------------------------------------------------------- comprobantes
+    @http.route('/ne/api/comprobantes', **_GET)
+    def list_comprobantes(self, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        try:
+            return self._json(self._move(uid).l10n_pe_ne_quick_list(
+                query=kw.get('q') or None,
+                desde=kw.get('desde') or None,
+                hasta=kw.get('hasta') or None,
+            ))
+        except Exception as e:  # noqa: BLE001
+            return self._fail(e)
+
+    @http.route('/ne/api/comprobantes/<int:rec_id>/detalle', **_GET)
+    def comprobante_detalle(self, rec_id, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        try:
+            rec = self._move(uid).browse(rec_id).exists()
+            if not rec:
+                return self._err('Comprobante no encontrado', 404)
+            return self._json(rec.l10n_pe_ne_comprobante_detalle())
+        except Exception as e:  # noqa: BLE001
+            return self._fail(e)
+
+    @http.route('/ne/api/emitir', **_POST)
+    def emitir(self, **kw):
+        """Emite un comprobante. Rutea por tipoDoc: 20/40 son otro-CPE
+        (account.payment, retención/percepción); el resto son account.move."""
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+
+        def op():
+            payload = self._body()
+            tipo = payload.get('tipoDoc')
+            if tipo == '20':
+                return self._payment(uid).l10n_pe_ne_quick_retencion(payload)
+            if tipo == '40':
+                return self._payment(uid).l10n_pe_ne_quick_percepcion(payload)
+            return self._move(uid).l10n_pe_ne_quick_emit(payload)
+        return self._run(op)
+
+    @http.route('/ne/api/anular', **_POST)
+    def anular(self, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(lambda: self._move(uid).l10n_pe_ne_quick_anular(self._body()))
+
+    @http.route('/ne/api/comprobantes/<int:rec_id>/<string:kind>', **_GET)
+    def file(self, rec_id, kind, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        try:
+            return self._serve_file(uid, 'account.move', rec_id, kind, 'l10n_pe_ne_get_files', 'comprobante')
+        except Exception as e:  # noqa: BLE001
+            return self._fail(e)
+
+    @http.route('/ne/api/otrocpe/<int:rec_id>/<string:kind>', **_GET)
+    def otrocpe_file(self, rec_id, kind, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        try:
+            return self._serve_file(uid, 'account.payment', rec_id, kind, 'l10n_pe_ne_get_files', 'otrocpe')
+        except Exception as e:  # noqa: BLE001
+            return self._fail(e)
+
+    @http.route('/ne/api/anulacion/<int:rec_id>/cdr', **_GET)
+    def anulacion_cdr(self, rec_id, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        try:
+            return self._serve_file(uid, 'account.move', rec_id, 'cdr', 'l10n_pe_ne_get_baja_files', 'anulacion')
+        except Exception as e:  # noqa: BLE001
+            return self._fail(e)
+
+    # --------------------------------------------------------------- clientes
+    @http.route('/ne/api/clientes', **_GET)
+    def list_clientes(self, q=None, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        try:
+            return self._json(self._move(uid).l10n_pe_ne_list_clientes(query=q or None, limit=50))
+        except Exception as e:  # noqa: BLE001
+            return self._fail(e)
+
+    @http.route('/ne/api/clientes', **_POST)
+    def create_cliente(self, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(lambda: self._move(uid).l10n_pe_ne_create_cliente(self._body()))
+
+    @http.route('/ne/api/clientes/<int:rec_id>', **_PUT)
+    def update_cliente(self, rec_id, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(lambda: self._move(uid).l10n_pe_ne_update_cliente(dict(self._body(), id=int(rec_id))))
+
+    @http.route('/ne/api/clientes/<int:rec_id>', **_DEL)
+    def delete_cliente(self, rec_id, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(lambda: self._move(uid).l10n_pe_ne_delete_cliente(int(rec_id)))
+
+    # -------------------------------------------------------------- productos
+    @http.route('/ne/api/productos', **_GET)
+    def list_productos(self, q=None, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        try:
+            return self._json(self._move(uid).l10n_pe_ne_list_productos(query=q or None, limit=50))
+        except Exception as e:  # noqa: BLE001
+            return self._fail(e)
+
+    @http.route('/ne/api/productos/barcode/<string:code>', **_GET)
+    def producto_barcode(self, code, **kw):
+        """Resuelve un producto por código de barras escaneado (POS). 404 si no hay match."""
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        try:
+            prod = self._move(uid).l10n_pe_ne_producto_por_barcode(code)
+            if not prod:
+                return self._err('Producto no encontrado para ese código', 404)
+            return self._json(prod)
+        except Exception as e:  # noqa: BLE001
+            return self._fail(e)
+
+    @http.route('/ne/api/productos', **_POST)
+    def create_producto(self, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(lambda: self._move(uid).l10n_pe_ne_create_producto(self._body()))
+
+    @http.route('/ne/api/productos/<int:rec_id>', **_PUT)
+    def update_producto(self, rec_id, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(lambda: self._move(uid).l10n_pe_ne_update_producto(dict(self._body(), id=int(rec_id))))
+
+    @http.route('/ne/api/productos/<int:rec_id>', **_DEL)
+    def delete_producto(self, rec_id, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(lambda: self._move(uid).l10n_pe_ne_delete_producto(int(rec_id)))
+
+    # ----------------------------------------------------------------- gastos
+    @http.route('/ne/api/gastos', **_GET)
+    def list_gastos(self, q=None, periodo=None, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        try:
+            return self._json(self._gasto(uid).l10n_pe_ne_list_gastos(query=q or None, periodo=periodo or None))
+        except Exception as e:  # noqa: BLE001
+            return self._fail(e)
+
+    @http.route('/ne/api/gastos', **_POST)
+    def create_gasto(self, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(lambda: self._gasto(uid).l10n_pe_ne_create_gasto(self._body()))
+
+    @http.route('/ne/api/gastos/<int:rec_id>', **_PUT)
+    def update_gasto(self, rec_id, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(lambda: self._gasto(uid).l10n_pe_ne_update_gasto(dict(self._body(), id=int(rec_id))))
+
+    @http.route('/ne/api/gastos/<int:rec_id>', **_DEL)
+    def delete_gasto(self, rec_id, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(lambda: self._gasto(uid).l10n_pe_ne_delete_gasto(int(rec_id)))
+
+    # ----------------------------------------------------------------- compras
+    @http.route('/ne/api/compras', **_GET)
+    def list_compras(self, q=None, periodo=None, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        try:
+            return self._json(self._move(uid).l10n_pe_ne_list_compras(query=q or None, periodo=periodo or None))
+        except Exception as e:  # noqa: BLE001
+            return self._fail(e)
+
+    @http.route('/ne/api/compras', **_POST)
+    def create_compra(self, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(lambda: self._move(uid).l10n_pe_ne_create_compra(self._body()))
+
+    @http.route('/ne/api/compras/<int:rec_id>', **_DEL)
+    def delete_compra(self, rec_id, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(lambda: self._move(uid).l10n_pe_ne_delete_compra(int(rec_id)))

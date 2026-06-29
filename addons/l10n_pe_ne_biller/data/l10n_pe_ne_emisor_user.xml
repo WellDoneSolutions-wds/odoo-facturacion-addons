@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <!--
+        Usuario emisor de demostración para NE Express. Identidad real (NO admin):
+        sus permisos salen del grupo 'Emisor NE Express'. Sirve para que React
+        haga login y opere con ACLs/reglas aplicadas. noupdate: no se pisa si el
+        usuario lo edita. En multi-RUC se daría de alta 1 usuario por emisor.
+    -->
+    <data noupdate="1">
+        <!--
+            TTL (horas) de la API key que emite el login de NE Express. Editable en
+            caliente desde Ajustes → Técnico → Parámetros del sistema, sin redeploy.
+            noupdate: si lo cambias, un -u del módulo no lo pisa.
+        -->
+        <record id="param_ne_token_ttl_hours" model="ir.config_parameter">
+            <field name="key">l10n_pe_ne.token_ttl_hours</field>
+            <field name="value">12</field>
+        </record>
+
+        <record id="user_ne_emisor_demo" model="res.users">
+            <field name="name">Emisor NE Express</field>
+            <field name="login">emisor</field>
+            <field name="password">emisor-ne-2026</field>
+            <field name="company_id" ref="base.main_company"/>
+            <field name="company_ids" eval="[(4, ref('base.main_company'))]"/>
+            <field name="group_ids" eval="[(4, ref('group_l10n_pe_ne_emisor'))]"/>
+        </record>
+    </data>
+</odoo>

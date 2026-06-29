@@ -97,8 +97,10 @@ class TestBillerAffectation(TransactionCase):
         self.assertEqual(payload['detalle'][0]['codUnidadMedida'], 'KGM')
 
     def test_icbper(self):
-        """Línea con IGV + ICBPER (bolsa): el IGV se separa del ICBPER, y el ICBPER va por sus
-        propios campos (codTriIcbper) y suma a sumImpVenta pero no a sumTotTributos/sumPrecioVenta."""
+        """Línea con IGV + ICBPER (bolsa): el IGV se separa del ICBPER en la línea, y el ICBPER va por
+        sus propios campos (codTriIcbper). En CABECERA el ICBPER SÍ suma a sumTotTributos, sumPrecioVenta
+        (TaxInclusive) e sumImpVenta, y se emite como su propio TaxSubtotal 7152 — verificado aceptado por
+        SUNAT (sin esto: rechazo 3279/3280)."""
         icbper_tax = self.env['account.tax'].create({
             'name': 'ICBPER', 'type_tax_use': 'sale', 'amount_type': 'fixed', 'amount': 0.50,
             'l10n_pe_edi_tax_code': '7152', 'tax_group_id': self.igv.tax_group_id.id})
@@ -120,11 +122,12 @@ class TestBillerAffectation(TransactionCase):
         self.assertEqual(d['ctdBolsasTriIcbperItem'], '1')
         self.assertEqual(d['mtoTriIcbperUnidad'], '0.50')
         self.assertEqual(d['mtoTriIcbperItem'], '0.50')
-        # Cabecera: el ICBPER no entra en tributos ni en precio; sí en el importe a cobrar.
-        self.assertEqual(payload['cabecera']['sumTotTributos'], '90.00')
-        self.assertEqual(payload['cabecera']['sumPrecioVenta'], '590.00')
+        # Cabecera: el ICBPER entra en el total de tributos, el precio de venta y el importe a cobrar,
+        # y aparece como su propio TaxSubtotal (regla SUNAT 3279/3280).
+        self.assertEqual(payload['cabecera']['sumTotTributos'], '90.50')   # IGV 90 + ICBPER 0.50
+        self.assertEqual(payload['cabecera']['sumPrecioVenta'], '590.50')  # valor + IGV + ICBPER
         self.assertEqual(payload['cabecera']['sumImpVenta'], '590.50')
-        self.assertEqual({t['ideTributo'] for t in payload['tributos']}, {'1000'})
+        self.assertEqual({t['ideTributo'] for t in payload['tributos']}, {'1000', '7152'})
 
     def test_isc(self):
         """Línea con ISC (al valor 10%) + IGV: el IGV se computa sobre valor+ISC; el ISC va por sus

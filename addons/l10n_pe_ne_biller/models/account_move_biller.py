@@ -238,12 +238,42 @@ class AccountMove(models.Model):
         return block or None
 
     def _l10n_pe_dato_pago(self):
+        moneda = self.currency_id.name or "PEN"
+        if self.l10n_pe_ne_forma_pago == 'Credito':
+            return {"formaPago": "Credito",
+                    "mtoNetoPendientePago": self._l10n_pe_fmt(self._l10n_pe_credito_pendiente()),
+                    "tipMonedaMtoNetoPendientePago": moneda}
         dato = {"formaPago": "Contado"}
         if self.l10n_pe_ne_detraccion:
             # Operación al contado con detracción: se declara el neto pendiente de pago.
             dato["mtoNetoPendientePago"] = self._l10n_pe_fmt(self.amount_total)
-            dato["tipMonedaMtoNetoPendientePago"] = self.currency_id.name or "PEN"
+            dato["tipMonedaMtoNetoPendientePago"] = moneda
         return dato
+
+    def _l10n_pe_credito_pendiente(self):
+        """Monto neto pendiente del crédito = suma de cuotas; si no hay, el total."""
+        s = sum(float(c.get('monto') or 0) for c in (self.l10n_pe_ne_cuotas or []))
+        return s if s > 0 else (self.amount_total or 0.0)
+
+    def _l10n_pe_detalle_pago(self):
+        """detallePago (cuotas) para crédito: usa las cuotas guardadas o una = total."""
+        moneda = self.currency_id.name or "PEN"
+        out = [{"mtoCuotaPago": self._l10n_pe_fmt(float(c.get('monto') or 0)),
+                "fecCuotaPago": c.get('fecha') or '',
+                "tipMonedaCuotaPago": moneda}
+               for c in (self.l10n_pe_ne_cuotas or []) if c.get('fecha') and float(c.get('monto') or 0) > 0]
+        if not out:
+            fecha = self.invoice_date_due or self.invoice_date
+            out = [{"mtoCuotaPago": self._l10n_pe_fmt(self.amount_total),
+                    "fecCuotaPago": fecha.strftime("%Y-%m-%d") if fecha else "",
+                    "tipMonedaCuotaPago": moneda}]
+        return out
+
+    l10n_pe_ne_forma_pago = fields.Selection(
+        [('Contado', 'Contado'), ('Credito', 'Crédito')], default='Contado', copy=False,
+        string='Forma de pago', help="Forma de pago SUNAT (cac:PaymentTerms). 'Crédito' emite cuotas.")
+    l10n_pe_ne_cuotas = fields.Json(string='Cuotas de crédito', copy=False)          # [{'fecha','monto'}]
+    l10n_pe_ne_medios_pago = fields.Json(string='Medios de pago (POS)', copy=False)  # [{'medio','monto'}]
 
     l10n_pe_motivo_code = fields.Char(
         string='Cód. motivo NC/ND', default='01', copy=False,
@@ -441,6 +471,14 @@ class AccountMove(models.Model):
                 "ideTributo": "2000", "nomTributo": "ISC", "codTipTributo": "EXC",
                 "codCatTributo": "S", "mtoBaseImponible": fmt(isc_base), "mtoTributo": fmt(isc_total),
             })
+        # ICBPER (7152): TaxSubtotal de cabecera SIN TaxableAmount (el FTL lo omite para 7152), solo el
+        # monto. Necesario para que TaxInclusive = LineExt + TaxTotal (regla SUNAT 3279).
+        icbper_total = self._l10n_pe_total_icbper()
+        if icbper_total:
+            tributos.append({
+                "ideTributo": "7152", "nomTributo": "ICBPER", "codTipTributo": "OTH",
+                "codCatTributo": "S", "mtoBaseImponible": "0.00", "mtoTributo": fmt(icbper_total),
+            })
         return tributos
 
     def _l10n_pe_leyendas(self):
@@ -487,9 +525,10 @@ class AccountMove(models.Model):
     def _l10n_pe_cabecera(self):
         fmt = self._l10n_pe_fmt
         partner = self.partner_id
-        # El ICBPER no entra en el total de tributos ni en el precio de venta; sí en el importe a
-        # cobrar (sumImpVenta). amount_tax/amount_total de Odoo incluyen el ICBPER, así que lo restamos.
-        icbper = self._l10n_pe_total_icbper()
+        # El ICBPER (cat. 05 = 7152) SÍ entra en el total de tributos (sumTotTributos), en el precio de
+        # venta (TaxInclusiveAmount) y en el importe a cobrar — regla SUNAT 3279/3280 (ref. enterprise:
+        # ICBPER es tributo 'OTH', no allowance-charge). Ademas se emite como su propio TaxSubtotal de
+        # cabecera (ver _l10n_pe_tributos). amount_tax/amount_total de Odoo ya lo incluyen.
         # Anticipo aplicado: el IGV de cabecera se reduce por el IGV del anticipo; el importe a cobrar
         # (PayableAmount) = precio de venta completo − total del anticipo (que va como PrepaidAmount).
         ant = self._l10n_pe_anticipo()
@@ -513,9 +552,12 @@ class AccountMove(models.Model):
             "tipMoneda": self.currency_id.name or "PEN",
             # El IGV teórico del gratuito NO se cobra: NO entra en el total de tributos de cabecera
             # (regla 4301: el TaxAmount de cabecera excluye el 9996). El 9996 va solo como TaxSubtotal.
-            "sumTotTributos": fmt(self.amount_tax - icbper - anticipo_igv),
+            "sumTotTributos": fmt(self.amount_tax - anticipo_igv),
             "sumTotValVenta": fmt(self.amount_untaxed - grat_base),
-            "sumPrecioVenta": fmt(self.amount_total - icbper - grat_base),
+            # TaxInclusiveAmount: INCLUYE el ICBPER (igual que la ref. enterprise: PayableAmount =
+            # TaxInclusive − anticipo, ambos con el ICBPER). Excluirlo de aquí pero incluirlo en
+            # sumImpVenta desbalancea el comprobante → SUNAT Client.3280.
+            "sumPrecioVenta": fmt(self.amount_total - grat_base),
             "sumImpVenta": fmt(self.amount_total - anticipo_total - grat_base),
             "sumDescTotal": "0.00",
             "sumOtrosCargos": "0.00",
@@ -598,6 +640,8 @@ class AccountMove(models.Model):
             "variablesGlobales": self._l10n_pe_variables_globales(),
             "leyendas": self._l10n_pe_leyendas(),
         }
+        if self.l10n_pe_ne_forma_pago == 'Credito':
+            req["detallePago"] = self._l10n_pe_detalle_pago()
         relacionados = self._l10n_pe_relacionados()
         if relacionados:
             req["relacionados"] = relacionados
@@ -754,6 +798,1132 @@ class AccountMove(models.Model):
                 move.l10n_pe_biller_state = 'rechazado'
                 move.l10n_pe_biller_message = (resp.text or '')[:2000]
         return True
+
+    # ------------------------------------------- API ligera (BFF NE Express, /json/2)
+    @api.model
+    def l10n_pe_ne_quick_emit(self, payload):
+        """Emite un comprobante desde un payload PLANO (sin contexto contable previo): crea/halla el
+        cliente, arma el account.move con sus líneas (impuesto por código cat-05), lo postea y lo envía a
+        SUNAT vía el facturador. Devuelve el resultado. Lo consume el BFF stateless por /json/2 — así la
+        lógica de negocio queda en Odoo (fuente única) y el dato vive en Odoo (upgrade sin migración)."""
+        company = self.env.company
+        journal = self.env['account.journal'].search(
+            [('type', '=', 'sale'), ('company_id', '=', company.id)], limit=1)
+        if not journal:
+            raise UserError(_("No hay diario de ventas configurado para la compañía."))
+        tipo = payload.get('tipoDoc') or '01'
+        # NC (07) / ND (08): resuelven el documento afectado (mismo cliente, serie derivada del original).
+        origin = None
+        if tipo in ('07', '08'):
+            origin = self._l10n_pe_ne_quick_origin(payload.get('docAfectado') or payload.get('afectado'))
+        if origin is not None:
+            partner = origin.partner_id
+        else:
+            partner = self._l10n_pe_ne_quick_partner(payload.get('cliente') or {})
+        # Descuento global (% sobre toda la operación): se prorratea a cada línea como descuento que
+        # afecta la base (cat. 53 código 00), combinándose con el descuento propio de la línea. Produce
+        # los mismos totales que un descuento global y reusa la emisión de descuento por ítem ya validada.
+        g = float(payload.get('descuentoGlobal') or 0)
+        lines = []
+        for ln in payload.get('lineas') or []:
+            tax = self._l10n_pe_ne_tax_by_code(ln.get('taxCode'))
+            taxes = tax
+            if ln.get('icbper'):
+                # Bolsa plástica: el ICBPER (monto fijo por unidad) se SUMA al IGV de la línea.
+                taxes = tax + self._l10n_pe_ne_ensure_icbper_tax()
+            prod = self._l10n_pe_ne_quick_product(ln, tax)
+            d = float(ln.get('descuento') or 0)
+            disc = round(100.0 * (1 - (1 - d / 100.0) * (1 - g / 100.0)), 6) if g else d
+            lvals = {
+                'name': ln.get('descripcion') or (prod.name if prod else 'ITEM'),
+                'quantity': float(ln.get('cantidad') or 1),
+                'price_unit': float(ln.get('precioUnitario') or 0),
+                'discount': disc,
+                'tax_ids': [(6, 0, taxes.ids if taxes else [])],
+            }
+            if prod:
+                lvals['product_id'] = prod.id
+            lines.append((0, 0, lvals))
+        # Otros cargos (que afectan la base imponible): se agregan como una línea gravada adicional, así
+        # suben gravada/IGV/total con la maquinaria de líneas ya validada (no se prorratea el desc. global).
+        oc = float(payload.get('otrosCargos') or 0)
+        if oc > 0:
+            lines.append((0, 0, {
+                'name': payload.get('otrosCargosDesc') or 'OTROS CARGOS',
+                'quantity': 1,
+                'price_unit': oc,
+                'tax_ids': [(6, 0, self._l10n_pe_ne_tax_by_code('1000').ids)],
+            }))
+        vals = {
+            'move_type': 'out_refund' if tipo == '07' else 'out_invoice',
+            'partner_id': partner.id,
+            'journal_id': journal.id,
+            'invoice_date': payload.get('fechaEmision') or fields.Date.context_today(self),
+            'l10n_pe_serie': payload.get('serie') or self._l10n_pe_ne_default_serie(tipo, origin),
+            'invoice_line_ids': lines,
+        }
+        moneda = self._l10n_pe_ne_quick_currency(payload.get('moneda'))
+        if moneda:
+            vals['currency_id'] = moneda.id
+        if origin is not None:
+            vals['l10n_pe_motivo_code'] = str(payload.get('motivo') or ('01' if tipo == '07' else '02'))
+            if tipo == '07':
+                vals['reversed_entry_id'] = origin.id
+            else:
+                vals['debit_origin_id'] = origin.id
+        if payload.get('correlativo'):
+            vals['l10n_pe_correlativo'] = str(payload['correlativo'])
+        move = self.env['account.move'].create(vals)
+        self._l10n_pe_ne_quick_flags(move, payload)
+        move.action_post()
+        move.action_l10n_pe_send_to_biller()
+        return move.l10n_pe_ne_quick_result()
+
+    def _l10n_pe_ne_default_serie(self, tipo, origin=None):
+        """Serie por defecto: F001/B001 para factura/boleta; FC01/FD01 (o BC01/BD01 si el afectado es
+        boleta) para NC/ND, derivando la familia del documento original."""
+        if tipo == '03':
+            return 'B001'
+        if tipo in ('07', '08'):
+            base = 'B' if origin is not None and (origin.l10n_pe_serie or 'F')[:1].upper() == 'B' else 'F'
+            return base + ('C01' if tipo == '07' else 'D01')
+        return 'F001'
+
+    def _l10n_pe_ne_quick_currency(self, moneda):
+        """Moneda del comprobante: PEN por defecto; USD si el payload lo pide
+        (USD/DOLARES/$). Activa la moneda si está inactiva. El builder ya emite
+        tipMoneda desde currency_id."""
+        code = (moneda or 'PEN').strip().upper()
+        code = 'USD' if code in ('USD', 'DOLARES', 'DÓLARES', 'DOLAR', 'US$', '$') else 'PEN'
+        cur = self.env['res.currency'].with_context(active_test=False).search([('name', '=', code)], limit=1)
+        if cur and not cur.active:
+            cur.sudo().active = True
+        return cur
+
+    def _l10n_pe_ne_quick_origin(self, ref):
+        """Resuelve el account.move afectado por una NC/ND: por id (lo natural, el emit devuelve 'id') o
+        por serie+correlativo. Lanza si no lo encuentra."""
+        ref = ref or {}
+        Move = self.env['account.move']
+        if ref.get('id'):
+            m = Move.browse(int(ref['id'])).exists()
+            if m:
+                return m
+        serie = (ref.get('serie') or '').strip()
+        corr = str(ref.get('correlativo') or '').strip().lstrip('0')
+        if serie and corr:
+            cands = Move.search(
+                [('l10n_pe_serie', '=', serie), ('move_type', 'in', ('out_invoice', 'out_refund'))],
+                order='id desc', limit=300)
+            for m in cands:
+                _s, c = m._l10n_pe_serie_correlativo()
+                if (c or '').lstrip('0') == corr:
+                    return m
+        raise UserError(_("No se encontró el documento afectado (envía docAfectado.id o serie+correlativo)."))
+
+    @api.model
+    def l10n_pe_ne_quick_anular(self, payload):
+        """Anula un comprobante ya emitido a SUNAT: boletas por Resumen Diario (RC, tipEstado 3),
+        facturas/NC/ND por Comunicación de Baja (RA). payload: {id | serie+correlativo, motivo}.
+        Lo consume el BFF por /json/2."""
+        payload = payload or {}
+        move = self._l10n_pe_ne_quick_origin(payload.get('comprobante') or payload)
+        move.l10n_pe_ne_baja_motivo = (payload.get('motivo') or '').strip() or 'Anulacion de la operacion'
+        move.action_l10n_pe_send_baja()
+        return move._l10n_pe_ne_anular_result()
+
+    def _l10n_pe_ne_anular_result(self):
+        self.ensure_one()
+        tipo, serie, corr = self._l10n_pe_baja_identidad()
+        msg = self.l10n_pe_biller_message or ''
+        m = re.search(r'ResponseCode (\d+)', msg)
+        anulado = self.l10n_pe_biller_state == 'anulado'
+        return {
+            'id': self.id,
+            'tipoAnulacion': 'RC' if tipo == '03' else 'RA',
+            'docAnulacion': self.l10n_pe_ne_baja_doc or '',
+            'comprobante': '%s-%s' % (serie, (corr or '').zfill(8)),
+            'estado': self.l10n_pe_biller_state,
+            'anulado': anulado,
+            'responseCode': m.group(1) if m else ('0' if anulado else ''),
+            'mensaje': msg,
+        }
+
+    def l10n_pe_ne_get_baja_files(self):
+        """{cdr} base64 de la anulación (RA/RC), para que el BFF lo sirva."""
+        self.ensure_one()
+        out = {}
+        att = self.l10n_pe_ne_baja_cdr
+        if att:
+            v = att.datas
+            out['cdr'] = v.decode('ascii') if isinstance(v, (bytes, bytearray)) else (v or '')
+        return out
+
+    def _l10n_pe_ne_quick_partner(self, c):
+        num = (c.get('numDoc') or '').strip()
+        Partner = self.env['res.partner']
+        if num:
+            found = Partner.search([('vat', '=', num)], limit=1)
+            if found:
+                return found
+        # company_id del emisor actual: aísla el cliente por RUC (multi-tenant). Sin
+        # esto quedaría company_id=False = visible/editable por TODOS los tenants.
+        vals = {'name': c.get('razonSocial') or 'CONSUMIDOR FINAL', 'customer_rank': 1,
+                'company_id': self.env.company.id}
+        if num:
+            vals['vat'] = num
+            t = self.env['l10n_latam.identification.type'].search(
+                [('l10n_pe_vat_code', '=', c.get('tipoDoc') or '6')], limit=1)
+            if t:
+                vals['l10n_latam_identification_type_id'] = t.id
+        return Partner.create(vals)
+
+    def _l10n_pe_ne_tax_by_code(self, code):
+        """account.tax de venta por código cat-05 (l10n_pe_edi_tax_code); default 1000 (IGV gravado)."""
+        return self.env['account.tax'].search([
+            ('company_id', '=', self.env.company.id), ('type_tax_use', '=', 'sale'),
+            ('l10n_pe_edi_tax_code', '=', code or '1000')], limit=1)
+
+    def _l10n_pe_ne_ensure_icbper_tax(self):
+        """Tax ICBPER (cat-05 7152): monto FIJO por unidad (S/ 0.50 vigente desde 2023). Se crea en Odoo
+        si no existe — el dato y la lógica viven en Odoo, no en el orquestador."""
+        Tax = self.env['account.tax'].sudo()
+        company = self.env.company
+        tax = Tax.search([('company_id', '=', company.id), ('type_tax_use', '=', 'sale'),
+                          ('l10n_pe_edi_tax_code', '=', '7152')], limit=1)
+        if tax:
+            return tax
+        return Tax.create({
+            'name': 'ICBPER',
+            'amount_type': 'fixed',
+            'amount': 0.50,
+            'type_tax_use': 'sale',
+            'l10n_pe_edi_tax_code': '7152',
+            'company_id': company.id,
+            'description': 'ICBPER',
+        })
+
+    @api.model
+    def l10n_pe_ne_config(self):
+        """Parámetros que React debe leer DESDE Odoo (no hardcodear): tasa IGV y monto ICBPER por unidad."""
+        return {
+            'igv': 18.0,
+            'icbperRate': self._l10n_pe_ne_ensure_icbper_tax().amount,
+        }
+
+    @api.model
+    def l10n_pe_ne_series(self):
+        """Series realmente en uso, agregadas desde los comprobantes emitidos (la serie la
+        fija el emisor al emitir; el correlativo lo autoincrementa Odoo por diario). Por serie:
+        tipo, cuántos emitidos, último correlativo y el próximo a emitir. Incluye las series de
+        retención/percepción (account.payment). Aislado por RUC vía el contexto de compañía."""
+        TIPO = {'01': 'Factura', '03': 'Boleta', '07': 'Nota de crédito',
+                '08': 'Nota de débito', '20': 'Retención', '40': 'Percepción'}
+        agg = {}
+
+        def add(serie, tipo, corr):
+            # Solo cuenta CPE realmente emitidos: con correlativo asignado (n>=1). Un
+            # account.payment lleva R001 y P001 por defecto, pero solo se emite uno; el
+            # otro queda 'por_enviar' con correlativo vacío y no debe contarse.
+            n = int(corr) if (corr or '').strip().isdigit() else 0
+            if not serie or n < 1:
+                return
+            cur = agg.setdefault(serie, {'serie': serie, 'tipoDoc': tipo, 'emitidos': 0, 'ultimo': 0})
+            cur['emitidos'] += 1
+            if n > cur['ultimo']:
+                cur['ultimo'] = n
+
+        for m in self.search([('l10n_pe_ne_serie_emit', '!=', False)]):
+            add(m.l10n_pe_ne_serie_emit, m.l10n_pe_ne_tipo_doc or m._l10n_pe_document_type(), m.l10n_pe_ne_corr_emit)
+        for p in self.env['account.payment'].search([('company_id', '=', self.env.company.id)]):
+            add(p.l10n_pe_ret_serie, '20', p.l10n_pe_ret_correlativo)
+            add(p.l10n_pe_per_serie, '40', p.l10n_pe_per_correlativo)
+
+        return [{
+            'serie': s['serie'],
+            'tipoDoc': s['tipoDoc'],
+            'tipo': TIPO.get(s['tipoDoc'], s['tipoDoc']),
+            'emitidos': s['emitidos'],
+            'ultimo': str(s['ultimo']).zfill(8) if s['ultimo'] else '—',
+            'proximo': str(s['ultimo'] + 1).zfill(8),
+        } for s in sorted(agg.values(), key=lambda x: x['serie'])]
+
+    # ============================================================ datos negocio
+    @api.model
+    def l10n_pe_ne_negocio(self):
+        """Datos del emisor (negocio) que alimentan el bloque `emisor` del XML, leídos desde
+        res.company + su partner. El RUC es de solo lectura (identidad del emisor, indexa el
+        certificado de firma en el servidor)."""
+        company = self.env.company
+        p = company.partner_id
+        d = p.l10n_pe_district
+        return {
+            'ruc': p.vat or '',
+            'razonSocial': company.name or '',
+            'direccion': p.street or '',
+            'urbanizacion': p.street2 or '',
+            'telefono': p.phone or '',
+            'email': p.email or '',
+            'distritoId': d.id if d else None,
+            'distrito': d.name if d else '',
+            'ubigeo': d.code if d else '',
+            'provincia': (d.city_id.name if d and d.city_id else (p.city or '')),
+            'departamento': p.state_id.name or '',
+        }
+
+    @api.model
+    def l10n_pe_ne_buscar_distrito(self, q=None, limit=20):
+        """Busca distritos (ubigeo) por nombre o código para el selector de dirección."""
+        q = (q or '').strip()
+        dom = ['|', ('name', 'ilike', q), ('code', 'ilike', q)] if q else []
+        recs = self.env['l10n_pe.res.city.district'].search(dom, limit=limit)
+        return [{
+            'id': r.id, 'code': r.code or '', 'name': r.name or '',
+            'provincia': r.city_id.name or '',
+            'departamento': r.city_id.state_id.name or '',
+        } for r in recs]
+
+    @api.model
+    def l10n_pe_ne_update_negocio(self, vals):
+        """Actualiza los datos editables del emisor (razón social, dirección, contacto y
+        distrito). El RUC nunca se toca. Al fijar un distrito se sincronizan también provincia
+        (city) y departamento (state) para que el bloque `emisor` quede consistente. Los cambios
+        fluyen al PRÓXIMO XML emitido vía _l10n_pe_emisor."""
+        # env.company lo fija el servidor desde el usuario (with_company), así que estas
+        # escrituras SIEMPRE recaen sobre la empresa del propio emisor. res.company solo es
+        # escribible por "Access Rights" (que el emisor no tiene); usamos sudo acotado a su
+        # propia empresa para no exigirle ese rol global.
+        company = self.env.company.sudo()
+        p = company.partner_id
+        razon = (vals.get('razonSocial') or '').strip()
+        if 'razonSocial' in vals and razon:
+            company.name = razon
+        pvals = {}
+        for key, field in (('direccion', 'street'), ('urbanizacion', 'street2'),
+                           ('telefono', 'phone'), ('email', 'email')):
+            if key in vals:
+                pvals[field] = (vals.get(key) or '').strip() or False
+        did = vals.get('distritoId')
+        if did:
+            d = self.env['l10n_pe.res.city.district'].sudo().browse(int(did)).exists()
+            if d:
+                pvals['l10n_pe_district'] = d.id
+                if d.city_id:
+                    pvals['city'] = d.city_id.name
+                    if d.city_id.state_id:
+                        pvals['state_id'] = d.city_id.state_id.id
+                    if d.city_id.country_id:
+                        pvals['country_id'] = d.city_id.country_id.id
+        if pvals:
+            p.write(pvals)
+        return self.l10n_pe_ne_negocio()
+
+    # ============================================================ resumen estado
+    @api.model
+    def l10n_pe_ne_resumen(self):
+        """Resumen de estado del emisor, calculado en Odoo (no en React): actividad emitida
+        hoy y en el mes en curso —separando PEN/USD para no mezclar monedas— y el desglose por
+        estado SUNAT de todos los comprobantes de venta. Aislado por RUC vía la compañía."""
+        today = fields.Date.context_today(self)
+        mes0 = today.replace(day=1)
+        sales = [('move_type', 'in', ('out_invoice', 'out_refund')),
+                 ('company_id', '=', self.env.company.id)]
+        emitidos = sales + [('l10n_pe_biller_state', 'in', ('enviado', 'anulado'))]
+
+        def bucket(moves):
+            pen = usd = 0.0
+            for m in moves:
+                if (m.currency_id.name or 'PEN') == 'USD':
+                    usd += m.amount_total or 0.0
+                else:
+                    pen += m.amount_total or 0.0
+            return {'count': len(moves), 'pen': round(pen, 2), 'usd': round(usd, 2)}
+
+        hoy = self.search(emitidos + [('invoice_date', '=', today)])
+        mes = self.search(emitidos + [('invoice_date', '>=', mes0), ('invoice_date', '<=', today)])
+
+        # Desglose por estado SUNAT (toda la historia de ventas de la compañía).
+        estados = {'aceptado': 0, 'anulado': 0, 'rechazado': 0, 'pendiente': 0, 'error': 0}
+        MAP = {'enviado': 'aceptado', 'anulado': 'anulado', 'rechazado': 'rechazado',
+               'por_enviar': 'pendiente', 'error': 'error'}
+        for m in self.search(sales):
+            k = MAP.get(m.l10n_pe_biller_state)
+            if k:
+                estados[k] += 1
+
+        return {
+            'hoy': bucket(hoy),
+            'mes': dict(bucket(mes), periodo=today.strftime('%Y%m')),
+            'estados': estados,
+            'porAtender': estados['rechazado'] + estados['error'],
+        }
+
+    # ============================================================== PLE 14.1
+    # Registro de Ventas e Ingresos Electrónico (PLE, formato 14.1). Estructura
+    # oficial SUNAT (Anexo RS 286-2009 y modif.): campos 1-34, separador '|',
+    # palote final, líneas CRLF, codificación ISO-8859-1. El archivo que el
+    # CONTADOR sube al PLE de SUNAT, generado desde los comprobantes emitidos.
+
+    @staticmethod
+    def _l10n_pe_ne_ple_num(v):
+        return '%.2f' % (v or 0.0)
+
+    def _l10n_pe_ne_ple_breakdown(self):
+        """Desglose por afectación para el PLE (cuadra con el XML emitido)."""
+        self.ensure_one()
+        gravado = exonerado = inafecto = exportacion = igv = icbper = 0.0
+        for ln in self.invoice_line_ids:
+            codes = ln.tax_ids.mapped('l10n_pe_edi_tax_code')
+            base = ln.price_subtotal or 0.0
+            if '9997' in codes:
+                exonerado += base
+            elif '9998' in codes:
+                inafecto += base
+            elif '9995' in codes:
+                exportacion += base
+            elif any(c in codes for c in ('1000', '1016')):
+                gravado += base
+        for tl in self.line_ids.filtered(lambda l: l.tax_line_id):
+            code = tl.tax_line_id.l10n_pe_edi_tax_code or ''
+            amt = abs(tl.amount_currency or 0.0)
+            if code == '7152':
+                icbper += amt
+            elif code in ('1000', '1016'):
+                igv += amt
+        return {'gravado': gravado, 'exonerado': exonerado, 'inafecto': inafecto,
+                'exportacion': exportacion, 'igv': igv, 'icbper': icbper,
+                'total': self.amount_total or 0.0}
+
+    def _l10n_pe_ne_doc_id(self):
+        """(serie, número) del comprobante para el PLE: prefiere el correlativo
+        EMITIDO; si no, el folio (parte numérica final) del `name`, zfill 8. NO usa
+        l10n_pe_correlativo (datos antiguos lo tienen con basura)."""
+        self.ensure_one()
+        serie = self.l10n_pe_ne_serie_emit or self.l10n_pe_serie or self.journal_id.l10n_pe_ne_serie or 'F001'
+        numero = (self.l10n_pe_ne_corr_emit or '').strip()
+        if not numero:
+            folios = re.findall(r'\d+', (self.name or '').replace(' ', ''))
+            numero = (folios[-1] if folios else '1').zfill(8)
+        return serie, numero
+
+    def _l10n_pe_ne_ple_origen(self):
+        """(fecha, tipo, serie, numero) del comprobante que se modifica (NC/ND)."""
+        orig = self.reversed_entry_id or getattr(self, 'debit_origin_id', False)
+        if not orig:
+            return '', '', '', ''
+        fecha = orig.invoice_date.strftime('%d/%m/%Y') if orig.invoice_date else ''
+        tipo = orig.l10n_pe_ne_tipo_doc or orig._l10n_pe_document_type()
+        serie, num = orig._l10n_pe_ne_doc_id()
+        return fecha, tipo, serie, num
+
+    def _l10n_pe_ne_ple_linea(self, periodo8, cuo):
+        """Una línea del PLE 14.1 (campos 1-34, '|' separador + palote final)."""
+        self.ensure_one()
+        num = self._l10n_pe_ne_ple_num
+        b = self._l10n_pe_ne_ple_breakdown()
+        tipo = self.l10n_pe_ne_tipo_doc or self._l10n_pe_document_type()
+        serie, corr = self._l10n_pe_ne_doc_id()
+        tdoc, ndoc = self._l10n_pe_cliente_doc()
+        con_doc = bool(ndoc) and ndoc != '00000000'
+        fecha = self.invoice_date.strftime('%d/%m/%Y') if self.invoice_date else ''
+        estado = '2' if self.l10n_pe_biller_state == 'anulado' else '1'
+        of, ot, os_, on = self._l10n_pe_ne_ple_origen()
+        moneda = self.currency_id.name or 'PEN'
+        campos = [
+            periodo8,                                        # 1 Periodo (AAAAMM00)
+            str(self.id),                                    # 2 CUO (único)
+            '',                                              # 3 Nro correlativo (solo estado 8/9)
+            fecha,                                           # 4 Fecha emisión
+            '',                                              # 5 Fecha vencimiento
+            tipo,                                            # 6 Tipo comprobante (tabla 10)
+            serie,                                           # 7 Serie
+            corr,                                            # 8 Número
+            '',                                              # 9 Número final (consolidado)
+            tdoc if con_doc else '',                         # 10 Tipo doc cliente (tabla 2)
+            ndoc if con_doc else '',                         # 11 Nro doc cliente
+            (self.partner_id.name or '').upper(),            # 12 Razón social
+            num(b['exportacion']),                           # 13 Valor exportación
+            num(b['gravado']),                               # 14 Base imponible gravada
+            '0.00',                                          # 15 Descuento base
+            num(b['igv']),                                   # 16 IGV / IPM
+            '0.00',                                          # 17 Descuento IGV
+            num(b['exonerado']),                             # 18 Exonerado
+            num(b['inafecto']),                              # 19 Inafecto
+            '0.00',                                          # 20 ISC
+            '0.00',                                          # 21 Base IVAP
+            '0.00',                                          # 22 IVAP
+            num(b['icbper']),                                # 23 Otros tributos (ICBPER)
+            num(b['total']),                                 # 24 Importe total
+            moneda,                                          # 25 Moneda (tabla 4)
+            '1.000' if moneda == 'PEN' else '%.3f' % (1.0 / (self.currency_id.with_context(date=self.invoice_date).rate or 1.0)),  # 26 Tipo cambio
+            of,                                              # 27 Fecha doc modificado
+            ot,                                              # 28 Tipo doc modificado
+            os_,                                             # 29 Serie doc modificado
+            on,                                              # 30 Nro doc modificado
+            '',                                              # 31 Contrato/proyecto
+            '',                                              # 32 Error tipo 1
+            '',                                              # 33 Indicador medio de pago
+            estado,                                          # 34 Estado
+        ]
+        return '|'.join(campos) + '|'
+
+    @api.model
+    def _l10n_pe_ne_ventas_periodo(self, periodo):
+        """Comprobantes de venta válidos (01/03/07/08) del periodo YYYYMM, ordenados.
+        Excluye borradores/rechazados; aislado por compañía. Compartido PLE + SIRE."""
+        import calendar
+        periodo = (periodo or '').strip()
+        if len(periodo) != 6 or not periodo.isdigit():
+            raise UserError(_("Periodo inválido. Usa YYYYMM (p.ej. 202606)."))
+        year, month = int(periodo[:4]), int(periodo[4:6])
+        if not (1 <= month <= 12):
+            raise UserError(_("Mes inválido en el periodo."))
+        last = calendar.monthrange(year, month)[1]
+        d0 = fields.Date.to_date('%04d-%02d-01' % (year, month))
+        d1 = fields.Date.to_date('%04d-%02d-%02d' % (year, month, last))
+        return self.search([
+            ('move_type', 'in', ('out_invoice', 'out_refund')),
+            ('state', '=', 'posted'),
+            ('invoice_date', '>=', d0), ('invoice_date', '<=', d1),
+            ('l10n_pe_biller_state', 'not in', ('por_enviar', 'rechazado', False)),
+        ], order='invoice_date, id')
+
+    @api.model
+    def l10n_pe_ne_ple_ventas(self, periodo):
+        """Genera el PLE 14.1 (Registro de Ventas) del periodo YYYYMM desde los
+        comprobantes emitidos (01/03/07/08) de la compañía actual. Devuelve
+        {filename, contentB64, count, periodo, total}. contentB64 = base64 del
+        txt en ISO-8859-1 (lo que sube el contador al PLE de SUNAT)."""
+        import base64
+        periodo = (periodo or '').strip()
+        moves = self._l10n_pe_ne_ventas_periodo(periodo)
+        periodo8 = periodo + '00'
+        lines = [m._l10n_pe_ne_ple_linea(periodo8, i) for i, m in enumerate(moves, 1)]
+        content = ('\r\n'.join(lines) + '\r\n') if lines else ''
+        ruc = (self.env.company.vat or '').strip()
+        ind_cont = '1' if lines else '0'   # contenido: con/sin información
+        # LE + RUC + AAAAMM + DD(00) + 140100 + indOper(1) + indCont + moneda(1=PEN) + libro(1)
+        filename = 'LE%s%s00140100%s11.txt' % (ruc, periodo, '1' + ind_cont)
+        return {
+            'filename': filename,
+            'contentB64': base64.b64encode(content.encode('latin-1', 'replace')).decode('ascii'),
+            'count': len(lines),
+            'periodo': periodo,
+            'total': sum(moves.mapped('amount_total')),
+        }
+
+    @api.model
+    def l10n_pe_ne_dashboard(self, periodo=None):
+        """Datos del dashboard de ventas del periodo (YYYYMM, default mes actual):
+        serie diaria (para el gráfico), desglose por tipo de comprobante y KPIs.
+        Reusa el filtro de ventas; aislado por compañía."""
+        import calendar
+        if not periodo:
+            periodo = fields.Date.context_today(self).strftime('%Y%m')
+        moves = self._l10n_pe_ne_ventas_periodo(periodo)
+        year, month = int(periodo[:4]), int(periodo[4:6])
+        por_dia, por_tipo = {}, {}
+        total = anulados = 0.0
+        for m in moves:
+            key = m.invoice_date.strftime('%Y-%m-%d') if m.invoice_date else ''
+            por_dia[key] = por_dia.get(key, 0.0) + (m.amount_total or 0.0)
+            t = m.l10n_pe_ne_tipo_doc or m._l10n_pe_document_type()
+            agg = por_tipo.setdefault(t, {'count': 0, 'total': 0.0})
+            agg['count'] += 1
+            agg['total'] += (m.amount_total or 0.0)
+            total += (m.amount_total or 0.0)
+            if m.l10n_pe_biller_state == 'anulado':
+                anulados += 1
+        ndays = calendar.monthrange(year, month)[1]
+        serie = [{
+            'dia': d,
+            'total': round(por_dia.get('%04d-%02d-%02d' % (year, month, d), 0.0), 2),
+        } for d in range(1, ndays + 1)]
+        tipos = [{
+            'tipoDoc': t,
+            'count': v['count'],
+            'total': round(v['total'], 2),
+        } for t, v in sorted(por_tipo.items())]
+        gastos = self.env['l10n_pe_ne.gasto'].l10n_pe_ne_total_gastos(periodo)
+        return {
+            'periodo': periodo,
+            'total': round(total, 2),
+            'count': len(moves),
+            'anulados': int(anulados),
+            'gastos': gastos,
+            'neto': round(total - gastos, 2),
+            'porDia': serie,
+            'porTipo': tipos,
+        }
+
+    @api.model
+    def l10n_pe_ne_reporte_ventas(self, periodo=None):
+        """Reportes de ventas del periodo (YYYYMM, default mes actual): resumen,
+        ventas de hoy, top por producto y top por cliente. Reusa el filtro de
+        ventas; aislado por compañía. (Suma amount_total en su moneda; mezclar
+        PEN/USD es aproximado para el MVP.)"""
+        if not periodo:
+            periodo = fields.Date.context_today(self).strftime('%Y%m')
+        moves = self._l10n_pe_ne_ventas_periodo(periodo)
+        today = fields.Date.context_today(self)
+        prod, cli = {}, {}
+        hoy_count, hoy_total = 0, 0.0
+        for m in moves:
+            for ln in m.invoice_line_ids:
+                key = ln.product_id.display_name if ln.product_id else (ln.name or 'ITEM')
+                a = prod.setdefault(key, {'cantidad': 0.0, 'total': 0.0})
+                a['cantidad'] += ln.quantity or 0.0
+                a['total'] += ln.price_total or 0.0
+            kc = (m.partner_id.name or '—', m.partner_id.vat or '')
+            c = cli.setdefault(kc, {'count': 0, 'total': 0.0})
+            c['count'] += 1
+            c['total'] += m.amount_total or 0.0
+            if m.invoice_date == today:
+                hoy_count += 1
+                hoy_total += m.amount_total or 0.0
+        por_producto = sorted(
+            ({'producto': k, 'cantidad': round(v['cantidad'], 2), 'total': round(v['total'], 2)} for k, v in prod.items()),
+            key=lambda x: -x['total'])[:50]
+        por_cliente = sorted(
+            ({'cliente': k[0], 'ruc': k[1], 'count': v['count'], 'total': round(v['total'], 2)} for k, v in cli.items()),
+            key=lambda x: -x['total'])[:50]
+        return {
+            'periodo': periodo,
+            'resumen': {'count': len(moves), 'total': round(sum(moves.mapped('amount_total')), 2)},
+            'hoy': {'count': hoy_count, 'total': round(hoy_total, 2)},
+            'porProducto': por_producto,
+            'porCliente': por_cliente,
+        }
+
+    @api.model
+    def l10n_pe_ne_export(self, tipo, periodo=None):
+        """Centro de descargas: exporta a XLSX. tipo = ventas|productos|clientes
+        (ventas usa el periodo). Devuelve {filename, contentB64, count}."""
+        import base64
+        import io
+        import xlsxwriter
+        tipo = (tipo or 'ventas').strip().lower()
+        if tipo == 'ventas':
+            if not periodo:
+                periodo = fields.Date.context_today(self).strftime('%Y%m')
+            moves = self._l10n_pe_ne_ventas_periodo(periodo)
+            headers = ['Serie', 'Número', 'Tipo', 'Fecha', 'Cliente', 'Doc. cliente',
+                       'Gravada', 'Exonerada', 'Inafecta', 'IGV', 'ICBPER', 'Total', 'Moneda', 'Estado']
+            rows = []
+            for m in moves:
+                b = m._l10n_pe_ne_ple_breakdown()
+                serie, num = m._l10n_pe_ne_doc_id()
+                rows.append([serie, num, m.l10n_pe_ne_tipo_doc or m._l10n_pe_document_type(),
+                             m.invoice_date.strftime('%d/%m/%Y') if m.invoice_date else '',
+                             m.partner_id.name or '', m.partner_id.vat or '',
+                             round(b['gravado'], 2), round(b['exonerado'], 2), round(b['inafecto'], 2),
+                             round(b['igv'], 2), round(b['icbper'], 2), round(b['total'], 2),
+                             m.currency_id.name or 'PEN', m.l10n_pe_biller_state or ''])
+            sheet, base = 'Ventas', 'ventas-%s' % periodo
+        elif tipo == 'productos':
+            prods = self.l10n_pe_ne_list_productos(limit=10000)
+            headers = ['Código', 'Descripción', 'Precio', 'Afectación']
+            rows = [[p.get('codigo', ''), p.get('descripcion', ''), p.get('precio', 0), p.get('taxCode', '')] for p in prods]
+            sheet, base = 'Productos', 'productos'
+        elif tipo == 'clientes':
+            clis = self.l10n_pe_ne_list_clientes(limit=10000)
+            headers = ['Razón social', 'Tipo doc', 'Número', 'Email', 'Teléfono', 'Dirección']
+            rows = [[c.get('razonSocial', ''), c.get('tipoDocNombre', ''), c.get('numDoc', ''),
+                     c.get('email', ''), c.get('telefono', ''), c.get('direccion', '')] for c in clis]
+            sheet, base = 'Clientes', 'clientes'
+        else:
+            raise UserError(_("Tipo de exporte no soportado (ventas|productos|clientes)."))
+        buf = io.BytesIO()
+        wb = xlsxwriter.Workbook(buf, {'in_memory': True})
+        ws = wb.add_worksheet(sheet)
+        head = wb.add_format({'bold': True, 'bg_color': '#2563eb', 'font_color': 'white', 'border': 1})
+        for c, h in enumerate(headers):
+            ws.write(0, c, h, head)
+            ws.set_column(c, c, max(12, len(h) + 2))
+        for r, row in enumerate(rows, 1):
+            for c, val in enumerate(row):
+                ws.write(r, c, val)
+        ws.autofilter(0, 0, max(1, len(rows)), len(headers) - 1)
+        ws.freeze_panes(1, 0)
+        wb.close()
+        ruc = (self.env.company.vat or '').strip()
+        return {
+            'filename': '%s-%s.xlsx' % (base, ruc),
+            'count': len(rows),
+            'contentB64': base64.b64encode(buf.getvalue()).decode('ascii'),
+        }
+
+    @api.model
+    def l10n_pe_ne_rvie_reemplazo(self, periodo):
+        """SIRE — archivo de REEMPLAZO de la propuesta del RVIE (Registro de Ventas)
+        del periodo YYYYMM, empaquetado en ZIP, para que el contador reemplace la
+        propuesta de SUNAT. Reusa el motor de líneas del PLE (mismo desglose).
+
+        Nombre SIRE (35 chars): LE + RUC + AAAA + MM + 00 + 140000(libro RVIE) +
+        02(reemplazo) + O(operaciones) + I(contenido) + M(moneda) + 2(fijo) + NN(secuencia).
+        Devuelve {zipFilename, txtFilename, contentB64 (zip base64), count, total}.
+        OJO: el layout EXACTO de campos del Anexo 3 se valida/ajusta contra el PVSIRE."""
+        import base64
+        import io
+        import zipfile
+        periodo = (periodo or '').strip()
+        moves = self._l10n_pe_ne_ventas_periodo(periodo)
+        periodo8 = periodo + '00'
+        lines = [m._l10n_pe_ne_ple_linea(periodo8, i) for i, m in enumerate(moves, 1)]
+        content = ('\r\n'.join(lines) + '\r\n') if lines else ''
+        ruc = (self.env.company.vat or '').strip()
+        cont = '1' if lines else '0'          # I: con/sin información
+        # LE+RUC+AAAAMM+00 + 140000(libro RVIE) + 02(reemplazo) + O=1 + I=cont + M=1(soles) + 2 + NN=00
+        txt_name = 'LE%s%s00140000021%s1200.txt' % (ruc, periodo, cont)
+        zip_name = txt_name[:-4] + '.zip'
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr(txt_name, content.encode('latin-1', 'replace'))
+        return {
+            'zipFilename': zip_name,
+            'txtFilename': txt_name,
+            'contentB64': base64.b64encode(buf.getvalue()).decode('ascii'),
+            'count': len(lines),
+            'periodo': periodo,
+            'total': sum(moves.mapped('amount_total')),
+        }
+
+    def _l10n_pe_ne_quick_product(self, ln, tax=None):
+        """Resuelve el product.product de una línea para que el documento USE un registro de Odoo:
+        busca por id, por código (default_code) o por nombre exacto; si no existe y hay datos, lo
+        CREA simplificado y lo enlaza (igual que el cliente por vat). Devuelve recordset vacío si la
+        línea no aporta nada por lo que crear (queda como texto libre, compatible hacia atrás)."""
+        Product = self.env['product.product']
+        pid = ln.get('productId')
+        if pid:
+            prod = Product.browse(int(pid)).exists()
+            if prod:
+                return prod
+        cod = (ln.get('productCod') or ln.get('codProducto') or '').strip()
+        if cod:
+            found = Product.search([('default_code', '=', cod)], limit=1)
+            if found:
+                return found
+        desc = (ln.get('descripcion') or '').strip()
+        if desc:
+            found = Product.search([('name', '=', desc)], limit=1)
+            if found:
+                return found
+        if not (cod or desc):
+            return Product.browse()
+        vals = {
+            'name': desc or cod or 'PRODUCTO',
+            'type': 'service',
+            'sale_ok': True,
+            'list_price': float(ln.get('precioUnitario') or 0),
+            # company_id del emisor: aísla el producto por RUC (igual que el cliente).
+            'company_id': self.env.company.id,
+        }
+        if cod:
+            vals['default_code'] = cod
+        bc = (ln.get('barcode') or '').strip()
+        if bc:
+            vals['barcode'] = bc
+        if tax:
+            vals['taxes_id'] = [(6, 0, tax.ids)]
+        return Product.create(vals)
+
+    def _l10n_pe_ne_product_dict(self, p):
+        tax = p.taxes_id.filtered(lambda t: t.type_tax_use == 'sale')[:1]
+        return {
+            'id': p.id,
+            'descripcion': p.name or '',
+            'codigo': p.default_code or '',
+            'barcode': p.barcode or '',
+            'precio': p.list_price,
+            'taxCode': (tax.l10n_pe_edi_tax_code or '1000') if tax else '1000',
+        }
+
+    def _l10n_pe_ne_partner_dict(self, p):
+        return {
+            'id': p.id,
+            'razonSocial': p.name or '',
+            'numDoc': p.vat or '',
+            'tipoDoc': p.l10n_latam_identification_type_id.l10n_pe_vat_code or '',
+            'tipoDocNombre': p.l10n_latam_identification_type_id.name or '',
+            'email': p.email or '',
+            'telefono': p.phone or '',
+            'direccion': p.street or '',
+        }
+
+    def _l10n_pe_ne_ident_type(self, tipoDoc):
+        return self.env['l10n_latam.identification.type'].search(
+            [('l10n_pe_vat_code', '=', tipoDoc or '6')], limit=1)
+
+    def _l10n_pe_ne_partner_apply(self, p, c):
+        """Aplica los campos simplificados (los del caso común de facturación) a un res.partner."""
+        vals = {}
+        if c.get('razonSocial'):
+            vals['name'] = c['razonSocial']
+        if c.get('numDoc') is not None:
+            vals['vat'] = (c.get('numDoc') or '').strip() or False
+        if c.get('tipoDoc'):
+            t = self._l10n_pe_ne_ident_type(c['tipoDoc'])
+            if t:
+                vals['l10n_latam_identification_type_id'] = t.id
+        for key, field in (('email', 'email'), ('telefono', 'phone'), ('direccion', 'street')):
+            if key in c:
+                vals[field] = c.get(key) or False
+        if vals:
+            p.write(vals)
+        return p
+
+    @api.model
+    def l10n_pe_ne_list_clientes(self, query=None, limit=50):
+        """Clientes de Odoo para que React liste/autocomplete (no reinventa el padrón)."""
+        domain = [('customer_rank', '>', 0)]
+        if query:
+            domain = ['&', ('customer_rank', '>', 0),
+                      '|', ('name', 'ilike', query), ('vat', 'ilike', query)]
+        parts = self.env['res.partner'].search(domain, order='name', limit=limit)
+        return [self._l10n_pe_ne_partner_dict(p) for p in parts]
+
+    @api.model
+    def l10n_pe_ne_create_cliente(self, cliente):
+        """Crea (o reusa por vat) un cliente con los campos PE correctos; lo guarda EN Odoo."""
+        cliente = cliente or {}
+        p = self._l10n_pe_ne_quick_partner(cliente)
+        self._l10n_pe_ne_partner_apply(p, cliente)
+        if not p.customer_rank:
+            p.customer_rank = 1
+        return self._l10n_pe_ne_partner_dict(p)
+
+    @api.model
+    def l10n_pe_ne_update_cliente(self, cliente):
+        """Actualiza un cliente existente (por id) con los campos simplificados."""
+        cliente = cliente or {}
+        p = self.env['res.partner'].browse(int(cliente.get('id') or 0)).exists()
+        if not p:
+            raise UserError(_("Cliente no encontrado."))
+        self._l10n_pe_ne_partner_apply(p, cliente)
+        return self._l10n_pe_ne_partner_dict(p)
+
+    @api.model
+    def l10n_pe_ne_delete_cliente(self, rec_id):
+        """Elimina el cliente; si está referenciado (comprobantes), lo archiva en su lugar."""
+        p = self.env['res.partner'].browse(int(rec_id or 0)).exists()
+        if not p:
+            return {'ok': True, 'modo': 'inexistente'}
+        try:
+            p.unlink()
+            return {'ok': True, 'modo': 'eliminado'}
+        except Exception:
+            p.active = False
+            return {'ok': True, 'modo': 'archivado'}
+
+    @api.model
+    def l10n_pe_ne_list_productos(self, query=None, limit=50):
+        """Productos de Odoo para que React liste/autocomplete y los documentos los referencien.
+        Busca por nombre, código interno (default_code) o código de barras (barcode)."""
+        domain = [('sale_ok', '=', True)]
+        if query:
+            domain = ['&', ('sale_ok', '=', True),
+                      '|', '|', ('name', 'ilike', query),
+                      ('default_code', 'ilike', query), ('barcode', 'ilike', query)]
+        prods = self.env['product.product'].search(domain, order='name', limit=limit)
+        return [self._l10n_pe_ne_product_dict(p) for p in prods]
+
+    @api.model
+    def l10n_pe_ne_producto_por_barcode(self, code):
+        """Resuelve UN producto por código de barras exacto (para el escaneo en el POS).
+        Devuelve el dict del producto o None si no hay coincidencia. Aislado por compañía."""
+        code = (code or '').strip()
+        if not code:
+            return None
+        p = self.env['product.product'].search(
+            [('sale_ok', '=', True), ('barcode', '=', code)], limit=1)
+        return self._l10n_pe_ne_product_dict(p) if p else None
+
+    @api.model
+    def l10n_pe_ne_create_producto(self, producto):
+        """Crea (o reusa por código/nombre) un producto simplificado; lo guarda EN Odoo."""
+        producto = producto or {}
+        desc = producto.get('descripcion') or producto.get('nombre')
+        if not desc and not producto.get('codigo'):
+            raise UserError(_("El producto necesita al menos una descripción o un código."))
+        tax = self._l10n_pe_ne_tax_by_code(producto.get('taxCode') or '1000')
+        p = self._l10n_pe_ne_quick_product({
+            'descripcion': desc,
+            'productCod': producto.get('codigo'),
+            'barcode': producto.get('barcode'),
+            'precioUnitario': producto.get('precio'),
+        }, tax)
+        return self._l10n_pe_ne_product_dict(p)
+
+    @api.model
+    def l10n_pe_ne_update_producto(self, producto):
+        """Actualiza un producto (por id): descripción, código, precio e impuesto (afectación)."""
+        producto = producto or {}
+        p = self.env['product.product'].browse(int(producto.get('id') or 0)).exists()
+        if not p:
+            raise UserError(_("Producto no encontrado."))
+        vals = {}
+        if producto.get('descripcion'):
+            vals['name'] = producto['descripcion']
+        if 'codigo' in producto:
+            vals['default_code'] = (producto.get('codigo') or '').strip() or False
+        if 'barcode' in producto:
+            vals['barcode'] = (producto.get('barcode') or '').strip() or False
+        if producto.get('precio') is not None:
+            vals['list_price'] = float(producto.get('precio') or 0)
+        if producto.get('taxCode'):
+            tax = self._l10n_pe_ne_tax_by_code(producto['taxCode'])
+            vals['taxes_id'] = [(6, 0, tax.ids if tax else [])]
+        if vals:
+            p.write(vals)
+        return self._l10n_pe_ne_product_dict(p)
+
+    @api.model
+    def l10n_pe_ne_delete_producto(self, rec_id):
+        """Elimina el producto; si está referenciado (en comprobantes), lo archiva en su lugar."""
+        p = self.env['product.product'].browse(int(rec_id or 0)).exists()
+        if not p:
+            return {'ok': True, 'modo': 'inexistente'}
+        try:
+            p.unlink()
+            return {'ok': True, 'modo': 'eliminado'}
+        except Exception:
+            p.active = False
+            return {'ok': True, 'modo': 'archivado'}
+
+    # ----------------------------------------------------------------- compras
+    # Compra = factura de proveedor (account.move in_invoice). TODA la lógica en
+    # Odoo; reusa el patrón de in_invoice de retención (campos l10n_latam que PE
+    # exige). Aislado por compañía vía reglas multi-compañía nativas de account.move.
+    def _l10n_pe_ne_compra_dict(self):
+        self.ensure_one()
+        return {
+            'id': self.id,
+            'fecha': self.invoice_date.strftime('%Y-%m-%d') if self.invoice_date else '',
+            'documento': self.l10n_latam_document_number or self.ref or '',
+            'tipoComprobante': self.l10n_latam_document_type_id.code if self.l10n_latam_document_type_id else '',
+            'proveedor': self.partner_id.name or '',
+            'ruc': self.partner_id.vat or '',
+            'total': self.amount_total or 0.0,
+            'moneda': self.currency_id.name or 'PEN',
+            'estado': self.state,
+        }
+
+    @api.model
+    def l10n_pe_ne_list_compras(self, query=None, periodo=None, limit=200):
+        """Lista de compras (facturas de proveedor) — opcional por texto o periodo."""
+        import calendar
+        domain = [('move_type', '=', 'in_invoice')]
+        if query:
+            domain += ['|', ('partner_id.name', 'ilike', query), ('l10n_latam_document_number', 'ilike', query)]
+        if periodo and len(str(periodo)) == 6 and str(periodo).isdigit():
+            y, m = int(periodo[:4]), int(periodo[4:6])
+            last = calendar.monthrange(y, m)[1]
+            domain += [('invoice_date', '>=', '%04d-%02d-01' % (y, m)),
+                       ('invoice_date', '<=', '%04d-%02d-%02d' % (y, m, last))]
+        return [m._l10n_pe_ne_compra_dict() for m in self.search(domain, order='invoice_date desc, id desc', limit=limit)]
+
+    @api.model
+    def l10n_pe_ne_create_compra(self, compra):
+        """Registra una compra (factura de proveedor). payload: {proveedor:{numDoc,
+        razonSocial,tipoDoc}, tipoComprobante(cat.10), serie, numero, fecha, total,
+        descripcion, moneda}. Registro simple (línea = total); el IGV/crédito fiscal
+        detallado queda para una iteración posterior."""
+        compra = compra or {}
+        prov = self._l10n_pe_ne_quick_partner(compra.get('proveedor') or {})
+        if not prov.supplier_rank:
+            prov.supplier_rank = 1
+        journal = self.env['account.journal'].search(
+            [('type', '=', 'purchase'), ('company_id', '=', self.env.company.id)], limit=1)
+        if not journal:
+            raise UserError(_("No hay diario de compras configurado para la compañía."))
+        serie = (compra.get('serie') or '').strip()
+        numero = (compra.get('numero') or '').strip()
+        doc_num = ('%s-%s' % (serie, numero)) if serie and numero else (numero or serie)
+        if not doc_num:
+            raise UserError(_("Indica el número del documento del proveedor."))
+        total = float(compra.get('total') or 0)
+        if total <= 0:
+            raise UserError(_("Indica el monto total de la compra."))
+        vals = {
+            'move_type': 'in_invoice',
+            'partner_id': prov.id,
+            'journal_id': journal.id,
+            'invoice_date': compra.get('fecha') or fields.Date.context_today(self),
+            'ref': doc_num,
+            'l10n_latam_document_number': doc_num,
+            'invoice_line_ids': [(0, 0, {
+                'name': compra.get('descripcion') or 'COMPRA',
+                'quantity': 1,
+                'price_unit': total,
+                'tax_ids': [(6, 0, [])],
+            })],
+        }
+        moneda = self._l10n_pe_ne_quick_currency(compra.get('moneda'))
+        if moneda:
+            vals['currency_id'] = moneda.id
+        dt = self.env['l10n_latam.document.type'].search(
+            [('code', '=', compra.get('tipoComprobante') or '01'), ('country_id.code', '=', 'PE')], limit=1)
+        if dt:
+            vals['l10n_latam_document_type_id'] = dt.id
+        move = self.create(vals)
+        move.action_post()
+        return move._l10n_pe_ne_compra_dict()
+
+    @api.model
+    def l10n_pe_ne_delete_compra(self, rec_id):
+        """Elimina la compra; si está posteada, la pasa a borrador y elimina; si no
+        se puede, la anula (cancel)."""
+        m = self.browse(int(rec_id or 0)).exists()
+        if not m or m.move_type != 'in_invoice':
+            return {'ok': True, 'modo': 'inexistente'}
+        try:
+            if m.state == 'posted':
+                m.button_draft()
+            m.unlink()
+            return {'ok': True, 'modo': 'eliminado'}
+        except Exception:
+            m.button_cancel()
+            return {'ok': True, 'modo': 'anulado'}
+
+    def _l10n_pe_ne_quick_flags(self, move, payload):
+        d = payload.get('detraccion')
+        if d:
+            move.l10n_pe_ne_detraccion = True
+            move.l10n_pe_ne_detraccion_code = d.get('codBien') or '037'
+            move.l10n_pe_ne_detraccion_rate = float(d.get('tasa') or 12)
+            if d.get('medioPago'):
+                move.l10n_pe_ne_detraccion_medio_pago = d['medioPago']
+            if d.get('cuentaBN') and not move.company_id.l10n_pe_ne_cuenta_detraccion:
+                move.company_id.sudo().l10n_pe_ne_cuenta_detraccion = d['cuentaBN']
+        p = payload.get('percepcion')
+        if p:
+            move.l10n_pe_ne_percepcion = True
+            move.l10n_pe_ne_percepcion_rate = float(p.get('tasa') or 2)
+        a = payload.get('anticipo')
+        if a:
+            move.l10n_pe_ne_anticipo_total = float(a.get('total') or 0)
+            move.l10n_pe_ne_anticipo_doc = a.get('doc') or ''
+            if a.get('tipo'):
+                move.l10n_pe_ne_anticipo_tipo = a['tipo']
+        # Forma de pago: Crédito (con cuotas) emite cac:PaymentTerms; medios de pago
+        # (efectivo/Yape/…) se guardan como dato interno del POS (no van al XML SUNAT).
+        fp = payload.get('formaPago') or {}
+        if fp.get('tipo') == 'Credito' or fp.get('cuotas'):
+            move.l10n_pe_ne_forma_pago = 'Credito'
+            move.l10n_pe_ne_cuotas = fp.get('cuotas') or []
+            venc = (fp.get('cuotas') or [{}])[-1].get('fecha')
+            if venc:
+                move.invoice_date_due = venc
+        if fp.get('medios'):
+            move.l10n_pe_ne_medios_pago = fp.get('medios')
+
+    def l10n_pe_ne_quick_result(self):
+        self.ensure_one()
+        serie, corr = self._l10n_pe_serie_correlativo()
+        m = re.search(r'ResponseCode (\d+)', self.l10n_pe_biller_message or '')
+        return {
+            'id': self.id,
+            'tipoDoc': self.l10n_pe_ne_tipo_doc or self._l10n_pe_document_type(),
+            'serie': self.l10n_pe_ne_serie_emit or serie,
+            'correlativo': (self.l10n_pe_ne_corr_emit or corr).zfill(8),
+            'estado': self.l10n_pe_biller_state,
+            'responseCode': m.group(1) if m else '',
+            'mensaje': self.l10n_pe_biller_message or '',
+            'total': self.amount_total,
+            'cliente': self.partner_id.name or '',
+            'fechaEmision': self.invoice_date.strftime('%Y-%m-%d') if self.invoice_date else '',
+        }
+
+    @api.model
+    def l10n_pe_ne_quick_list(self, query=None, desde=None, hasta=None, limit=100):
+        """Lista de comprobantes emitidos (sin los blobs), para la UI. Filtros
+        opcionales: query (cliente/RUC/correlativo) y rango de fechas (desde/hasta)."""
+        domain = [('l10n_pe_biller_state', '!=', 'por_enviar')]
+        if desde:
+            domain.append(('invoice_date', '>=', desde))
+        if hasta:
+            domain.append(('invoice_date', '<=', hasta))
+        if query:
+            q = query.strip()
+            domain += ['|', '|',
+                       ('partner_id.name', 'ilike', q),
+                       ('partner_id.vat', 'ilike', q),
+                       ('l10n_pe_ne_corr_emit', 'ilike', q)]
+        moves = self.search(domain, order='id desc', limit=limit)
+        return [{
+            'id': m.id,
+            'tipoDoc': m.l10n_pe_ne_tipo_doc or m._l10n_pe_document_type(),
+            'serie': m.l10n_pe_ne_serie_emit or m.l10n_pe_serie or '',
+            'correlativo': m.l10n_pe_ne_corr_emit or '',
+            'estado': m.l10n_pe_biller_state,
+            'total': m.amount_total,
+            'moneda': m.currency_id.name or 'PEN',
+            'cliente': m.partner_id.name or '',
+            'fechaEmision': m.invoice_date.strftime('%Y-%m-%d') if m.invoice_date else '',
+            'mensaje': m.l10n_pe_biller_message or '',
+        } for m in moves]
+
+    def l10n_pe_ne_comprobante_detalle(self):
+        """Detalle completo de un comprobante para la vista de detalle (cabecera +
+        líneas + totales por afectación + estado SUNAT). Todo calculado en Odoo."""
+        self.ensure_one()
+        b = self._l10n_pe_ne_ple_breakdown()
+        serie, num = self._l10n_pe_ne_doc_id()
+        lineas = []
+        for ln in self.invoice_line_ids:
+            codes = ln.tax_ids.mapped('l10n_pe_edi_tax_code')
+            afect = next((c for c in ('9997', '9998', '9995', '9996') if c in codes), '1000')
+            lineas.append({
+                'descripcion': ln.name or '',
+                'cantidad': ln.quantity or 0.0,
+                'precio': ln.price_unit or 0.0,
+                'descuento': ln.discount or 0.0,
+                'afectacion': afect,
+                'subtotal': ln.price_subtotal or 0.0,
+            })
+        of, ot, os_, on = self._l10n_pe_ne_ple_origen()
+        return {
+            'id': self.id,
+            'tipoDoc': self.l10n_pe_ne_tipo_doc or self._l10n_pe_document_type(),
+            'serie': serie,
+            'correlativo': num,
+            'fecha': self.invoice_date.strftime('%Y-%m-%d') if self.invoice_date else '',
+            'cliente': self.partner_id.name or '',
+            'clienteDoc': self.partner_id.vat or '',
+            'moneda': self.currency_id.name or 'PEN',
+            'estado': self.l10n_pe_biller_state or '',
+            'mensaje': self.l10n_pe_biller_message or '',
+            'formaPago': self.l10n_pe_ne_forma_pago or 'Contado',
+            'docOrigen': ('%s %s-%s' % (ot, os_, on)) if on else '',
+            'lineas': lineas,
+            'totales': {
+                'gravada': round(b['gravado'], 2), 'exonerada': round(b['exonerado'], 2),
+                'inafecta': round(b['inafecto'], 2), 'igv': round(b['igv'], 2),
+                'icbper': round(b['icbper'], 2), 'total': round(b['total'], 2),
+            },
+        }
+
+    def l10n_pe_ne_get_files(self):
+        """Devuelve {xml, cdr, pdf} en base64 del comprobante, para que el BFF los sirva (sin /web/content)."""
+        self.ensure_one()
+
+        def b64(att):
+            v = att.datas
+            return v.decode('ascii') if isinstance(v, (bytes, bytearray)) else (v or '')
+
+        out = {}
+        if self.l10n_pe_biller_xml:
+            out['xml'] = b64(self.l10n_pe_biller_xml)
+        if self.l10n_pe_biller_cdr:
+            out['cdr'] = b64(self.l10n_pe_biller_cdr)
+        try:
+            pdf_att = self._l10n_pe_get_pdf_attachment() if self.l10n_pe_biller_xml else False
+            if pdf_att:
+                out['pdf'] = b64(pdf_att)
+        except Exception:
+            pass
+        return out
 
     # ------------------------------------------------- descargas / PDF (SFS 2.4)
     @staticmethod

@@ -933,6 +933,7 @@ class AccountMove(models.Model):
             if move.l10n_pe_biller_state == "enviado":
                 continue
             endpoint, payload = move._l10n_pe_target()
+            _logger.info("Enviando %s: %s", endpoint, payload)
             headers = {"X-Api-Key": move.company_id.sudo().l10n_pe_ne_api_key or ""}
             try:
                 _logger.info("Enviando %s: %s", endpoint, payload)
@@ -942,8 +943,10 @@ class AccountMove(models.Model):
                     headers=headers,
                     timeout=timeout,
                 )
+                _logger.info("Respuesta: %s", resp.text)
             except requests.RequestException as exc:
                 move.l10n_pe_biller_state = "error"
+                _logger.error("Error: %s", exc)
                 move.l10n_pe_biller_message = (
                     _("Error de conexión con el facturador: %s") % exc
                 )

@@ -750,7 +750,8 @@ class AccountMove(models.Model):
 
     def _l10n_pe_build_invoice_request(self):
         """Factura (01) / Boleta (03) — endpoint /generator/factura."""
-        print(
+        _logger.info(
+            "Invoice request: %s %s %s",
             self._l10n_pe_id_block(with_document_type=True),
             self._l10n_pe_emisor(),
             self._l10n_pe_cabecera(),
@@ -758,7 +759,7 @@ class AccountMove(models.Model):
         self.ensure_one()
         self._l10n_pe_check_anticipo()
         # Boleta > S/700 exige el documento de identidad del cliente (SUNAT la rechaza sin él en prod).
-        print(self._l10n_pe_product_lines())
+        _logger.info("Product lines: %s", len(self._l10n_pe_product_lines()))
         if (
             self._l10n_pe_document_type() == "03"
             and (self.amount_total or 0.0) > 700
@@ -922,6 +923,7 @@ class AccountMove(models.Model):
 
     # ------------------------------------------------------------------ acción
     def action_l10n_pe_send_to_biller(self):
+        _logger.info("Enviando facturas a Biller: %s", self.ids)
         icp = self.env["ir.config_parameter"].sudo()
         base = icp.get_param("l10n_pe_ne_biller.url", "http://localhost:8090").rstrip(
             "/"
@@ -933,7 +935,7 @@ class AccountMove(models.Model):
             endpoint, payload = move._l10n_pe_target()
             headers = {"X-Api-Key": move.company_id.sudo().l10n_pe_ne_api_key or ""}
             try:
-                print(endpoint, payload)
+                _logger.info("Enviando %s: %s", endpoint, payload)
                 resp = requests.post(
                     base + "/generator/" + endpoint,
                     json=payload,

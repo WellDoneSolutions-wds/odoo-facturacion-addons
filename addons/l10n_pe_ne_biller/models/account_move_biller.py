@@ -928,9 +928,13 @@ class AccountMove(models.Model):
         base = icp.get_param("l10n_pe_ne_biller.url", "http://localhost:8090").rstrip(
             "/"
         )
+        _logger.info("URL: %s", base)
         timeout = int(icp.get_param("l10n_pe_ne_biller.timeout", "60"))
+        _logger.info("Timeout: %s", timeout)
         for move in self:
+            _logger.info("Procesando factura: %s", move.name)
             if move.l10n_pe_biller_state == "enviado":
+                _logger.info("Factura ya enviada: %s", move.name)
                 continue
             endpoint, payload = move._l10n_pe_target()
             _logger.info("Enviando %s: %s", endpoint, payload)

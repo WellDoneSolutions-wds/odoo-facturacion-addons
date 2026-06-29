@@ -939,10 +939,10 @@ class AccountMove(models.Model):
                 _logger.info("Factura ya enviada: %s", move.name)
                 continue
             endpoint, payload = move._l10n_pe_target()
-            _logger.info("Enviando %s: %s", endpoint, payload)
+            _logger.info("[[[[[[Enviando %s: %s", endpoint, payload)
             headers = {"X-Api-Key": move.company_id.sudo().l10n_pe_ne_api_key or ""}
             try:
-                _logger.info("Enviando %s: %s", endpoint, payload)
+                _logger.info("%%%Enviando %s: %s", endpoint, payload)
                 resp = requests.post(
                     base + "/generator/" + endpoint,
                     json=payload,

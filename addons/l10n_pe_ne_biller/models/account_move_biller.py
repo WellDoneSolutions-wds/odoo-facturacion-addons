@@ -929,10 +929,12 @@ class AccountMove(models.Model):
             "/"
         )
         _logger.info("URL: %s", base)
-        timeout = int(icp.get_param("l10n_pe_ne_biller.timeout", "60"))
+        timeout = int(icp.get_param("l10n_pe_ne_biller.timeout", "360"))
         _logger.info("Timeout: %s", timeout)
         for move in self:
-            _logger.info("Procesando factura: %s", move.name)
+            _logger.info(
+                "Procesando factura: %s (%s)", move.name, move.l10n_pe_biller_state
+            )
             if move.l10n_pe_biller_state == "enviado":
                 _logger.info("Factura ya enviada: %s", move.name)
                 continue

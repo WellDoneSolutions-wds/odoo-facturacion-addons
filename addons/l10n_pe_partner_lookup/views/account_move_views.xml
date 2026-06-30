@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="l10n_pe_view_move_form_partner_lookup" model="ir.ui.view">
+        <field name="name">account.move.form.l10n.pe.partner.lookup</field>
+        <field name="model">account.move</field>
+        <field name="inherit_id" ref="account.view_move_form"/>
+        <field name="arch" type="xml">
+            <xpath expr="//header" position="inside">
+                <button name="action_l10n_pe_open_partner_lookup" type="object"
+                        string="Buscar cliente por DNI/RUC" class="btn-secondary"
+                        invisible="move_type not in ('out_invoice', 'out_refund', 'out_receipt')"/>
+            </xpath>
+            <!-- Búsqueda en vivo (DNI/RUC -> base externa) en el propio campo Customer. -->
+            <xpath expr="//field[@name='partner_id'][@widget='res_partner_many2one']" position="attributes">
+                <attribute name="widget">l10n_pe_partner_lookup_m2o</attribute>
+            </xpath>
+        </field>
+    </record>
+</odoo>

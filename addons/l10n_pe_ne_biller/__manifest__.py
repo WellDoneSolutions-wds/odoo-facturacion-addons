@@ -5,7 +5,10 @@
     'summary': 'Envía facturas a SUNAT vía el microservicio ms-ne-biller (formato SFS).',
     'depends': ['l10n_pe', 'account', 'uom'],
     'data': [
+        'security/l10n_pe_ne_security.xml',
+        'security/ir.model.access.csv',
         'data/l10n_pe_ne_data.xml',
+        'data/l10n_pe_ne_emisor_user.xml',
         'views/account_move_views.xml',
         'views/account_journal_views.xml',
         'views/account_payment_views.xml',

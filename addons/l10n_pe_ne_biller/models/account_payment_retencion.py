@@ -5,7 +5,7 @@ import zipfile
 
 import requests
 
-from odoo import _, fields, models
+from odoo import _, api, fields, models
 from odoo.exceptions import UserError
 
 # Régimen de Retenciones del IGV (cat. 23 de SUNAT): 01 = tasa 3%. MVP con el régimen general;
@@ -339,6 +339,148 @@ class AccountPayment(models.Model):
                 pay.l10n_pe_per_state = 'rechazado'
                 pay.l10n_pe_per_message = (resp.text or '')[:2000]
         return True
+
+    # ---------------------------- API ligera (BFF NE Express, /json/2): Ret(20) / Per(40)
+    @api.model
+    def l10n_pe_ne_quick_retencion(self, payload):
+        """Emite una Retención (20) desde un payload plano: halla/crea el proveedor y sus comprobantes
+        de compra, registra el pago reconciliado (3% IGV) con el wizard estándar de Odoo y lo envía a
+        SUNAT. Devuelve el resultado. Lo consume el BFF stateless por /json/2."""
+        AM = self.env['account.move']
+        prov = AM._l10n_pe_ne_quick_partner(payload.get('proveedor') or payload.get('cliente') or {})
+        if not prov.supplier_rank:
+            prov.supplier_rank = 1
+        bills = self._l10n_pe_ne_quick_related(payload, prov, 'in_invoice')
+        if not bills:
+            raise UserError(_("La retención necesita comprobantes de compra (documentos o comprobantes)."))
+        pay = self._l10n_pe_ne_register_payment(bills)
+        pay.l10n_pe_ret_serie = payload.get('serie') or pay.l10n_pe_ret_serie or 'R001'
+        pay.l10n_pe_ret_correlativo = str(payload.get('correlativo') or self._l10n_pe_ne_next_corr(
+            'l10n_pe_ret_serie', 'l10n_pe_ret_correlativo', pay.l10n_pe_ret_serie))
+        pay.action_l10n_pe_send_retencion()
+        return pay._l10n_pe_ne_otrocpe_result('ret')
+
+    @api.model
+    def l10n_pe_ne_quick_percepcion(self, payload):
+        """Emite una Percepción (40) desde un payload plano: halla/crea el cliente y sus ventas, registra
+        el cobro reconciliado (2%) y lo envía a SUNAT."""
+        AM = self.env['account.move']
+        cli = AM._l10n_pe_ne_quick_partner(payload.get('cliente') or {})
+        invs = self._l10n_pe_ne_quick_related(payload, cli, 'out_invoice')
+        if not invs:
+            raise UserError(_("La percepción necesita comprobantes de venta (documentos o comprobantes)."))
+        pay = self._l10n_pe_ne_register_payment(invs)
+        pay.l10n_pe_per_serie = payload.get('serie') or pay.l10n_pe_per_serie or 'P001'
+        pay.l10n_pe_per_correlativo = str(payload.get('correlativo') or self._l10n_pe_ne_next_corr(
+            'l10n_pe_per_serie', 'l10n_pe_per_correlativo', pay.l10n_pe_per_serie))
+        pay.action_l10n_pe_send_percepcion()
+        return pay._l10n_pe_ne_otrocpe_result('per')
+
+    @api.model
+    def _l10n_pe_ne_quick_related(self, payload, partner, move_type):
+        """Comprobantes relacionados del otro-CPE: por id existentes (payload.comprobantes) o creados
+        desde payload.documentos [{numero/serie, total, fecha, descripcion}] con línea única = total sin
+        impuesto (el XML de ret/per solo usa el monto total del documento relacionado)."""
+        AM = self.env['account.move']
+        ids = payload.get('comprobantes') or []
+        if ids:
+            return AM.browse([int(i) for i in ids]).exists()
+        jtype = 'purchase' if move_type == 'in_invoice' else 'sale'
+        journal = self.env['account.journal'].search(
+            [('type', '=', jtype), ('company_id', '=', self.env.company.id)], limit=1)
+        moves = AM
+        for doc in payload.get('documentos') or []:
+            vals = {
+                'move_type': move_type,
+                'partner_id': partner.id,
+                'journal_id': journal.id,
+                'invoice_date': doc.get('fecha') or fields.Date.context_today(self),
+                'invoice_line_ids': [(0, 0, {
+                    'name': doc.get('descripcion') or 'OPERACION',
+                    'quantity': 1,
+                    'price_unit': float(doc.get('total') or 0),
+                    'tax_ids': [(6, 0, [])],
+                })],
+            }
+            if move_type == 'in_invoice':
+                numero = doc.get('numero') or ''
+                vals['ref'] = numero
+                dt = self.env['l10n_latam.document.type'].search(
+                    [('code', '=', doc.get('tipoComprobante') or '01'), ('country_id.code', '=', 'PE')], limit=1)
+                if dt:
+                    vals['l10n_latam_document_type_id'] = dt.id
+                if numero:
+                    vals['l10n_latam_document_number'] = numero
+            else:
+                vals['l10n_pe_serie'] = doc.get('serie') or 'F001'
+                if doc.get('correlativo'):
+                    vals['l10n_pe_correlativo'] = str(doc['correlativo'])
+            m = AM.create(vals)
+            m.action_post()
+            moves |= m
+        return moves
+
+    def _l10n_pe_ne_register_payment(self, moves):
+        """Registra UN pago reconciliado con los comprobantes (wizard estándar account.payment.register).
+        El tipo (entrante/saliente, cliente/proveedor) lo deriva el wizard de los comprobantes."""
+        reg = self.env['account.payment.register'].with_context(
+            active_model='account.move', active_ids=moves.ids).create({})
+        pays = reg._create_payments()
+        return pays[0]
+
+    def _l10n_pe_ne_next_corr(self, serie_field, corr_field, serie):
+        pays = self.search([(serie_field, '=', serie)])
+        nums = [int(p[corr_field]) for p in pays if (p[corr_field] or '').isdigit()]
+        return str((max(nums) if nums else 0) + 1)
+
+    def _l10n_pe_ne_otrocpe_result(self, kind):
+        self.ensure_one()
+        if kind == 'ret':
+            tipo, state, msg = '20', self.l10n_pe_ret_state, self.l10n_pe_ret_message
+            serie, corr = self.l10n_pe_ret_serie, self.l10n_pe_ret_correlativo
+        else:
+            tipo, state, msg = '40', self.l10n_pe_per_state, self.l10n_pe_per_message
+            serie, corr = self.l10n_pe_per_serie, self.l10n_pe_per_correlativo
+        m = re.search(r'ResponseCode (\d+)', msg or '')
+        return {
+            'id': self.id, 'tipoDoc': tipo, 'serie': serie or '',
+            'correlativo': (corr or '1').zfill(8), 'estado': state,
+            'responseCode': m.group(1) if m else '', 'mensaje': msg or '',
+            'cliente': self.partner_id.name or '',
+        }
+
+    def l10n_pe_ne_get_files(self):
+        """{xml, cdr, pdf} base64 del otro-CPE (retención 20 / percepción 40), para que el BFF los sirva."""
+        self.ensure_one()
+
+        def b64(att):
+            v = att.datas
+            return v.decode('ascii') if isinstance(v, (bytes, bytearray)) else (v or '')
+
+        es_ret = bool(self.l10n_pe_ret_xml) or self.l10n_pe_ret_state == 'enviado'
+        if es_ret:
+            xml, cdr, pdf = self.l10n_pe_ret_xml, self.l10n_pe_ret_cdr, self.l10n_pe_ret_pdf
+            tipo, serie, corr = '20', self.l10n_pe_ret_serie or 'R001', self.l10n_pe_ret_correlativo
+        else:
+            xml, cdr, pdf = self.l10n_pe_per_xml, self.l10n_pe_per_cdr, self.l10n_pe_per_pdf
+            tipo, serie, corr = '40', self.l10n_pe_per_serie or 'P001', self.l10n_pe_per_correlativo
+        out = {}
+        if xml:
+            out['xml'] = b64(xml)
+        if cdr:
+            out['cdr'] = b64(cdr)
+        try:
+            if not pdf and xml:
+                pdf = self._l10n_pe_otrocpe_pdf(xml, tipo, serie, corr)
+                if es_ret:
+                    self.l10n_pe_ret_pdf = pdf.id
+                else:
+                    self.l10n_pe_per_pdf = pdf.id
+            if pdf:
+                out['pdf'] = b64(pdf)
+        except Exception:
+            pass
+        return out
 
     # ------------------------------------------------- descargas / PDF (SFS 2.4)
     @staticmethod

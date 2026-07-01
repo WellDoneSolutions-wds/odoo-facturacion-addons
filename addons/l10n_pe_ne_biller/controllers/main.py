@@ -97,6 +97,10 @@ class L10nPeNeApi(http.Controller):
         u = self._user(uid)
         return request.env['account.payment'].with_user(uid).with_company(u.company_id)
 
+    def _partner(self, uid):
+        u = self._user(uid)
+        return request.env['res.partner'].with_user(uid).with_company(u.company_id)
+
     def _gasto(self, uid):
         u = self._user(uid)
         return request.env['l10n_pe_ne.gasto'].with_user(uid).with_company(u.company_id)
@@ -495,6 +499,52 @@ class L10nPeNeApi(http.Controller):
         if not uid:
             return self._unauth()
         return self._run(lambda: self._move(uid).l10n_pe_ne_delete_cliente(int(rec_id)))
+
+    # ------------------------------------------------ clientes: lookup externo
+    # Reutiliza el motor del addon l10n_pe_partner_lookup (búsqueda por DNI/RUC en
+    # API HTTP / DynamoDB / SUNAT) SIN duplicarlo. Integración OPCIONAL: si ese
+    # addon no está instalado, los métodos no existen en res.partner → degradamos
+    # (GET → [], POST → 501) para no acoplar duro l10n_pe_ne_biller con él.
+    @http.route('/ne/api/clientes/lookup', **_GET)
+    def lookup_cliente(self, doc=None, **kw):
+        """Sugerencia en vivo mientras se tipea: si 'doc' es un DNI(8)/RUC(11) que
+        aún NO existe en Odoo, consulta la fuente externa. Devuelve
+        [{doc_number, name, label}] o [] (no aplica / no hay addon / error suave)."""
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        partners = self._partner(uid)
+        if not hasattr(partners, 'l10n_pe_get_field_suggestions'):
+            return self._json([])
+        try:
+            return self._json(partners.l10n_pe_get_field_suggestions(doc or ''))
+        except Exception as e:  # noqa: BLE001
+            return self._fail(e)
+
+    @http.route('/ne/api/clientes/lookup', **_POST)
+    def create_cliente_lookup(self, **kw):
+        """Trae el documento de la fuente externa y crea (o reusa) el cliente.
+        Devuelve el cliente en el MISMO shape que GET /ne/api/clientes."""
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        partners = self._partner(uid)
+        if not hasattr(partners, 'l10n_pe_create_partner_from_document'):
+            return self._err('La búsqueda por DNI/RUC no está disponible '
+                             '(instala el addon l10n_pe_partner_lookup).', status=501)
+
+        def _do():
+            doc = (self._body().get('doc') or '').strip()
+            if not doc:
+                raise UserError('Indica el documento (DNI/RUC).')
+            res = partners.l10n_pe_create_partner_from_document(doc)
+            if not res:
+                raise UserError('No se encontró el documento %s en la fuente externa.' % doc)
+            partner = self._partner(uid).browse(res['id'])
+            if not partner.customer_rank:
+                partner.customer_rank = 1  # que aparezca luego en el buscador local
+            return self._move(uid)._l10n_pe_ne_partner_dict(partner)
+        return self._run(_do)
 
     # -------------------------------------------------------------- productos
     @http.route('/ne/api/productos', **_GET)

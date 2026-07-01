@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<templates xml:space="preserve">
+    <t t-name="l10n_pe_partner_lookup.PartnerLookupMany2one">
+        <Many2One t-props="this.m2oProps">
+            <t t-set-slot="externalOption" t-slot-scope="scope">
+                <div class="o_m2o_dropdown_option d-flex align-items-center">
+                    <i class="fa fa-cloud-download me-2 text-muted" role="img" aria-label="Externo" title="Base externa"/>
+                    <span t-esc="scope.label"/>
+                </div>
+            </t>
+        </Many2One>
+    </t>
+</templates>

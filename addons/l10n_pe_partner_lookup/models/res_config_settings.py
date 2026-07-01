@@ -32,12 +32,15 @@ class ResConfigSettings(models.TransientModel):
     l10n_pe_dynamo_region = fields.Char(
         string="Región AWS",
         config_parameter='l10n_pe_partner_lookup.aws_region',
-        help="Región de la tabla, p. ej. us-east-1.",
+        help="Región de la tabla, p. ej. us-east-1. Opcional si en «Tabla» pegas el ARN "
+             "(la región se toma del ARN).",
     )
     l10n_pe_dynamo_table = fields.Char(
         string="Tabla DynamoDB",
         config_parameter='l10n_pe_partner_lookup.dynamo_table',
-        help="Nombre de la tabla a consultar.",
+        help="Nombre de la tabla, o su ARN completo "
+             "(arn:aws:dynamodb:region:cuenta:table/Nombre). Con el ARN se deduce "
+             "también la región.",
     )
     l10n_pe_dynamo_hash_key = fields.Char(
         string="Clave de partición (hash)",

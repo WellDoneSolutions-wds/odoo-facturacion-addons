@@ -546,6 +546,22 @@ class L10nPeNeApi(http.Controller):
             return self._move(uid)._l10n_pe_ne_partner_dict(partner)
         return self._run(_do)
 
+    @http.route('/ne/api/clientes/datos', **_GET)
+    def lookup_cliente_datos(self, doc=None, **kw):
+        """Datos del documento para AUTOCOMPLETAR el formulario 'Nuevo cliente' SIN
+        crear el partner (la creación ocurre luego con POST /ne/api/clientes).
+        Devuelve {} si no aplica / no está el addon / no se encuentra."""
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        partners = self._partner(uid)
+        if not hasattr(partners, 'l10n_pe_lookup_partner_data'):
+            return self._json({})
+        try:
+            return self._json(partners.l10n_pe_lookup_partner_data(doc or ''))
+        except Exception as e:  # noqa: BLE001
+            return self._fail(e)
+
     # -------------------------------------------------------------- productos
     @http.route('/ne/api/productos', **_GET)
     def list_productos(self, q=None, **kw):

@@ -27,12 +27,37 @@ bloque **«Búsqueda de cliente por DNI/RUC»**. Elige la **Fuente de datos**:
 ### Modo «DynamoDB (directo)»
 Consulta la tabla con `boto3` (`get_item` por **clave primaria compuesta**).
 Requiere `pip install boto3`.
-- **Región AWS** (p. ej. `us-east-1`) y **Tabla**.
+- **Región AWS** (p. ej. `us-east-1`) y **Tabla**. En **Tabla** puedes poner el
+  *nombre* o pegar el **ARN completo**
+  (`arn:aws:dynamodb:REGION:CUENTA:table/NOMBRE`); con el ARN se deduce también la
+  región, y el campo Región queda opcional.
 - **Clave de partición (hash)**: por defecto `tipo_documento`. Su valor (`RUC`/`DNI`)
   se deduce de la longitud del número (11 = RUC, si no = DNI).
 - **Clave de ordenación (range)**: por defecto `numero_documento` (el número).
 - **AWS Access Key / Secret**: déjalas vacías para usar **rol IAM o variables de
   entorno** (recomendado); boto3 las descubre solo.
+
+#### Autenticación en AWS: rol IAM SIN llaves (recomendado)
+Si Odoo corre **dentro de AWS** (EC2 / ECS / EKS / Lambda), NO pongas Access Key ni
+Secret: adjunta un **rol IAM** al cómputo (instance profile / ECS task role / EKS
+IRSA / execution role) y `boto3` toma credenciales temporales automáticamente (con
+rotación, sin llaves). Ojo: **un ARN por sí solo no autentica**; el ARN de la tabla
+se usa para acotar el permiso del rol (mínimo privilegio):
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Action": "dynamodb:GetItem",
+    "Resource": "arn:aws:dynamodb:us-east-1:123456789012:table/clientes"
+  }]
+}
+```
+
+Fuera de AWS (on-prem/otra nube) no hay rol de instancia: usa **IAM Roles Anywhere**
+(certificado X.509, keyless) o `AssumeRole` con credenciales base mínimas; como
+último recurso, llaves de un usuario dedicado con solo ese `GetItem`.
 
 ### SUNAT (último recurso, opcional)
 Toggle **"Usar SUNAT como respaldo"** + **Token**. Si el documento no aparece en

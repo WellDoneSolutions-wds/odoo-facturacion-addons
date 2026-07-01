@@ -31,11 +31,12 @@
                              invisible="l10n_pe_lookup_mode != 'dynamodb'">
                             <div class="row">
                                 <label for="l10n_pe_dynamo_region" class="col-lg-4 o_light_label"/>
-                                <field name="l10n_pe_dynamo_region" placeholder="us-east-1"/>
+                                <field name="l10n_pe_dynamo_region" placeholder="us-east-1 (opcional si Tabla es un ARN)"/>
                             </div>
                             <div class="row">
                                 <label for="l10n_pe_dynamo_table" class="col-lg-4 o_light_label"/>
-                                <field name="l10n_pe_dynamo_table" placeholder="clientes"/>
+                                <field name="l10n_pe_dynamo_table"
+                                       placeholder="clientes  —o—  arn:aws:dynamodb:us-east-1:123456789012:table/clientes"/>
                             </div>
                             <div class="row">
                                 <label for="l10n_pe_dynamo_hash_key" class="col-lg-4 o_light_label"/>

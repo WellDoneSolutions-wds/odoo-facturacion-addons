@@ -89,6 +89,21 @@ class ResPartner(models.Model):
         return self._l10n_pe_normalize_payload(payload)
 
     @api.model
+    def _l10n_pe_parse_dynamo_table(self, value):
+        """Acepta el NOMBRE de la tabla o su ARN. Devuelve (region_or_None, table_name).
+        ARN DynamoDB: arn:aws:dynamodb:<region>:<cuenta>:table/<NombreTabla>."""
+        value = (value or '').strip()
+        if value.startswith('arn:'):
+            parts = value.split(':')
+            # 0:arn 1:aws 2:dynamodb 3:<region> 4:<cuenta> 5:table/<Nombre>
+            if len(parts) >= 6 and parts[2] == 'dynamodb':
+                resource = parts[5]
+                name = resource.split('/', 1)[1] if '/' in resource else resource
+                return (parts[3] or None), name
+            return None, value  # ARN no reconocido → se usa tal cual (best-effort)
+        return None, value
+
+    @api.model
     def _l10n_pe_query_dynamodb(self, doc_number):
         """Modo DynamoDB: get_item directo por la clave de partición.
 
@@ -103,16 +118,20 @@ class ResPartner(models.Model):
             ))
 
         icp = self.env['ir.config_parameter'].sudo()
-        region = icp.get_param('l10n_pe_partner_lookup.aws_region')
-        table_name = icp.get_param('l10n_pe_partner_lookup.dynamo_table')
+        # La "Tabla" acepta el nombre o el ARN completo; si es un ARN, de él sale
+        # también la región (y prevalece sobre el campo Región).
+        arn_region, table_name = self._l10n_pe_parse_dynamo_table(
+            icp.get_param('l10n_pe_partner_lookup.dynamo_table'))
+        region = arn_region or icp.get_param('l10n_pe_partner_lookup.aws_region')
         hash_key = icp.get_param('l10n_pe_partner_lookup.dynamo_hash_key') or 'tipo_documento'
         range_key = icp.get_param('l10n_pe_partner_lookup.dynamo_range_key') or 'numero_documento'
         access_key = icp.get_param('l10n_pe_partner_lookup.aws_access_key_id')
         secret_key = icp.get_param('l10n_pe_partner_lookup.aws_secret_access_key')
         if not (region and table_name):
             raise UserError(_(
-                "Configura la región y la tabla de DynamoDB en "
-                "Ajustes → Facturación → «Búsqueda de cliente por DNI/RUC»."
+                "Configura la tabla de DynamoDB (nombre o ARN) y la región en "
+                "Ajustes → Facturación → «Búsqueda de cliente por DNI/RUC». "
+                "Si pegas el ARN de la tabla, la región se toma de él."
             ))
 
         kwargs = {'region_name': region}
@@ -316,6 +335,50 @@ class ResPartner(models.Model):
         if not partner:
             return False
         return {"id": partner.id, "display_name": partner.display_name}
+
+    @api.model
+    def l10n_pe_lookup_partner_data(self, doc_number):
+        """Devuelve los datos de un documento para AUTOCOMPLETAR un formulario,
+        SIN crear el partner. Si ya existe en Odoo, devuelve sus datos con
+        exists=True (y su id) para avisar que al guardar se reusará. Si no existe,
+        consulta la fuente externa (y SUNAT como respaldo). Degrada a {} ante
+        cualquier fallo o si no se encuentra (para completar a mano)."""
+        doc_number = (doc_number or '').strip()
+        if not self._l10n_pe_is_document_number(doc_number):
+            return {}
+        partner = self._l10n_pe_find_partner(doc_number)
+        if partner:
+            return {
+                'exists': True,
+                'id': partner.id,
+                'doc_number': partner.vat or doc_number,
+                'doc_type': partner.l10n_latam_identification_type_id.l10n_pe_vat_code or '',
+                'name': partner.name or '',
+                'address': partner.street or '',
+                'email': partner.email or '',
+                'phone': partner.phone or '',
+            }
+        try:
+            data = self._l10n_pe_query_external_db(doc_number)
+            if not data:
+                data = self._l10n_pe_query_sunat(doc_number)
+        except Exception:  # noqa: BLE001
+            _logger.warning(
+                "l10n_pe_partner_lookup: autocompletar falló para %s",
+                doc_number, exc_info=True)
+            return {}
+        if not data:
+            return {}
+        id_type = self._l10n_pe_map_identification_type(data.get('doc_type'), data['doc_number'])
+        return {
+            'exists': False,
+            'doc_number': data['doc_number'],
+            'doc_type': (id_type.l10n_pe_vat_code if id_type else '') or '',
+            'name': data['name'],
+            'address': data.get('address') or '',
+            'email': '',
+            'phone': '',
+        }
 
     # ------------------------------------------------------------------
     # SUNAT (último recurso): scraping de e-consultaruc

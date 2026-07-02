@@ -1,0 +1,78 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="res_config_settings_view_form_l10n_pe_lookup" model="ir.ui.view">
+        <field name="name">res.config.settings.view.form.l10n.pe.lookup</field>
+        <field name="model">res.config.settings</field>
+        <field name="inherit_id" ref="account.res_config_settings_view_form"/>
+        <field name="arch" type="xml">
+            <xpath expr="//app[@name='account']" position="inside">
+                <block title="Búsqueda de cliente por DNI/RUC"
+                       id="l10n_pe_partner_lookup_setting_container">
+                    <setting string="Fuente de datos"
+                             help="De dónde se obtienen los clientes al buscar por DNI/RUC.">
+                        <field name="l10n_pe_lookup_mode" widget="radio" class="o_light_label"/>
+
+                        <!-- Modo API HTTP -->
+                        <div class="content-group mt16"
+                             invisible="l10n_pe_lookup_mode != 'api'">
+                            <div class="row">
+                                <label for="l10n_pe_lookup_api_url" class="col-lg-4 o_light_label"/>
+                                <field name="l10n_pe_lookup_api_url"
+                                       placeholder="https://tu-api.execute-api.us-east-1.amazonaws.com/prod/documento"/>
+                            </div>
+                            <div class="row">
+                                <label for="l10n_pe_lookup_api_key" class="col-lg-4 o_light_label"/>
+                                <field name="l10n_pe_lookup_api_key" password="True"/>
+                            </div>
+                        </div>
+
+                        <!-- Modo DynamoDB directo -->
+                        <div class="content-group mt16"
+                             invisible="l10n_pe_lookup_mode != 'dynamodb'">
+                            <div class="row">
+                                <label for="l10n_pe_dynamo_region" class="col-lg-4 o_light_label"/>
+                                <field name="l10n_pe_dynamo_region" placeholder="us-east-1 (opcional si Tabla es un ARN)"/>
+                            </div>
+                            <div class="row">
+                                <label for="l10n_pe_dynamo_table" class="col-lg-4 o_light_label"/>
+                                <field name="l10n_pe_dynamo_table"
+                                       placeholder="clientes  —o—  arn:aws:dynamodb:us-east-1:123456789012:table/clientes"/>
+                            </div>
+                            <div class="row">
+                                <label for="l10n_pe_dynamo_hash_key" class="col-lg-4 o_light_label"/>
+                                <field name="l10n_pe_dynamo_hash_key" placeholder="tipo_documento"/>
+                            </div>
+                            <div class="row">
+                                <label for="l10n_pe_dynamo_range_key" class="col-lg-4 o_light_label"/>
+                                <field name="l10n_pe_dynamo_range_key" placeholder="numero_documento"/>
+                            </div>
+                            <div class="row">
+                                <label for="l10n_pe_aws_access_key_id" class="col-lg-4 o_light_label"/>
+                                <field name="l10n_pe_aws_access_key_id"
+                                       placeholder="(vacío si usas rol IAM)"/>
+                            </div>
+                            <div class="row">
+                                <label for="l10n_pe_aws_secret_access_key" class="col-lg-4 o_light_label"/>
+                                <field name="l10n_pe_aws_secret_access_key" password="True"/>
+                            </div>
+                            <div class="text-muted mt8">
+                                Recomendado: usa un rol IAM o variables de entorno y deja
+                                las llaves vacías. Requiere el paquete <code>boto3</code>.
+                            </div>
+                        </div>
+                    </setting>
+                    <setting string="SUNAT (último recurso)"
+                             help="Si el documento no está en Odoo ni en la fuente principal, se consulta SUNAT.">
+                        <field name="l10n_pe_sunat_enabled"/>
+                        <div class="content-group mt8" invisible="not l10n_pe_sunat_enabled">
+                            <div class="row">
+                                <label for="l10n_pe_sunat_token" class="col-lg-4 o_light_label"/>
+                                <field name="l10n_pe_sunat_token" placeholder="token de SUNAT"/>
+                            </div>
+                        </div>
+                    </setting>
+                </block>
+            </xpath>
+        </field>
+    </record>
+</odoo>

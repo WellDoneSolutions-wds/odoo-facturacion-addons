@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="l10n_pe_partner_lookup_wizard_form" model="ir.ui.view">
+        <field name="name">l10n.pe.partner.lookup.wizard.form</field>
+        <field name="model">l10n_pe.partner.lookup.wizard</field>
+        <field name="arch" type="xml">
+            <form string="Buscar cliente por DNI/RUC">
+                <field name="move_id" invisible="1"/>
+                <field name="lookup_state" invisible="1"/>
+                <field name="existing_partner_id" invisible="1"/>
+                <group>
+                    <field name="doc_number"
+                           placeholder="Ingresa DNI (8 dígitos) o RUC (11 dígitos)"
+                           readonly="lookup_state in ('found', 'existing')"/>
+                </group>
+                <div class="alert alert-success" role="alert"
+                     invisible="lookup_state != 'existing'">
+                    Este documento ya tiene un cliente en Odoo. Pulsa
+                    <strong>Seleccionar</strong> para usarlo en la factura.
+                </div>
+                <div class="alert alert-warning" role="alert"
+                     invisible="lookup_state != 'not_found'">
+                    No se encontró el documento en la base externa. Créalo
+                    manualmente o intenta con otro número.
+                </div>
+                <group string="Datos encontrados" invisible="lookup_state != 'found'">
+                    <field name="preview_name"/>
+                    <field name="preview_doc_type"/>
+                    <field name="preview_address"/>
+                    <field name="preview_state"/>
+                </group>
+                <footer>
+                    <button name="action_search" type="object" string="Buscar"
+                            class="btn-primary"
+                            invisible="lookup_state in ('found', 'existing')"/>
+                    <button name="action_confirm" type="object"
+                            string="Crear y seleccionar" class="btn-primary"
+                            invisible="lookup_state != 'found'"/>
+                    <button name="action_confirm" type="object"
+                            string="Seleccionar" class="btn-primary"
+                            invisible="lookup_state != 'existing'"/>
+                    <button name="action_reset" type="object" string="Nueva búsqueda"
+                            class="btn-secondary"
+                            invisible="lookup_state == 'search'"/>
+                    <button string="Cancelar" class="btn-secondary" special="cancel"/>
+                </footer>
+            </form>
+        </field>
+    </record>
+</odoo>

@@ -1,0 +1,80 @@
+# Deploy de los addons al EC2 de producción (SSM Run Command, sin SSH).
+#
+# AUTENTICACIÓN: OIDC — asume el rol odoo-mype-deploy-addon (definido en el
+# repo de infra `alvaro`, terraform/deploy-roles.tf). Sin secrets de AWS acá.
+# El rol solo permite: ubicar el EC2 por tag + ejecutar AWS-RunShellScript en
+# esa instancia + leer el resultado. Y SOLO desde runs del Environment
+# "production" de este repo.
+#
+# GATE: este deploy REINICIA Odoo para todas las empresas (~1 min de corte) —
+# el Environment "production" debe tener Required reviewers: cada deploy
+# espera aprobación humana.
+#
+# Se dispara solo con cambios de addons/ en main (o a mano con Run workflow).
+# Cambios de scripts/ o .github/ no deployan solos.
+
+name: deploy
+
+on:
+  push:
+    branches: [main]
+    paths: ["addons/**"]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-addon
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write # OIDC
+
+env:
+  AWS_REGION: us-east-1
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production # ← Required reviewers = aprobación manual
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::260270784158:role/odoo-mype-deploy-addon
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Deploy en el EC2 vía SSM
+        run: |
+          set -euo pipefail
+          IID=$(aws ec2 describe-instances \
+            --filters "Name=tag:Project,Values=odoo-mype" "Name=instance-state-name,Values=running" \
+            --query "Reservations[0].Instances[0].InstanceId" --output text)
+          echo "Instancia: $IID — deployando ${{ github.sha }}"
+
+          # El bootstrap trae el repo al SHA y corre el script DESDE /tmp
+          # (un script no debe reescribirse a sí mismo durante el checkout).
+          CMD_ID=$(aws ssm send-command \
+            --instance-ids "$IID" \
+            --document-name AWS-RunShellScript \
+            --comment "deploy addons ${{ github.sha }}" \
+            --parameters 'commands=["cd /home/ubuntu/odoo-facturacion-addons && git fetch origin && git checkout -B main ${{ github.sha }} && install -m 755 scripts/deploy-addons.sh /tmp/deploy-addons.sh && /tmp/deploy-addons.sh ${{ github.sha }}"],executionTimeout=["1800"]' \
+            --cloud-watch-output-config "CloudWatchLogGroupName=/aws/ssm/odoo-mype-deploy-addons,CloudWatchOutputEnabled=true" \
+            --query Command.CommandId --output text)
+          echo "Comando SSM: $CMD_ID"
+
+          while true; do
+            sleep 10
+            STATUS=$(aws ssm get-command-invocation --command-id "$CMD_ID" \
+              --instance-id "$IID" --query Status --output text)
+            echo "estado: $STATUS"
+            case "$STATUS" in
+              Success|Failed|Cancelled|TimedOut|Undeliverable) break ;;
+            esac
+          done
+
+          echo "── salida (truncada a 24KB; completa en CloudWatch /aws/ssm/odoo-mype-deploy-addons):"
+          aws ssm get-command-invocation --command-id "$CMD_ID" --instance-id "$IID" \
+            --query StandardOutputContent --output text
+          aws ssm get-command-invocation --command-id "$CMD_ID" --instance-id "$IID" \
+            --query StandardErrorContent --output text >&2
+
+          [ "$STATUS" = "Success" ]

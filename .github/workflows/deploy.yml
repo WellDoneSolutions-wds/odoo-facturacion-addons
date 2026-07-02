@@ -12,6 +12,12 @@
 #
 # Se dispara solo con cambios de addons/ en main (o a mano con Run workflow).
 # Cambios de scripts/ o .github/ no deployan solos.
+#
+# RAMAS: para deployar una rama distinta de main (Run workflow eligiéndola),
+# el Environment "production" debe permitirla en "Deployment branches"
+# (Settings → Environments) y la rama debe contener este archivo. El gate de
+# aprobación aplica igual. OJO: deja los addons ≠ main hasta el próximo
+# deploy de main — el summary lo avisa.
 
 name: deploy
 
@@ -79,5 +85,11 @@ jobs:
             --query StandardOutputContent --output text
           aws ssm get-command-invocation --command-id "$CMD_ID" --instance-id "$IID" \
             --query StandardErrorContent --output text >&2
+
+          echo "### 🚀 addons deployados — \`$GITHUB_REF_NAME\` @ \`${GITHUB_SHA::7}\` ($STATUS)" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$GITHUB_REF_NAME" != "main" ]; then
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "> ⚠️ **ADDONS ≠ main**: se deployó la rama \`$GITHUB_REF_NAME\` (esquemas de las BDs incluidos). Al terminar de probar, restaurá con Run workflow desde \`main\` (o mergeá la rama)." >> "$GITHUB_STEP_SUMMARY"
+          fi
 
           [ "$STATUS" = "Success" ]

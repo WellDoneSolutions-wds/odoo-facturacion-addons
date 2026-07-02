@@ -52,11 +52,14 @@ jobs:
 
           # El bootstrap trae el repo al SHA y corre el script DESDE /tmp
           # (un script no debe reescribirse a sí mismo durante el checkout).
+          # Todo como usuario ubuntu (-H): SSM corre como root y git rechaza
+          # operar en un repo ajeno ("dubious ownership"); además así no quedan
+          # archivos de root mezclados en el repo ni en backups/.
           CMD_ID=$(aws ssm send-command \
             --instance-ids "$IID" \
             --document-name AWS-RunShellScript \
             --comment "deploy addons ${{ github.sha }}" \
-            --parameters 'commands=["cd /home/ubuntu/odoo-facturacion-addons && git fetch origin && git checkout -B main ${{ github.sha }} && install -m 755 scripts/deploy-addons.sh /tmp/deploy-addons.sh && /tmp/deploy-addons.sh ${{ github.sha }}"],executionTimeout=["1800"]' \
+            --parameters 'commands=["set -e","cd /home/ubuntu/odoo-facturacion-addons","sudo -u ubuntu -H git fetch origin","sudo -u ubuntu -H git checkout -B main ${{ github.sha }}","install -m 755 scripts/deploy-addons.sh /tmp/deploy-addons.sh","sudo -u ubuntu -H /tmp/deploy-addons.sh ${{ github.sha }}"],executionTimeout=["1800"]' \
             --cloud-watch-output-config "CloudWatchLogGroupName=/aws/ssm/odoo-mype-deploy-addons,CloudWatchOutputEnabled=true" \
             --query Command.CommandId --output text)
           echo "Comando SSM: $CMD_ID"

@@ -8,7 +8,7 @@
       <xpath expr="//header" position="inside">
         <button name="action_l10n_pe_send_to_biller" type="object"
                 string="Enviar al Facturador" class="btn-primary"
-                invisible="move_type not in ('out_invoice', 'out_refund') or state != 'posted' or l10n_pe_biller_state in ('enviado', 'anulado')"/>
+                invisible="move_type not in ('out_invoice', 'out_refund') or state != 'posted' or l10n_pe_biller_state in ('enviado', 'anulado', 'en_proceso')"/>
         <button name="action_l10n_pe_send_baja" type="object"
                 string="Comunicar Baja" class="btn-secondary"
                 confirm="Esto comunicará a SUNAT la baja (anulación) del comprobante. ¿Continuar?"
@@ -23,7 +23,7 @@
                 string="Descargar CDR" class="btn-secondary" icon="fa-file-archive-o"
                 invisible="not l10n_pe_biller_cdr"/>
         <field name="l10n_pe_biller_state" widget="statusbar"
-               statusbar_visible="por_enviar,enviado,anulado"/>
+               statusbar_visible="por_enviar,en_proceso,enviado,anulado"/>
       </xpath>
       <xpath expr="//field[@name='invoice_date']" position="after">
         <field name="l10n_pe_serie"/>

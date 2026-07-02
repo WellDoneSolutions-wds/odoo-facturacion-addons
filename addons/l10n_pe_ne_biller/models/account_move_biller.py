@@ -1,10 +1,17 @@
 import base64
 import io
+import json
 import logging
 import re
 import zipfile
 
 import requests
+
+try:  # SQS para el modo asíncrono (l10n_pe_ne_biller.async_enabled); si falta
+    import boto3  # boto3, el modo síncrono sigue funcionando igual.
+except ImportError:  # pragma: no cover
+    boto3 = None
+
 from odoo import _, api, fields, models
 from odoo.exceptions import UserError
 
@@ -75,6 +82,7 @@ class AccountMove(models.Model):
     l10n_pe_biller_state = fields.Selection(
         selection=[
             ("por_enviar", "Por enviar"),
+            ("en_proceso", "En proceso"),
             ("enviado", "Enviado"),
             ("anulado", "Anulado"),
             ("rechazado", "Rechazado"),
@@ -992,6 +1000,143 @@ class AccountMove(models.Model):
             pass
         return code, desc
 
+    def _l10n_pe_apply_emission_response(self, ok, body_text, cdr_b64):
+        """Aplica al move el resultado de una emisión — mismo tratamiento para el
+        flujo síncrono (respuesta HTTP directa) y el asíncrono (cron que recoge
+        XML/CDR desde S3 vía el worker): adjunta el XML firmado, guarda el CDR,
+        congela la identidad emitida y fija estado + mensaje."""
+        self.ensure_one()
+        signed = ok and any(
+            tag in (body_text or "")
+            for tag in ("<Invoice", "<CreditNote", "<DebitNote")
+        )
+        if not signed:
+            self.l10n_pe_biller_state = "rechazado"
+            self.l10n_pe_biller_message = (body_text or "")[:2000]
+            return
+        serie, correlativo = self._l10n_pe_serie_correlativo()
+        att = self.env["ir.attachment"].create(
+            {
+                "name": "%s-%s-%s.xml"
+                % (self.company_id.vat, serie, correlativo.zfill(8)),
+                "res_model": "account.move",
+                "res_id": self.id,
+                "mimetype": "application/xml",
+                "raw": body_text.encode("utf-8"),
+            }
+        )
+        self.l10n_pe_biller_xml = att.id
+        self.l10n_pe_biller_state = "enviado"
+        # Congela la identidad emitida para una eventual baja (no recomputar luego del partner/nombre).
+        self.l10n_pe_ne_tipo_doc = self._l10n_pe_document_type()
+        self.l10n_pe_ne_serie_emit = serie
+        self.l10n_pe_ne_corr_emit = correlativo.zfill(8)
+        code, desc = self._l10n_pe_store_cdr(cdr_b64) if cdr_b64 else ("", "")
+        if code == "0":
+            self.l10n_pe_biller_message = _(
+                "Aceptado por SUNAT — CDR ResponseCode 0. %s"
+            ) % (desc or "")
+        elif code:
+            self.l10n_pe_biller_message = _(
+                "CDR de SUNAT (ResponseCode %s). %s"
+            ) % (code, desc or "")
+        else:
+            self.l10n_pe_biller_message = _("Aceptado por el facturador (HTTP 200).")
+
+    # -------------------------------------------------------- emisión asíncrona
+    # Toggle: ir.config_parameter `l10n_pe_ne_biller.async_enabled` = "1".
+    # Odoo encola en SQS (rol IAM del EC2, patrón del sibling partner_lookup) y
+    # responde al instante; el Lambda facturas-worker procesa contra biller-core
+    # con idempotencia (DynamoDB) y deja XML/CDR en S3; el cron de abajo recoge.
+
+    def _l10n_pe_enqueue_emission(self, icp):
+        self.ensure_one()
+        queue_url = icp.get_param("l10n_pe_ne_biller.sqs_queue_url", "")
+        region = icp.get_param("l10n_pe_ne_biller.aws_region", "us-east-1")
+        if not boto3 or not queue_url:
+            self.l10n_pe_biller_state = "error"
+            self.l10n_pe_biller_message = _(
+                "Modo asíncrono activo pero falta boto3 o el parámetro "
+                "l10n_pe_ne_biller.sqs_queue_url."
+            )
+            return
+        endpoint, payload = self._l10n_pe_target()
+        serie, correlativo = self._l10n_pe_serie_correlativo()
+        msg = {
+            "ruc": self.company_id.vat or "",
+            "serie_correlativo": "%s-%s" % (serie, correlativo.zfill(8)),
+            "db": self.env.cr.dbname,
+            "move_id": self.id,
+            "path": "/generator/" + endpoint,
+            "api_key": self.company_id.sudo().l10n_pe_ne_api_key or "",
+            "payload": payload,
+        }
+        try:
+            boto3.client("sqs", region_name=region).send_message(
+                QueueUrl=queue_url,
+                MessageBody=json.dumps(msg, ensure_ascii=False),
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.l10n_pe_biller_state = "error"
+            self.l10n_pe_biller_message = _("No se pudo encolar la emisión: %s") % exc
+            return
+        self.l10n_pe_biller_state = "en_proceso"
+        self.l10n_pe_biller_message = _(
+            "Encolado para envío a SUNAT — el resultado llega en unos minutos."
+        )
+
+    @api.model
+    def _l10n_pe_cron_poll_async(self):
+        """Recoge resultados de emisiones asíncronas: lee el item del worker en
+        DynamoDB (PK ruc_emisor / SK serie_correlativo) y, si terminó, baja el
+        XML/CDR de S3 y lo aplica con el mismo código del flujo síncrono."""
+        icp = self.env["ir.config_parameter"].sudo()
+        if icp.get_param("l10n_pe_ne_biller.async_enabled", "").strip().lower() not in ("1", "true"):
+            return
+        table = icp.get_param("l10n_pe_ne_biller.results_table", "")
+        bucket = icp.get_param("l10n_pe_ne_biller.results_bucket", "")
+        region = icp.get_param("l10n_pe_ne_biller.aws_region", "us-east-1")
+        if not boto3 or not table or not bucket:
+            _logger.warning(
+                "async biller: faltan parámetros results_table/results_bucket o boto3"
+            )
+            return
+        ddb = boto3.client("dynamodb", region_name=region)
+        s3c = boto3.client("s3", region_name=region)
+        moves = self.search([("l10n_pe_biller_state", "=", "en_proceso")], limit=25)
+        for move in moves:
+            try:
+                serie, correlativo = move._l10n_pe_serie_correlativo()
+                key = {
+                    "ruc_emisor": {"S": move.company_id.vat or ""},
+                    "serie_correlativo": {"S": "%s-%s" % (serie, correlativo.zfill(8))},
+                }
+                item = ddb.get_item(TableName=table, Key=key).get("Item")
+                if not item:  # aún en cola o procesándose
+                    continue
+                status = item["status"]["S"]
+                if status == "enviado":
+                    xml_key = (item.get("xml_s3_key") or {}).get("S", "")
+                    body = (
+                        s3c.get_object(Bucket=bucket, Key=xml_key)["Body"]
+                        .read()
+                        .decode("iso-8859-1")
+                    )
+                    cdr_b64 = ""
+                    cdr_key = (item.get("cdr_s3_key") or {}).get("S", "")
+                    if cdr_key:
+                        cdr_b64 = base64.b64encode(
+                            s3c.get_object(Bucket=bucket, Key=cdr_key)["Body"].read()
+                        ).decode()
+                    move._l10n_pe_apply_emission_response(True, body, cdr_b64)
+                elif status in ("rechazado", "error"):
+                    move.l10n_pe_biller_state = status
+                    move.l10n_pe_biller_message = (
+                        (item.get("message") or {}).get("S") or ""
+                    )[:2000]
+            except Exception as exc:  # noqa: BLE001 — un move malo no frena al resto
+                _logger.warning("async biller: error procesando %s: %s", move.name, exc)
+
     # ------------------------------------------------------------------ acción
     def action_l10n_pe_send_to_biller(self):
         _logger.info("Enviando facturas a Biller: %s", self.ids)
@@ -1002,12 +1147,18 @@ class AccountMove(models.Model):
         _logger.info("URL: %s", base)
         timeout = int(icp.get_param("l10n_pe_ne_biller.timeout", "360"))
         _logger.info("Timeout: %s", timeout)
+        use_async = icp.get_param(
+            "l10n_pe_ne_biller.async_enabled", ""
+        ).strip().lower() in ("1", "true")
         for move in self:
             _logger.info(
                 "Procesando factura: %s (%s)", move.name, move.l10n_pe_biller_state
             )
-            if move.l10n_pe_biller_state == "enviado":
-                _logger.info("Factura ya enviada: %s", move.name)
+            if move.l10n_pe_biller_state in ("enviado", "en_proceso"):
+                _logger.info("Factura ya enviada o en proceso: %s", move.name)
+                continue
+            if use_async:
+                move._l10n_pe_enqueue_emission(icp)
                 continue
             endpoint, payload = move._l10n_pe_target()
             _logger.info("AAAEnviando %s: %s", endpoint, payload)
@@ -1036,45 +1187,11 @@ class AccountMove(models.Model):
                     _("Error de conexión con el facturador: %s") % exc
                 )
                 continue
-            signed = any(
-                tag in resp.text for tag in ("<Invoice", "<CreditNote", "<DebitNote")
+            # El biller devuelve el XML firmado como body y el CDR de SUNAT en
+            # el header X-Sunat-Cdr (base64 del zip).
+            move._l10n_pe_apply_emission_response(
+                resp.status_code == 200, resp.text, resp.headers.get("X-Sunat-Cdr")
             )
-            if resp.status_code == 200 and signed:
-                serie, correlativo = move._l10n_pe_serie_correlativo()
-                att = self.env["ir.attachment"].create(
-                    {
-                        "name": "%s-%s-%s.xml"
-                        % (move.company_id.vat, serie, correlativo.zfill(8)),
-                        "res_model": "account.move",
-                        "res_id": move.id,
-                        "mimetype": "application/xml",
-                        "raw": resp.text.encode("utf-8"),
-                    }
-                )
-                move.l10n_pe_biller_xml = att.id
-                move.l10n_pe_biller_state = "enviado"
-                # Congela la identidad emitida para una eventual baja (no recomputar luego del partner/nombre).
-                move.l10n_pe_ne_tipo_doc = move._l10n_pe_document_type()
-                move.l10n_pe_ne_serie_emit = serie
-                move.l10n_pe_ne_corr_emit = correlativo.zfill(8)
-                # El biller devuelve el CDR de SUNAT en el header X-Sunat-Cdr (base64 del zip).
-                cdr_b64 = resp.headers.get("X-Sunat-Cdr")
-                code, desc = move._l10n_pe_store_cdr(cdr_b64) if cdr_b64 else ("", "")
-                if code == "0":
-                    move.l10n_pe_biller_message = _(
-                        "Aceptado por SUNAT — CDR ResponseCode 0. %s"
-                    ) % (desc or "")
-                elif code:
-                    move.l10n_pe_biller_message = _(
-                        "CDR de SUNAT (ResponseCode %s). %s"
-                    ) % (code, desc or "")
-                else:
-                    move.l10n_pe_biller_message = _(
-                        "Aceptado por el facturador (HTTP 200)."
-                    )
-            else:
-                move.l10n_pe_biller_state = "rechazado"
-                move.l10n_pe_biller_message = (resp.text or "")[:2000]
         return True
 
     # ------------------------------------------- API ligera (BFF NE Express, /json/2)

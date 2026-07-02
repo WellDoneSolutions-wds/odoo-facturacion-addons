@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo noupdate="1">
+  <!-- Recoge resultados de emisiones asíncronas (modo async_enabled): lee los
+       items que dejó el Lambda facturas-worker en DynamoDB y aplica XML/CDR al
+       account.move. No hace nada si el modo asíncrono está apagado. -->
+  <record id="ir_cron_l10n_pe_ne_poll_async" model="ir.cron">
+    <field name="name">Facturador PE: recoger emisiones asíncronas</field>
+    <field name="model_id" ref="account.model_account_move"/>
+    <field name="state">code</field>
+    <field name="code">model._l10n_pe_cron_poll_async()</field>
+    <field name="interval_number">2</field>
+    <field name="interval_type">minutes</field>
+    <field name="active" eval="True"/>
+  </record>
+</odoo>

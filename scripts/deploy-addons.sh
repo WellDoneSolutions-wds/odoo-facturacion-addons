@@ -70,6 +70,10 @@ if [ -z "$ACTUALIZADAS" ]; then
 fi
 
 echo "Reiniciando stack (BDs actualizadas:$ACTUALIZADAS)"
+# build ANTES de bajar el stack: si el Dockerfile cambió (ej. nuevas deps
+# Python como boto3), la imagen se reconstruye con el viejo stack aún arriba
+# (menos downtime); si no cambió, el cache lo hace instantáneo.
+docker compose build odoo
 docker compose down
 docker compose up -d
 

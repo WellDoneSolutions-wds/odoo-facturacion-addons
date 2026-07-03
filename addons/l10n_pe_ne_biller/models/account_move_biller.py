@@ -2846,6 +2846,16 @@ class AccountMove(models.Model):
         self.l10n_pe_biller_pdf = att.id
         return att
 
+    def _l10n_pe_ne_is_aceptado(self):
+        """True solo si el comprobante fue aceptado por SUNAT: estado 'enviado',
+        con CDR guardado y ResponseCode 0. Re-parsea el CDR (no confía en el texto
+        de l10n_pe_biller_message)."""
+        self.ensure_one()
+        if self.l10n_pe_biller_state != "enviado" or not self.l10n_pe_biller_cdr:
+            return False
+        code, _desc = self._l10n_pe_parse_cdr_codes(self.l10n_pe_biller_cdr.raw or b"")
+        return code == "0"
+
     def action_l10n_pe_download_pdf(self):
         self.ensure_one()
         return self._l10n_pe_download_url(self._l10n_pe_get_pdf_attachment())

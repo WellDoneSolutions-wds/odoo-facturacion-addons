@@ -275,6 +275,7 @@ class L10nPeNeApi(http.Controller):
                     "company": user.company_id.name,
                     "ruc": user.company_id.vat or "",
                     "isAdmin": user.has_group("base.group_system"),
+                    "mustChangePassword": user.l10n_pe_ne_must_change_password,
                     "expires": exp.isoformat(),
                 }
             )
@@ -296,6 +297,7 @@ class L10nPeNeApi(http.Controller):
                 "company": user.company_id.name,
                 "ruc": user.company_id.vat or "",
                 "isAdmin": user.has_group("base.group_system"),
+                "mustChangePassword": user.l10n_pe_ne_must_change_password,
             }
         )
 
@@ -345,6 +347,50 @@ class L10nPeNeApi(http.Controller):
                 .with_user(uid)
                 .l10n_pe_ne_provision_tenant(self._body())
             )
+        )
+
+    # ------------------------------------------------------------ contraseñas
+    @http.route("/ne/api/admin/users", **_GET)
+    def list_users(self, **kw):
+        """Usuarios internos que el admin puede gestionar (para resetear su clave)."""
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        if not self._user(uid).has_group("base.group_system"):
+            return self._err("Solo un administrador puede ver los usuarios.", status=403)
+        try:
+            return self._json(
+                request.env["res.users"].with_user(uid).l10n_pe_ne_list_manageable_users()
+            )
+        except Exception as e:  # noqa: BLE001
+            return self._fail(e)
+
+    @http.route("/ne/api/admin/users/<int:target_id>/reset-password", **_POST)
+    def admin_reset_password(self, target_id, **kw):
+        """Un admin resetea la clave de un usuario. Devuelve la clave nueva una vez."""
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        if not self._user(uid).has_group("base.group_system"):
+            return self._err("Solo un administrador puede resetear contraseñas.", status=403)
+        password = self._body().get("password") or None
+        return self._run(
+            lambda: request.env["res.users"]
+            .with_user(uid)
+            .l10n_pe_ne_admin_reset_password(target_id, new_password=password)
+        )
+
+    @http.route("/ne/api/change-password", **_POST)
+    def change_password(self, **kw):
+        """El usuario logueado cambia su propia contraseña."""
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        body = self._body()
+        return self._run(
+            lambda: request.env["res.users"]
+            .with_user(uid)
+            .l10n_pe_ne_change_own_password(body.get("current") or "", body.get("new") or "")
         )
 
     # ---------------------------------------------------------------- config

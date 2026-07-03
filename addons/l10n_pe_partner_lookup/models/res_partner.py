@@ -235,6 +235,15 @@ class ResPartner(models.Model):
             'vat': data['doc_number'],
             'country_id': self.env.ref('base.pe').id,
             'company_type': 'company' if is_company else 'person',
+            # customer_rank > 0 hace que el partner aparezca en «Clientes», no solo
+            # en «Contactos». Sin esto se crea como contacto suelto (rank 0) y no
+            # sale en el listado/buscador de clientes. Mismo criterio que
+            # l10n_pe_ne_biller al dar de alta un cliente.
+            'customer_rank': 1,
+            # company_id del emisor actual: aísla el cliente por RUC (multi-tenant).
+            # Sin esto quedaría company_id=False = visible/editable por TODOS los
+            # tenants. Igual que l10n_pe_ne_biller._l10n_pe_ne_quick_partner.
+            'company_id': self.env.company.id,
         }
         if id_type:
             vals['l10n_latam_identification_type_id'] = id_type.id

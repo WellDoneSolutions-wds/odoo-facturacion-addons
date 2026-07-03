@@ -65,3 +65,24 @@ class ResUsers(models.Model):
             raise UserError(_("La nueva contraseña debe ser distinta de la actual."))
         user.sudo().write({'password': new, 'l10n_pe_ne_must_change_password': False})
         return {'ok': True}
+
+    @api.model
+    def l10n_pe_ne_list_manageable_users(self):
+        """Usuarios internos activos de las compañías del admin (para el panel de reset)."""
+        if not self.env.user.has_group('base.group_system'):
+            raise AccessError(_("Solo un administrador puede ver los usuarios."))
+        company_ids = self.env.user.company_ids.ids
+        users = self.sudo().search([
+            ('share', '=', False),
+            ('active', '=', True),
+            ('company_ids', 'in', company_ids),
+        ], order='login')
+        return [{
+            'id': u.id,
+            'login': u.login,
+            'name': u.name,
+            'email': u.email or '',
+            'company': u.company_id.name,
+            'companyId': u.company_id.id,
+            'isAdmin': u.has_group('base.group_system'),
+        } for u in users]

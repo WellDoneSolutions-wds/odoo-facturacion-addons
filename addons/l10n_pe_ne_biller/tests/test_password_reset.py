@@ -63,3 +63,14 @@ class TestPasswordReset(TransactionCase):
         res = self.env['res.users'].with_user(self.user_a).l10n_pe_ne_change_own_password('oldpass12', 'nuevapass34')
         self.assertEqual(res, {'ok': True})
         self.assertFalse(self.user_a.l10n_pe_ne_must_change_password)
+
+    def test_list_users_non_admin_raises(self):
+        with self.assertRaises(AccessError):
+            self.env['res.users'].with_user(self.user_a).l10n_pe_ne_list_manageable_users()
+
+    def test_list_users_scoped_to_company(self):
+        rows = self.env['res.users'].with_user(self.admin).l10n_pe_ne_list_manageable_users()
+        logins = {r['login'] for r in rows}
+        self.assertIn('pr_user_a', logins)
+        self.assertNotIn('pr_user_b', logins)
+        self.assertTrue(all('id' in r and 'name' in r for r in rows))

@@ -1161,6 +1161,13 @@ class AccountMove(models.Model):
                         (move.l10n_pe_biller_message or "")[:500],
                     )
                 )
+                # ...y el statusbar en vivo va por el bus (websocket): el JS
+                # biller_live_statusbar recarga el form abierto al recibir esto.
+                self.env["bus.bus"]._sendone(
+                    "l10n_pe_biller_updates",
+                    "l10n_pe_biller_update",
+                    {"move_id": move.id, "state": move.l10n_pe_biller_state},
+                )
             except Exception as exc:  # noqa: BLE001 — un move malo no frena al resto
                 _logger.warning("async biller: error procesando %s: %s", move.name, exc)
 

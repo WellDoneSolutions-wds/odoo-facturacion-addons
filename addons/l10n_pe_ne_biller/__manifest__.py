@@ -17,6 +17,11 @@
         'views/uom_views.xml',
         'views/l10n_pe_ne_report_views.xml',
     ],
+    'assets': {
+        'web.assets_backend': [
+            'l10n_pe_ne_biller/static/src/js/biller_live_statusbar.js',
+        ],
+    },
     'license': 'LGPL-3',
     'application': False,
     'installable': True,

@@ -67,3 +67,9 @@ class TestBillerEmail(TransactionCase):
     def test_is_aceptado_false_estado_no_enviado(self):
         self.move.l10n_pe_biller_state = 'rechazado'
         self.assertFalse(self.move._l10n_pe_ne_is_aceptado())
+
+    def test_mail_template_existe(self):
+        tmpl = self.env.ref(
+            'l10n_pe_ne_biller.mail_template_comprobante', raise_if_not_found=False)
+        self.assertTrue(tmpl, "La plantilla de correo debe existir")
+        self.assertEqual(tmpl.model_id.model, 'account.move')

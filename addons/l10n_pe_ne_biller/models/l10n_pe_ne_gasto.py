@@ -37,8 +37,11 @@ class L10nPeNeGasto(models.Model):
         }
 
     @api.model
-    def l10n_pe_ne_list_gastos(self, query=None, periodo=None, limit=300):
-        """Lista de gastos (opcional por texto o periodo YYYYMM)."""
+    def l10n_pe_ne_list_gastos(self, query=None, periodo=None, limit=300, offset=None):
+        """Lista de gastos (opcional por texto o periodo YYYYMM).
+
+        Paginación opt-in: con `offset` devuelve {items, total}; sin él, lista plana
+        (así l10n_pe_ne_total_gastos sigue sumando sobre el array completo)."""
         domain = []
         if query:
             domain += ['|', ('descripcion', 'ilike', query), ('cuenta', 'ilike', query)]
@@ -47,7 +50,11 @@ class L10nPeNeGasto(models.Model):
             last = calendar.monthrange(y, m)[1]
             domain += [('fecha', '>=', '%04d-%02d-01' % (y, m)),
                        ('fecha', '<=', '%04d-%02d-%02d' % (y, m, last))]
-        return [g._l10n_pe_ne_gasto_dict() for g in self.search(domain, limit=limit)]
+        recs = self.search(domain, limit=limit, offset=offset or 0)
+        items = [g._l10n_pe_ne_gasto_dict() for g in recs]
+        if offset is None:
+            return items
+        return {"items": items, "total": self.search_count(domain)}
 
     @api.model
     def l10n_pe_ne_total_gastos(self, periodo):

@@ -87,16 +87,19 @@ class ResCompany(models.Model):
         }
 
     @api.model
-    def l10n_pe_ne_list_tenants(self):
+    def l10n_pe_ne_list_tenants(self, limit=None, offset=None):
         """Lista de emisores/tenants para la pantalla de administración: cada
         compañía con sus usuarios emisores. NO expone la api_key (solo si está
-        seteada). Solo para administradores."""
+        seteada). Solo para administradores.
+
+        Paginación opt-in: con `offset` devuelve {items, total}; sin él, lista plana."""
         if not self.env.user.has_group('base.group_system'):
             raise AccessError(_("Solo un administrador puede ver los emisores."))
         grp = self.env.ref('l10n_pe_ne_biller.group_l10n_pe_ne_emisor')
         Users = self.env['res.users'].sudo()
+        Company = self.env['res.company'].sudo()
         out = []
-        for c in self.env['res.company'].sudo().search([], order='name'):
+        for c in Company.search([], order='name', limit=limit, offset=offset or 0):
             emisores = Users.search([('company_id', '=', c.id), ('group_ids', 'in', grp.id)])
             out.append({
                 'companyId': c.id,
@@ -106,4 +109,6 @@ class ResCompany(models.Model):
                 'cuentaDetraccion': c.l10n_pe_ne_cuenta_detraccion or '',
                 'emisores': [{'id': u.id, 'login': u.login, 'name': u.name} for u in emisores],
             })
-        return out
+        if offset is None:
+            return out
+        return {"items": out, "total": Company.search_count([])}

@@ -125,8 +125,6 @@ class ResPartner(models.Model):
         region = arn_region or icp.get_param('l10n_pe_partner_lookup.aws_region')
         hash_key = icp.get_param('l10n_pe_partner_lookup.dynamo_hash_key') or 'tipo_documento'
         range_key = icp.get_param('l10n_pe_partner_lookup.dynamo_range_key') or 'numero_documento'
-        access_key = icp.get_param('l10n_pe_partner_lookup.aws_access_key_id')
-        secret_key = icp.get_param('l10n_pe_partner_lookup.aws_secret_access_key')
         if not (region and table_name):
             raise UserError(_(
                 "Configura la tabla de DynamoDB (nombre o ARN) y la región en "
@@ -134,10 +132,11 @@ class ResPartner(models.Model):
                 "Si pegas el ARN de la tabla, la región se toma de él."
             ))
 
+        # Credenciales: SIEMPRE la cadena estándar de boto3 — rol IAM de la
+        # instancia en producción; variables de entorno o ~/.aws en local.
+        # NUNCA guardar access/secret keys en la BD: cualquier admin las lee y
+        # viajan en los backups (ya pasó una vez con una key de admin).
         kwargs = {'region_name': region}
-        if access_key and secret_key:  # si no, boto3 usa el rol IAM / entorno
-            kwargs['aws_access_key_id'] = access_key
-            kwargs['aws_secret_access_key'] = secret_key
 
         # Clave primaria compuesta: la partición es el tipo de documento
         # (RUC/DNI, deducido de la longitud) y el rango es el número.

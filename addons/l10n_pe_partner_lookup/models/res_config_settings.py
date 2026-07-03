@@ -54,16 +54,10 @@ class ResConfigSettings(models.TransientModel):
         help="Atributo de ordenación que guarda el número de documento. "
              "Por defecto: numero_documento.",
     )
-    l10n_pe_aws_access_key_id = fields.Char(
-        string="AWS Access Key ID",
-        config_parameter='l10n_pe_partner_lookup.aws_access_key_id',
-        help="Déjalo vacío para usar un rol IAM o variables de entorno (recomendado).",
-    )
-    l10n_pe_aws_secret_access_key = fields.Char(
-        string="AWS Secret Access Key",
-        config_parameter='l10n_pe_partner_lookup.aws_secret_access_key',
-        help="Déjalo vacío para usar un rol IAM o variables de entorno (recomendado).",
-    )
+    # Sin campos de access/secret key A PROPÓSITO: boto3 usa su cadena estándar
+    # (rol IAM de instancia en producción; env vars / ~/.aws en local). Guardar
+    # llaves en ir_config_parameter era un footgun: terminó una key de admin en
+    # la BD, legible por cualquier admin y presente en los backups.
 
     # --- SUNAT (último recurso, para cualquier modo) --------------------------
     l10n_pe_sunat_enabled = fields.Boolean(

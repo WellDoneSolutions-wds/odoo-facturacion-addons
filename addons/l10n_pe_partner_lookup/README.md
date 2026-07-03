@@ -34,15 +34,19 @@ Requiere `pip install boto3`.
 - **Clave de partición (hash)**: por defecto `tipo_documento`. Su valor (`RUC`/`DNI`)
   se deduce de la longitud del número (11 = RUC, si no = DNI).
 - **Clave de ordenación (range)**: por defecto `numero_documento` (el número).
-- **AWS Access Key / Secret**: déjalas vacías para usar **rol IAM o variables de
-  entorno** (recomendado); boto3 las descubre solo.
 
-#### Autenticación en AWS: rol IAM SIN llaves (recomendado)
-Si Odoo corre **dentro de AWS** (EC2 / ECS / EKS / Lambda), NO pongas Access Key ni
-Secret: adjunta un **rol IAM** al cómputo (instance profile / ECS task role / EKS
-IRSA / execution role) y `boto3` toma credenciales temporales automáticamente (con
-rotación, sin llaves). Ojo: **un ARN por sí solo no autentica**; el ARN de la tabla
-se usa para acotar el permiso del rol (mínimo privilegio):
+#### Autenticación en AWS: rol IAM, sin llaves (único método)
+El addon **no tiene campos de Access/Secret Key a propósito** (guardar llaves en
+`ir_config_parameter` es un footgun: cualquier admin las lee y viajan en los
+backups — pasó con una key de admin). `boto3` usa su **cadena estándar**:
+- **En AWS** (EC2 / ECS / EKS / Lambda): adjunta un **rol IAM** al cómputo
+  (instance profile / task role / IRSA / execution role) y boto3 toma
+  credenciales temporales automáticamente (rotación incluida).
+- **En desarrollo local**: variables de entorno (`AWS_ACCESS_KEY_ID`, etc.) o
+  `~/.aws/credentials` — boto3 las descubre solo, sin tocar Odoo.
+
+Ojo: **un ARN por sí solo no autentica**; el ARN de la tabla se usa para acotar
+el permiso del rol (mínimo privilegio):
 
 ```json
 {

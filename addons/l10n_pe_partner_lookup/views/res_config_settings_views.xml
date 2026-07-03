@@ -46,18 +46,10 @@
                                 <label for="l10n_pe_dynamo_range_key" class="col-lg-4 o_light_label"/>
                                 <field name="l10n_pe_dynamo_range_key" placeholder="numero_documento"/>
                             </div>
-                            <div class="row">
-                                <label for="l10n_pe_aws_access_key_id" class="col-lg-4 o_light_label"/>
-                                <field name="l10n_pe_aws_access_key_id"
-                                       placeholder="(vacío si usas rol IAM)"/>
-                            </div>
-                            <div class="row">
-                                <label for="l10n_pe_aws_secret_access_key" class="col-lg-4 o_light_label"/>
-                                <field name="l10n_pe_aws_secret_access_key" password="True"/>
-                            </div>
                             <div class="text-muted mt8">
-                                Recomendado: usa un rol IAM o variables de entorno y deja
-                                las llaves vacías. Requiere el paquete <code>boto3</code>.
+                                Autenticación AWS: rol IAM de la instancia en producción;
+                                variables de entorno o ~/.aws en desarrollo. No se guardan
+                                llaves. Requiere el paquete <code>boto3</code>.
                             </div>
                         </div>
                     </setting>

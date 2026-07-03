@@ -344,9 +344,14 @@ class L10nPeNeApi(http.Controller):
                 "Solo un administrador puede ver los emisores.", status=403
             )
         try:
-            return self._json(
-                request.env["res.company"].with_user(uid).l10n_pe_ne_list_tenants()
+            pg = self._page_args(kw)
+            res = request.env["res.company"].with_user(uid).l10n_pe_ne_list_tenants(
+                limit=pg["limit"] if pg else None,
+                offset=pg["offset"] if pg else None,
             )
+            if pg:
+                res = {**res, "page": pg["page"], "pageSize": pg["pageSize"]}
+            return self._json(res)
         except Exception as e:  # noqa: BLE001
             return self._fail(e)
 
@@ -386,7 +391,14 @@ class L10nPeNeApi(http.Controller):
         if not uid:
             return self._unauth()
         try:
-            return self._json(self._move(uid).l10n_pe_ne_series())
+            pg = self._page_args(kw)
+            res = self._move(uid).l10n_pe_ne_series(
+                limit=pg["limit"] if pg else None,
+                offset=pg["offset"] if pg else None,
+            )
+            if pg:
+                res = {**res, "page": pg["page"], "pageSize": pg["pageSize"]}
+            return self._json(res)
         except Exception as e:  # noqa: BLE001
             return self._fail(e)
 
@@ -811,11 +823,16 @@ class L10nPeNeApi(http.Controller):
         if not uid:
             return self._unauth()
         try:
-            return self._json(
-                self._move(uid).l10n_pe_ne_list_compras(
-                    query=q or None, periodo=periodo or None
-                )
+            pg = self._page_args(kw)
+            res = self._move(uid).l10n_pe_ne_list_compras(
+                query=q or None,
+                periodo=periodo or None,
+                limit=pg["limit"] if pg else 200,
+                offset=pg["offset"] if pg else None,
             )
+            if pg:
+                res = {**res, "page": pg["page"], "pageSize": pg["pageSize"]}
+            return self._json(res)
         except Exception as e:  # noqa: BLE001
             return self._fail(e)
 

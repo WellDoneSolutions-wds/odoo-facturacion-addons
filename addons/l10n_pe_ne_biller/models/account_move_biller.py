@@ -1528,7 +1528,7 @@ class AccountMove(models.Model):
         }
 
     @api.model
-    def l10n_pe_ne_series(self):
+    def l10n_pe_ne_series(self, limit=None, offset=None):
         """Series realmente en uso, agregadas desde los comprobantes emitidos (la serie la
         fija el emisor al emitir; el correlativo lo autoincrementa Odoo por diario). Por serie:
         tipo, cuántos emitidos, último correlativo y el próximo a emitir. Incluye las series de
@@ -1569,7 +1569,7 @@ class AccountMove(models.Model):
             add(p.l10n_pe_ret_serie, "20", p.l10n_pe_ret_correlativo)
             add(p.l10n_pe_per_serie, "40", p.l10n_pe_per_correlativo)
 
-        return [
+        filas = [
             {
                 "serie": s["serie"],
                 "tipoDoc": s["tipoDoc"],
@@ -1580,6 +1580,11 @@ class AccountMove(models.Model):
             }
             for s in sorted(agg.values(), key=lambda x: x["serie"])
         ]
+        # Paginación opt-in sobre el agregado ya construido (no hay search directo).
+        if offset is None:
+            return filas
+        return {"items": filas[offset:offset + limit] if limit else filas[offset:],
+                "total": len(filas)}
 
     # ============================================================ datos negocio
     @api.model
@@ -2424,8 +2429,10 @@ class AccountMove(models.Model):
         }
 
     @api.model
-    def l10n_pe_ne_list_compras(self, query=None, periodo=None, limit=200):
-        """Lista de compras (facturas de proveedor) — opcional por texto o periodo."""
+    def l10n_pe_ne_list_compras(self, query=None, periodo=None, limit=200, offset=None):
+        """Lista de compras (facturas de proveedor) — opcional por texto o periodo.
+
+        Paginación opt-in: con `offset` devuelve {items, total}; sin él, lista plana."""
         import calendar
 
         domain = [("move_type", "=", "in_invoice")]
@@ -2442,12 +2449,13 @@ class AccountMove(models.Model):
                 ("invoice_date", ">=", "%04d-%02d-01" % (y, m)),
                 ("invoice_date", "<=", "%04d-%02d-%02d" % (y, m, last)),
             ]
-        return [
-            m._l10n_pe_ne_compra_dict()
-            for m in self.search(
-                domain, order="invoice_date desc, id desc", limit=limit
-            )
-        ]
+        recs = self.search(
+            domain, order="invoice_date desc, id desc", limit=limit, offset=offset or 0
+        )
+        items = [m._l10n_pe_ne_compra_dict() for m in recs]
+        if offset is None:
+            return items
+        return {"items": items, "total": self.search_count(domain)}
 
     @api.model
     def l10n_pe_ne_create_compra(self, compra):

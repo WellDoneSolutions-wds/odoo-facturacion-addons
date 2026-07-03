@@ -28,3 +28,24 @@ class TestPasswordReset(TransactionCase):
 
     def test_field_exists(self):
         self.assertIn('l10n_pe_ne_must_change_password', self.env['res.users']._fields)
+
+    def test_non_admin_cannot_reset(self):
+        with self.assertRaises(AccessError):
+            self.env['res.users'].with_user(self.user_a).l10n_pe_ne_admin_reset_password(self.user_b.id)
+
+    def test_admin_cannot_reset_cross_company(self):
+        with self.assertRaises(AccessError):
+            self.env['res.users'].with_user(self.admin).l10n_pe_ne_admin_reset_password(self.user_b.id)
+
+    def test_admin_reset_generates_temp_and_sets_flag(self):
+        res = self.env['res.users'].with_user(self.admin).l10n_pe_ne_admin_reset_password(self.user_a.id)
+        self.assertEqual(res['login'], 'pr_user_a')
+        self.assertGreaterEqual(len(res['password']), 8)
+        self.assertTrue(self.user_a.l10n_pe_ne_must_change_password)
+
+    def test_admin_reset_revokes_apikeys(self):
+        key = self.env['res.users.apikeys'].with_user(self.user_a).sudo()._generate('l10n_pe_ne', 'test', False)
+        self.assertTrue(self.env['res.users.apikeys'].sudo().search([('user_id', '=', self.user_a.id)]))
+        self.env['res.users'].with_user(self.admin).l10n_pe_ne_admin_reset_password(self.user_a.id)
+        self.assertFalse(self.env['res.users.apikeys'].sudo().search([('user_id', '=', self.user_a.id)]))
+        del key

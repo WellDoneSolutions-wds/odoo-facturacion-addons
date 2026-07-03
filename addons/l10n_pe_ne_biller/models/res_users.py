@@ -101,7 +101,9 @@ class ResUsers(models.Model):
         ok_origin = bool(_L10N_PE_NE_SPA_ORIGIN_RE.match(origin)) or origin.startswith('http://localhost')
         login = (login or '').strip()
         if ok_origin and login:
-            user = self.sudo().search([('login', '=', login), ('active', '=', True)], limit=1)
+            # Acepta usuario (login exacto) o correo (case-insensitive), como el reset nativo.
+            user = self.sudo().search([('active', '=', True), ('login', '=', login)], limit=1) \
+                or self.sudo().search([('active', '=', True), ('email', '=ilike', login)], limit=1)
             if user and user.email and not user.share:
                 # Rate-limit simple: 1 correo por usuario cada 60s.
                 icp = self.env['ir.config_parameter'].sudo()

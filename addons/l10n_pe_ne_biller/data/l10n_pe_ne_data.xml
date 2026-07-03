@@ -17,6 +17,15 @@
     <field name="number_increment">1</field>
     <field name="implementation">no_gap</field>
   </record>
+  <!-- Numeración de cotizaciones (documento comercial, NO fiscal): COT-00001, COT-00002… -->
+  <record id="seq_l10n_pe_ne_cotizacion" model="ir.sequence">
+    <field name="name">Cotización NE Express</field>
+    <field name="code">l10n_pe.ne.cotizacion</field>
+    <field name="prefix">COT-</field>
+    <field name="padding">5</field>
+    <field name="number_increment">1</field>
+    <field name="implementation">no_gap</field>
+  </record>
   <!-- URL base del microservicio ms-ne-biller. Editable en Ajustes > Técnico > Parámetros del sistema.
        El código usa este parámetro (clave l10n_pe_ne_biller.url) con localhost:8090 como respaldo. -->
   <record id="param_l10n_pe_ne_biller_url" model="ir.config_parameter">

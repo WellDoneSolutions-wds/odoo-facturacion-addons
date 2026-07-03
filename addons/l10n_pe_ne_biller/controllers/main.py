@@ -139,6 +139,10 @@ class L10nPeNeApi(http.Controller):
         u = self._user(uid)
         return request.env["l10n_pe_ne.gasto"].with_user(uid).with_company(u.company_id)
 
+    def _cotizacion(self, uid):
+        u = self._user(uid)
+        return request.env["l10n_pe_ne.cotizacion"].with_user(uid).with_company(u.company_id)
+
     def _body(self):
         raw = request.httprequest.get_data() or b""
         return json.loads(raw) if raw else {}
@@ -925,3 +929,104 @@ class L10nPeNeApi(http.Controller):
         if not uid:
             return self._unauth()
         return self._run(lambda: self._move(uid).l10n_pe_ne_delete_compra(int(rec_id)))
+
+    # ------------------------------------------------------------- cotizaciones
+    # Documento comercial (proforma), NO comprobante SUNAT. Modelo l10n_pe_ne.cotizacion.
+    @http.route("/ne/api/cotizaciones", **_GET)
+    def list_cotizaciones(self, q=None, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        try:
+            pg = self._page_args(kw)
+            res = self._cotizacion(uid).l10n_pe_ne_list_cotizaciones(
+                query=q or None,
+                limit=pg["limit"] if pg else 100,
+                offset=pg["offset"] if pg else None,
+            )
+            if pg:
+                res = {**res, "page": pg["page"], "pageSize": pg["pageSize"]}
+            return self._json(res)
+        except Exception as e:  # noqa: BLE001
+            return self._fail(e)
+
+    @http.route("/ne/api/cotizaciones", **_POST)
+    def create_cotizacion(self, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(
+            lambda: self._cotizacion(uid).l10n_pe_ne_quick_cotizar(self._body())
+        )
+
+    @http.route("/ne/api/cotizaciones/<int:rec_id>", **_PUT)
+    def update_cotizacion(self, rec_id, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(
+            lambda: self._cotizacion(uid).l10n_pe_ne_update_cotizacion(
+                dict(self._body(), id=int(rec_id))
+            )
+        )
+
+    @http.route("/ne/api/cotizaciones/<int:rec_id>", **_DEL)
+    def delete_cotizacion(self, rec_id, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(
+            lambda: self._cotizacion(uid).l10n_pe_ne_delete_cotizacion(int(rec_id))
+        )
+
+    @http.route("/ne/api/cotizaciones/<int:rec_id>/detalle", **_GET)
+    def cotizacion_detalle(self, rec_id, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        try:
+            cot = self._cotizacion(uid).browse(rec_id).exists()
+            if not cot:
+                return self._err("Cotización no encontrada", 404)
+            return self._json(cot.l10n_pe_ne_cotizacion_detalle())
+        except Exception as e:  # noqa: BLE001
+            return self._fail(e)
+
+    @http.route("/ne/api/cotizaciones/<int:rec_id>/estado", **_POST)
+    def cotizacion_estado(self, rec_id, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+
+        def op():
+            cot = self._cotizacion(uid).browse(int(rec_id)).exists()
+            if not cot:
+                raise UserError("Cotización no encontrada.")
+            return cot.l10n_pe_ne_set_estado((self._body() or {}).get("estado") or "")
+
+        return self._run(op)
+
+    @http.route("/ne/api/cotizaciones/<int:rec_id>/pdf", **_GET)
+    def cotizacion_pdf(self, rec_id, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        try:
+            cot = self._cotizacion(uid).browse(rec_id).exists()
+            if not cot:
+                return self._err("Cotización no encontrada", 404)
+            pdf, _ctype = cot.env["ir.actions.report"]._render_qweb_pdf(
+                "l10n_pe_ne_biller.action_report_cotizacion", res_ids=cot.ids
+            )
+            return request.make_response(
+                pdf,
+                headers=[
+                    ("Content-Type", "application/pdf"),
+                    (
+                        "Content-Disposition",
+                        'inline; filename="%s.pdf"' % (cot.name or "cotizacion"),
+                    ),
+                ],
+            )
+        except Exception as e:  # noqa: BLE001
+            return self._fail(e)

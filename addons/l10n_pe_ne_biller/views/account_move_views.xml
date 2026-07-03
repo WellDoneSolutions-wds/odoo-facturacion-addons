@@ -44,6 +44,16 @@
         <field name="l10n_pe_biller_xml" readonly="1" invisible="not l10n_pe_biller_xml"/>
         <field name="l10n_pe_biller_cdr" readonly="1" invisible="not l10n_pe_biller_cdr"/>
         <field name="l10n_pe_biller_pdf" readonly="1" invisible="not l10n_pe_biller_pdf"/>
+        <!-- Badge de color: el statusbar del header queda colapsado por los
+             botones (Odoo 19 muestra solo el estado actual), así que acá va
+             el estado inconfundible — y se actualiza en vivo igual que todo. -->
+        <field name="l10n_pe_biller_state" widget="badge" readonly="1"
+               string="Estado SUNAT"
+               invisible="l10n_pe_biller_state == 'por_enviar'"
+               decoration-info="l10n_pe_biller_state == 'en_proceso'"
+               decoration-success="l10n_pe_biller_state == 'enviado'"
+               decoration-warning="l10n_pe_biller_state == 'anulado'"
+               decoration-danger="l10n_pe_biller_state in ('rechazado', 'error')"/>
         <field name="l10n_pe_biller_message" readonly="1" invisible="not l10n_pe_biller_message"/>
       </xpath>
     </field>

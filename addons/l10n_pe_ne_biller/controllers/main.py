@@ -420,6 +420,22 @@ class L10nPeNeApi(http.Controller):
             .l10n_pe_ne_change_own_password(body.get("current") or "", body.get("new") or "")
         )
 
+    # -------------------------------------------------- reset self-service (Fase 2)
+    @http.route("/ne/api/reset/request", **_POST)
+    def reset_request(self, **kw):
+        """Solicita reset por email. Respuesta genérica (sin enumeración)."""
+        body = self._body()
+        origin = body.get("origin") or request.httprequest.headers.get("Origin") or ""
+        return self._run(lambda: request.env["res.users"].l10n_pe_ne_request_password_reset(
+            body.get("login") or "", origin))
+
+    @http.route("/ne/api/reset/confirm", **_POST)
+    def reset_confirm(self, **kw):
+        """Confirma el reset con el token del email + la clave nueva."""
+        body = self._body()
+        return self._run(lambda: request.env["res.users"].l10n_pe_ne_confirm_password_reset(
+            body.get("token") or "", body.get("password") or ""))
+
     # ---------------------------------------------------------------- config
     @http.route("/ne/api/config", **_GET)
     def config(self, **kw):

@@ -143,7 +143,7 @@ class L10nPeNeApi(http.Controller):
         raw = request.httprequest.get_data() or b""
         return json.loads(raw) if raw else {}
 
-    def _page_args(self, kw, default_size=50, max_size=200):
+    def _page_args(self, kw, default_size=10, max_size=200):
         """Paginación OPT-IN para listados. Devuelve
         {limit, offset, page, pageSize} si el cliente mandó 'page' o 'pageSize';
         None en modo legacy (sin esos params → el modelo devuelve lista plana).

@@ -91,6 +91,7 @@ class AccountMove(models.Model):
         string="Estado Facturador",
         default="por_enviar",
         copy=False,
+        tracking=True,  # cambios visibles en el chatter (que sí refresca en vivo)
     )
     l10n_pe_ne_baja_motivo = fields.Char(
         string="Motivo de baja",
@@ -1097,7 +1098,8 @@ class AccountMove(models.Model):
             return
         self.l10n_pe_biller_state = "en_proceso"
         self.l10n_pe_biller_message = _(
-            "Encolado para envío a SUNAT — el resultado llega en unos minutos."
+            "Encolado para envío a SUNAT — el resultado llega en unos minutos "
+            "(aparece en el chatter; recargá la vista para ver el estado final)."
         )
 
     @api.model
@@ -1149,6 +1151,16 @@ class AccountMove(models.Model):
                     move.l10n_pe_biller_message = (
                         (item.get("message") or {}).get("S") or ""
                     )[:2000]
+                # El form no refresca solo cuando escribe un cron: el chatter sí.
+                move.message_post(
+                    body=_("Facturador (async): %s — %s")
+                    % (
+                        dict(
+                            move._fields["l10n_pe_biller_state"].selection
+                        ).get(move.l10n_pe_biller_state, move.l10n_pe_biller_state),
+                        (move.l10n_pe_biller_message or "")[:500],
+                    )
+                )
             except Exception as exc:  # noqa: BLE001 — un move malo no frena al resto
                 _logger.warning("async biller: error procesando %s: %s", move.name, exc)
 

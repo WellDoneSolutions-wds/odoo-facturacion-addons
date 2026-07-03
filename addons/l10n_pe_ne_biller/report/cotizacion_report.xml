@@ -1,0 +1,95 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <!-- Reporte PDF de la cotización (QWeb). Usa el layout externo de Odoo, así que
+         hereda el membrete/pie de la compañía emisora. -->
+    <record id="action_report_cotizacion" model="ir.actions.report">
+        <field name="name">Cotización</field>
+        <field name="model">l10n_pe_ne.cotizacion</field>
+        <field name="report_type">qweb-pdf</field>
+        <field name="report_name">l10n_pe_ne_biller.report_cotizacion</field>
+        <field name="report_file">l10n_pe_ne_biller.report_cotizacion</field>
+        <field name="print_report_name">'Cotizacion - %s' % (object.name or '')</field>
+        <field name="binding_model_id" ref="model_l10n_pe_ne_cotizacion"/>
+        <field name="binding_type">report</field>
+    </record>
+
+    <template id="report_cotizacion">
+        <t t-call="web.html_container">
+            <t t-foreach="docs" t-as="o">
+                <t t-call="web.external_layout">
+                    <div class="page">
+                        <div class="row mb-4">
+                            <div class="col-6">
+                                <h2 style="color:#5046E4; margin:0; letter-spacing:-.5px;">COTIZACIÓN</h2>
+                                <div style="font-size:15px; font-weight:bold;" t-esc="o.name"/>
+                            </div>
+                            <div class="col-6 text-end">
+                                <div><strong>Fecha:</strong> <span t-field="o.fecha"/></div>
+                                <div><strong>Validez:</strong> <span t-esc="o.validez_dias"/> día(s)</div>
+                                <div><strong>Moneda:</strong> <span t-esc="o.currency_id.name"/></div>
+                            </div>
+                        </div>
+
+                        <div class="mb-4" style="background:#f5f6fb; padding:10px 14px; border-radius:8px;">
+                            <strong>Cliente:</strong> <span t-field="o.partner_id.name"/>
+                            <t t-if="o.partner_id.vat"> · <span t-esc="o.partner_id.vat"/></t>
+                            <div t-if="o.partner_id.street" style="font-size:12px; color:#555;" t-field="o.partner_id.street"/>
+                        </div>
+
+                        <table class="table table-sm" style="width:100%; border-collapse:collapse;">
+                            <thead>
+                                <tr style="border-bottom:2px solid #5046E4;">
+                                    <th style="text-align:left;">Descripción</th>
+                                    <th style="text-align:right; width:70px;">Cant.</th>
+                                    <th style="text-align:right; width:100px;">P. Unit.</th>
+                                    <th style="text-align:right; width:110px;">Subtotal</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr t-foreach="o.line_ids" t-as="l" style="border-bottom:1px solid #eee;">
+                                    <td>
+                                        <span t-esc="l.descripcion"/>
+                                        <t t-if="not l.afecto_igv"><span style="font-size:10px; color:#888;"> (no gravado)</span></t>
+                                    </td>
+                                    <td style="text-align:right;" t-esc="'%.2f' % l.cantidad"/>
+                                    <td style="text-align:right;" t-esc="'%.2f' % l.precio_unitario"/>
+                                    <td style="text-align:right;" t-esc="'%.2f' % l.subtotal"/>
+                                </tr>
+                            </tbody>
+                        </table>
+
+                        <div class="row mt-3">
+                            <div class="col-7">
+                                <t t-if="o.notas">
+                                    <strong>Notas / condiciones:</strong>
+                                    <div style="font-size:12px; color:#555; white-space:pre-line;" t-esc="o.notas"/>
+                                </t>
+                            </div>
+                            <div class="col-5">
+                                <table style="width:100%; font-size:13px;">
+                                    <tr>
+                                        <td>Valor venta</td>
+                                        <td style="text-align:right;" t-esc="'%.2f' % o.amount_untaxed"/>
+                                    </tr>
+                                    <tr>
+                                        <td>IGV (18%)</td>
+                                        <td style="text-align:right;" t-esc="'%.2f' % o.amount_tax"/>
+                                    </tr>
+                                    <tr style="border-top:2px solid #5046E4; font-weight:bold; font-size:15px;">
+                                        <td>Total <span t-esc="o.currency_id.name"/></td>
+                                        <td style="text-align:right;" t-esc="'%.2f' % o.amount_total"/>
+                                    </tr>
+                                </table>
+                            </div>
+                        </div>
+
+                        <p style="margin-top:26px; font-size:11px; color:#888;">
+                            Documento referencial. Una cotización NO es un comprobante de pago electrónico
+                            y no tiene validez tributaria ante SUNAT.
+                        </p>
+                    </div>
+                </t>
+            </t>
+        </t>
+    </template>
+</odoo>

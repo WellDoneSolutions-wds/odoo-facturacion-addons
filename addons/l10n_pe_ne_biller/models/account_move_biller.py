@@ -1070,6 +1070,8 @@ class AccountMove(models.Model):
             "move_id": self.id,
             "path": "/generator/" + endpoint,
             "api_key": self.company_id.sudo().l10n_pe_ne_api_key or "",
+            # tipoDoc (01/03/07/08) para que el worker pre-genere el PDF
+            "doc_type": self._l10n_pe_document_type(),
             "payload": payload,
         }
         # Reintento tras un rechazo: borra el resultado viejo ANTES de encolar,
@@ -1146,6 +1148,35 @@ class AccountMove(models.Model):
                             s3c.get_object(Bucket=bucket, Key=cdr_key)["Body"].read()
                         ).decode()
                     move._l10n_pe_apply_emission_response(True, body, cdr_b64)
+                    # PDF pre-generado por el worker: el botón "Descargar PDF"
+                    # lo sirve cacheado, sin llamada síncrona al facturador.
+                    pdf_s3 = (item.get("pdf_s3_key") or {}).get("S", "")
+                    if pdf_s3 and not move.l10n_pe_biller_pdf:
+                        try:
+                            pdf_bytes = s3c.get_object(Bucket=bucket, Key=pdf_s3)[
+                                "Body"
+                            ].read()
+                            att = self.env["ir.attachment"].create(
+                                {
+                                    "name": "%s-%s-%s.pdf"
+                                    % (
+                                        move.company_id.vat or "",
+                                        serie,
+                                        correlativo.zfill(8),
+                                    ),
+                                    "res_model": "account.move",
+                                    "res_id": move.id,
+                                    "mimetype": "application/pdf",
+                                    "raw": pdf_bytes,
+                                }
+                            )
+                            move.l10n_pe_biller_pdf = att.id
+                        except Exception as exc:  # noqa: BLE001 — PDF es best-effort
+                            _logger.warning(
+                                "async biller: PDF no adjuntado en %s: %s",
+                                move.name,
+                                exc,
+                            )
                 elif status in ("rechazado", "error"):
                     move.l10n_pe_biller_state = status
                     move.l10n_pe_biller_message = (

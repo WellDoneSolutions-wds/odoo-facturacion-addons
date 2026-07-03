@@ -2249,8 +2249,12 @@ class AccountMove(models.Model):
         return p
 
     @api.model
-    def l10n_pe_ne_list_clientes(self, query=None, limit=50):
-        """Clientes de Odoo para que React liste/autocomplete (no reinventa el padrón)."""
+    def l10n_pe_ne_list_clientes(self, query=None, limit=50, offset=None):
+        """Clientes de Odoo para que React liste/autocomplete (no reinventa el padrón).
+
+        Paginación opt-in: con `offset` (aunque sea 0) devuelve el envelope
+        {items, total}; sin `offset` (None) devuelve la lista plana de siempre
+        —así el autocomplete del POS/Emitir sigue recibiendo un array."""
         domain = [("customer_rank", ">", 0)]
         if query:
             domain = [
@@ -2260,8 +2264,12 @@ class AccountMove(models.Model):
                 ("name", "ilike", query),
                 ("vat", "ilike", query),
             ]
-        parts = self.env["res.partner"].search(domain, order="name", limit=limit)
-        return [self._l10n_pe_ne_partner_dict(p) for p in parts]
+        Partner = self.env["res.partner"]
+        parts = Partner.search(domain, order="name", limit=limit, offset=offset or 0)
+        items = [self._l10n_pe_ne_partner_dict(p) for p in parts]
+        if offset is None:
+            return items
+        return {"items": items, "total": Partner.search_count(domain)}
 
     @api.model
     def l10n_pe_ne_create_cliente(self, cliente):
@@ -2297,9 +2305,11 @@ class AccountMove(models.Model):
             return {"ok": True, "modo": "archivado"}
 
     @api.model
-    def l10n_pe_ne_list_productos(self, query=None, limit=50):
+    def l10n_pe_ne_list_productos(self, query=None, limit=50, offset=None):
         """Productos de Odoo para que React liste/autocomplete y los documentos los referencien.
-        Busca por nombre, código interno (default_code) o código de barras (barcode)."""
+        Busca por nombre, código interno (default_code) o código de barras (barcode).
+
+        Paginación opt-in: con `offset` devuelve {items, total}; sin él, lista plana."""
         domain = [("sale_ok", "=", True)]
         if query:
             domain = [
@@ -2311,8 +2321,12 @@ class AccountMove(models.Model):
                 ("default_code", "ilike", query),
                 ("barcode", "ilike", query),
             ]
-        prods = self.env["product.product"].search(domain, order="name", limit=limit)
-        return [self._l10n_pe_ne_product_dict(p) for p in prods]
+        Product = self.env["product.product"]
+        prods = Product.search(domain, order="name", limit=limit, offset=offset or 0)
+        items = [self._l10n_pe_ne_product_dict(p) for p in prods]
+        if offset is None:
+            return items
+        return {"items": items, "total": Product.search_count(domain)}
 
     @api.model
     def l10n_pe_ne_producto_por_barcode(self, code):
@@ -2563,9 +2577,12 @@ class AccountMove(models.Model):
         }
 
     @api.model
-    def l10n_pe_ne_quick_list(self, query=None, desde=None, hasta=None, limit=100):
+    def l10n_pe_ne_quick_list(self, query=None, desde=None, hasta=None, limit=100, offset=None):
         """Lista de comprobantes emitidos (sin los blobs), para la UI. Filtros
-        opcionales: query (cliente/RUC/correlativo) y rango de fechas (desde/hasta)."""
+        opcionales: query (cliente/RUC/correlativo) y rango de fechas (desde/hasta).
+
+        Paginación opt-in: con `offset` devuelve {items, total} (total vía
+        search_count sobre el mismo dominio); sin él, la lista plana de siempre."""
         domain = [("l10n_pe_biller_state", "!=", "por_enviar")]
         if desde:
             domain.append(("invoice_date", ">=", desde))
@@ -2580,8 +2597,8 @@ class AccountMove(models.Model):
                 ("partner_id.vat", "ilike", q),
                 ("l10n_pe_ne_corr_emit", "ilike", q),
             ]
-        moves = self.search(domain, order="id desc", limit=limit)
-        return [
+        moves = self.search(domain, order="id desc", limit=limit, offset=offset or 0)
+        items = [
             {
                 "id": m.id,
                 "tipoDoc": m.l10n_pe_ne_tipo_doc or m._l10n_pe_document_type(),
@@ -2598,6 +2615,9 @@ class AccountMove(models.Model):
             }
             for m in moves
         ]
+        if offset is None:
+            return items
+        return {"items": items, "total": self.search_count(domain)}
 
     def l10n_pe_ne_comprobante_detalle(self):
         """Detalle completo de un comprobante para la vista de detalle (cabecera +

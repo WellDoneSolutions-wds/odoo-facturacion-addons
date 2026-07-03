@@ -143,6 +143,28 @@ class L10nPeNeApi(http.Controller):
         raw = request.httprequest.get_data() or b""
         return json.loads(raw) if raw else {}
 
+    def _page_args(self, kw, default_size=50, max_size=200):
+        """Paginación OPT-IN para listados. Devuelve
+        {limit, offset, page, pageSize} si el cliente mandó 'page' o 'pageSize';
+        None en modo legacy (sin esos params → el modelo devuelve lista plana).
+        Clampa pageSize a [1, max_size] y page a >= 1 (una URL manipulada no
+        puede pedir páginas gigantes)."""
+        raw_size = kw.get("pageSize")
+        if raw_size is None:
+            raw_size = kw.get("page_size")
+        if kw.get("page") is None and raw_size is None:
+            return None
+
+        def _int(v, default):
+            try:
+                return int(v)
+            except (TypeError, ValueError):
+                return default
+
+        page = max(1, _int(kw.get("page"), 1))
+        size = max(1, min(_int(raw_size, default_size), max_size))
+        return {"limit": size, "offset": (page - 1) * size, "page": page, "pageSize": size}
+
     def _json(self, data, status=200):
         return request.make_json_response(data, status=status)
 
@@ -472,13 +494,17 @@ class L10nPeNeApi(http.Controller):
         if not uid:
             return self._unauth()
         try:
-            return self._json(
-                self._move(uid).l10n_pe_ne_quick_list(
-                    query=kw.get("q") or None,
-                    desde=kw.get("desde") or None,
-                    hasta=kw.get("hasta") or None,
-                )
+            pg = self._page_args(kw)
+            res = self._move(uid).l10n_pe_ne_quick_list(
+                query=kw.get("q") or None,
+                desde=kw.get("desde") or None,
+                hasta=kw.get("hasta") or None,
+                limit=pg["limit"] if pg else 100,
+                offset=pg["offset"] if pg else None,
             )
+            if pg:
+                res = {**res, "page": pg["page"], "pageSize": pg["pageSize"]}
+            return self._json(res)
         except Exception as e:  # noqa: BLE001
             return self._fail(e)
 
@@ -569,9 +595,15 @@ class L10nPeNeApi(http.Controller):
         if not uid:
             return self._unauth()
         try:
-            return self._json(
-                self._move(uid).l10n_pe_ne_list_clientes(query=q or None, limit=50)
+            pg = self._page_args(kw)
+            res = self._move(uid).l10n_pe_ne_list_clientes(
+                query=q or None,
+                limit=pg["limit"] if pg else 50,
+                offset=pg["offset"] if pg else None,
             )
+            if pg:
+                res = {**res, "page": pg["page"], "pageSize": pg["pageSize"]}
+            return self._json(res)
         except Exception as e:  # noqa: BLE001
             return self._fail(e)
 
@@ -671,9 +703,15 @@ class L10nPeNeApi(http.Controller):
         if not uid:
             return self._unauth()
         try:
-            return self._json(
-                self._move(uid).l10n_pe_ne_list_productos(query=q or None, limit=50)
+            pg = self._page_args(kw)
+            res = self._move(uid).l10n_pe_ne_list_productos(
+                query=q or None,
+                limit=pg["limit"] if pg else 50,
+                offset=pg["offset"] if pg else None,
             )
+            if pg:
+                res = {**res, "page": pg["page"], "pageSize": pg["pageSize"]}
+            return self._json(res)
         except Exception as e:  # noqa: BLE001
             return self._fail(e)
 
@@ -728,11 +766,16 @@ class L10nPeNeApi(http.Controller):
         if not uid:
             return self._unauth()
         try:
-            return self._json(
-                self._gasto(uid).l10n_pe_ne_list_gastos(
-                    query=q or None, periodo=periodo or None
-                )
+            pg = self._page_args(kw)
+            res = self._gasto(uid).l10n_pe_ne_list_gastos(
+                query=q or None,
+                periodo=periodo or None,
+                limit=pg["limit"] if pg else 300,
+                offset=pg["offset"] if pg else None,
             )
+            if pg:
+                res = {**res, "page": pg["page"], "pageSize": pg["pageSize"]}
+            return self._json(res)
         except Exception as e:  # noqa: BLE001
             return self._fail(e)
 

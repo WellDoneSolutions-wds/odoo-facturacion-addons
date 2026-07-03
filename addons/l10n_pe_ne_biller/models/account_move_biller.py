@@ -1349,6 +1349,13 @@ class AccountMove(models.Model):
         move = self.env["account.move"].create(vals)
         self._l10n_pe_ne_quick_flags(move, payload)
         move.action_post()
+        # Si la emisión vino de "Convertir a comprobante", vincula el comprobante
+        # recién posteado a la cotización de origen y la marca como 'convertida'.
+        cotid = payload.get("cotizacionId")
+        if cotid:
+            cot = self.env["l10n_pe_ne.cotizacion"].browse(int(cotid)).exists()
+            if cot:
+                cot.l10n_pe_ne_vincular_comprobante(move.id)
         move.action_l10n_pe_send_to_biller()
         return move.l10n_pe_ne_quick_result()
 

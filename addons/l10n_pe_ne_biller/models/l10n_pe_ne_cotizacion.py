@@ -31,7 +31,11 @@ class L10nPeNeCotizacion(models.Model):
         ('enviada', 'Enviada'),
         ('aceptada', 'Aceptada'),
         ('rechazada', 'Rechazada'),
+        ('convertida', 'Convertida'),
     ], string='Estado', default='borrador', required=True)
+    comprobante_id = fields.Many2one('account.move', string='Comprobante emitido',
+                                     copy=False, index=True,
+                                     help='Comprobante generado al convertir esta cotización.')
     notas = fields.Text(string='Notas / condiciones')
     currency_id = fields.Many2one('res.currency', required=True,
                                   default=lambda s: s.env.company.currency_id)
@@ -77,7 +81,25 @@ class L10nPeNeCotizacion(models.Model):
             'moneda': self.currency_id.name or 'PEN',
             'total': self.amount_total,
             'items': len(self.line_ids),
+            'comprobanteId': self.comprobante_id.id if self.comprobante_id else None,
+            'comprobanteNumero': self._l10n_pe_ne_comprobante_numero(),
         }
+
+    def _l10n_pe_ne_comprobante_numero(self):
+        """'serie-correlativo' del comprobante vinculado (o '' si no hay)."""
+        m = self.comprobante_id
+        if not m:
+            return ''
+        serie = m.l10n_pe_ne_serie_emit or m.l10n_pe_serie or ''
+        corr = m.l10n_pe_ne_corr_emit or ''
+        return ('%s-%s' % (serie, corr)) if (serie or corr) else (m.name or '')
+
+    def l10n_pe_ne_vincular_comprobante(self, comprobante_id):
+        """Vincula el comprobante emitido y marca la cotización como 'convertida'.
+        Lo llama l10n_pe_ne_quick_emit cuando la emisión vino de 'Convertir a comprobante'."""
+        self.ensure_one()
+        self.write({'comprobante_id': int(comprobante_id), 'estado': 'convertida'})
+        return self._l10n_pe_ne_cotizacion_dict()
 
     def l10n_pe_ne_cotizacion_detalle(self):
         """Detalle completo para la vista/PDF: cabecera + líneas + totales."""

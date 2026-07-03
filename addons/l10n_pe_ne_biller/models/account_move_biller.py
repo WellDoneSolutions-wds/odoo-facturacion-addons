@@ -2765,6 +2765,35 @@ class AccountMove(models.Model):
         code, _desc = self._l10n_pe_parse_cdr_codes(self.l10n_pe_biller_cdr.raw or b"")
         return code == "0"
 
+    def l10n_pe_ne_email_comprobante(self, to=None, cc=None):
+        """Envía el comprobante aceptado al cliente por correo, adjuntando el PDF
+        (representación impresa SFS) y el XML firmado, vía la plantilla
+        l10n_pe_ne_biller.mail_template_comprobante."""
+        self.ensure_one()
+        if not self._l10n_pe_ne_is_aceptado():
+            raise UserError(
+                _("El comprobante no está aceptado por SUNAT; no se puede enviar.")
+            )
+        to = (to or self.partner_id.email or "").strip()
+        if not to:
+            raise UserError(
+                _("El cliente no tiene correo configurado; indica un destinatario.")
+            )
+        pdf = self._l10n_pe_get_pdf_attachment()
+        xml = self.l10n_pe_biller_xml
+        template = self.env.ref("l10n_pe_ne_biller.mail_template_comprobante")
+        template.send_mail(
+            self.id,
+            force_send=True,
+            email_values={
+                "email_to": to,
+                "email_cc": cc or "",
+                "attachment_ids": [(6, 0, [pdf.id, xml.id])],
+            },
+        )
+        self.message_post(body=_("Comprobante enviado por correo a %s") % to)
+        return {"ok": True, "to": to}
+
     def action_l10n_pe_download_pdf(self):
         self.ensure_one()
         return self._l10n_pe_download_url(self._l10n_pe_get_pdf_attachment())

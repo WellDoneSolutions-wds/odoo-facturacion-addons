@@ -73,3 +73,51 @@ class TestBillerEmail(TransactionCase):
             'l10n_pe_ne_biller.mail_template_comprobante', raise_if_not_found=False)
         self.assertTrue(tmpl, "La plantilla de correo debe existir")
         self.assertEqual(tmpl.model_id.model, 'account.move')
+
+    def _find_mail(self):
+        return self.env['mail.mail'].search(
+            [('model', '=', 'account.move'), ('res_id', '=', self.move.id)],
+            order='id desc', limit=1)
+
+    def test_rechaza_sin_cdr_aceptado(self):
+        self.move.l10n_pe_biller_cdr = False
+        with self.assertRaises(UserError):
+            self.move.l10n_pe_ne_email_comprobante(to='a@b.com')
+
+    def test_rechaza_sin_destinatario(self):
+        self.move.partner_id.email = False
+        with self.assertRaises(UserError):
+            self.move.l10n_pe_ne_email_comprobante()
+
+    def test_usa_email_del_partner(self):
+        self.move.partner_id.email = 'cliente@example.com'
+        with patch(_TARGET, return_value=self._pdf_resp()):
+            res = self.move.l10n_pe_ne_email_comprobante()
+        self.assertEqual(res, {'ok': True, 'to': 'cliente@example.com'})
+        self.assertIn('cliente@example.com', self._find_mail().email_to or '')
+
+    def test_override_destinatario(self):
+        self.move.partner_id.email = 'cliente@example.com'
+        with patch(_TARGET, return_value=self._pdf_resp()):
+            res = self.move.l10n_pe_ne_email_comprobante(to='otro@dest.com')
+        self.assertEqual(res['to'], 'otro@dest.com')
+
+    def test_adjunta_pdf_y_xml(self):
+        self.move.partner_id.email = 'cliente@example.com'
+        with patch(_TARGET, return_value=self._pdf_resp()) as mp:
+            self.move.l10n_pe_ne_email_comprobante()
+            self.move.l10n_pe_ne_email_comprobante()  # 2a vez: reusa PDF cacheado
+        self.assertEqual(mp.call_count, 1, "El PDF cacheado no debe volver a pedirse al micro")
+        mail = self._find_mail()
+        mimetypes = mail.attachment_ids.mapped('mimetype')
+        self.assertEqual(len(mail.attachment_ids), 2)
+        self.assertIn('application/pdf', mimetypes)
+        self.assertIn('application/xml', mimetypes)
+
+    def test_envia_mail_con_asunto(self):
+        self.move.partner_id.email = 'cliente@example.com'
+        with patch(_TARGET, return_value=self._pdf_resp()):
+            self.move.l10n_pe_ne_email_comprobante()
+        mail = self._find_mail()
+        self.assertTrue(mail)
+        self.assertIn(self.move.l10n_pe_ne_serie_emit, mail.subject or '')

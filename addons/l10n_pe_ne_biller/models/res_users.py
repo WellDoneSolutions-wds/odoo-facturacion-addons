@@ -47,3 +47,21 @@ class ResUsers(models.Model):
         self.env['res.users.apikeys'].sudo().search([('user_id', '=', target.id)]).unlink()
         _logger.info("NE admin reset: %s -> %s", self.env.user.login, target.login)
         return {'login': target.login, 'name': target.name, 'password': pw}
+
+    @api.model
+    def l10n_pe_ne_change_own_password(self, current_password, new_password):
+        """El usuario logueado cambia su propia contraseña. Verifica la actual,
+        valida la nueva, limpia el flag de cambio forzado. Mantiene la sesión actual."""
+        user = self.env.user
+        current = current_password or ''
+        new = (new_password or '').strip()
+        if len(new) < _MIN_LEN:
+            raise UserError(_("La nueva contraseña debe tener al menos %d caracteres.") % _MIN_LEN)
+        try:
+            user._check_credentials({'type': 'password', 'password': current}, {'interactive': False})
+        except AccessDenied:
+            raise UserError(_("La contraseña actual no es correcta."))
+        if new == current:
+            raise UserError(_("La nueva contraseña debe ser distinta de la actual."))
+        user.sudo().write({'password': new, 'l10n_pe_ne_must_change_password': False})
+        return {'ok': True}

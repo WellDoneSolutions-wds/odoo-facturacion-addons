@@ -49,3 +49,17 @@ class TestPasswordReset(TransactionCase):
         self.env['res.users'].with_user(self.admin).l10n_pe_ne_admin_reset_password(self.user_a.id)
         self.assertFalse(self.env['res.users.apikeys'].sudo().search([('user_id', '=', self.user_a.id)]))
         del key
+
+    def test_change_own_wrong_current_raises(self):
+        with self.assertRaises(UserError):
+            self.env['res.users'].with_user(self.user_a).l10n_pe_ne_change_own_password('mala', 'nuevapass12')
+
+    def test_change_own_too_short_raises(self):
+        with self.assertRaises(UserError):
+            self.env['res.users'].with_user(self.user_a).l10n_pe_ne_change_own_password('oldpass12', 'corta')
+
+    def test_change_own_success_clears_flag(self):
+        self.user_a.l10n_pe_ne_must_change_password = True
+        res = self.env['res.users'].with_user(self.user_a).l10n_pe_ne_change_own_password('oldpass12', 'nuevapass34')
+        self.assertEqual(res, {'ok': True})
+        self.assertFalse(self.user_a.l10n_pe_ne_must_change_password)

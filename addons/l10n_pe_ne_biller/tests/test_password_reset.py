@@ -74,3 +74,18 @@ class TestPasswordReset(TransactionCase):
         self.assertIn('pr_user_a', logins)
         self.assertNotIn('pr_user_b', logins)
         self.assertTrue(all('id' in r and 'name' in r for r in rows))
+
+
+from odoo.tests import HttpCase
+
+
+@tagged('post_install', '-at_install')
+class TestPasswordResetRoutes(HttpCase):
+    def test_admin_users_requires_auth(self):
+        r = self.url_open('/ne/api/admin/users')
+        self.assertEqual(r.status_code, 401)
+
+    def test_change_password_requires_auth(self):
+        r = self.url_open('/ne/api/change-password', data='{}',
+                          headers={'Content-Type': 'application/json'})
+        self.assertEqual(r.status_code, 401)

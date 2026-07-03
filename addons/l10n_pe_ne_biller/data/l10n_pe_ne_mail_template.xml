@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="mail_template_comprobante" model="mail.template">
+        <field name="name">Comprobante electrónico — envío al cliente</field>
+        <field name="model_id" ref="account.model_account_move"/>
+        <field name="subject">Comprobante {{ object.l10n_pe_ne_serie_emit }}-{{ object.l10n_pe_ne_corr_emit }} — {{ object.company_id.name }}</field>
+        <field name="email_from">{{ object.company_id.email_formatted }}</field>
+        <field name="email_to">{{ object.partner_id.email }}</field>
+        <field name="auto_delete" eval="False"/>
+        <field name="body_html" type="html">
+            <div style="font-family:sans-serif;font-size:14px;color:#111">
+                <p>Estimado(a) <t t-out="object.partner_id.name or ''"/>,</p>
+                <p>Adjuntamos su comprobante electrónico
+                    <b><t t-out="object.l10n_pe_ne_serie_emit or ''"/>-<t t-out="object.l10n_pe_ne_corr_emit or ''"/></b>
+                    por un total de
+                    <b><t t-out="object.currency_id.symbol or ''"/> <t t-out="'%.2f' % (object.amount_total or 0.0)"/></b>.</p>
+                <p>Encontrará el PDF (representación impresa) y el XML firmado como archivos adjuntos.</p>
+                <p style="color:#666;font-size:12px">Este es un mensaje automático de <t t-out="object.company_id.name or ''"/>.</p>
+            </div>
+        </field>
+    </record>
+</odoo>

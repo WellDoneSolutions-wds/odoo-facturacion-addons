@@ -1071,6 +1071,21 @@ class AccountMove(models.Model):
             "api_key": self.company_id.sudo().l10n_pe_ne_api_key or "",
             "payload": payload,
         }
+        # Reintento tras un rechazo: borra el resultado viejo ANTES de encolar,
+        # para que el cron no aplique el resultado obsoleto mientras el worker
+        # procesa el intento nuevo (best-effort: si no existe, no pasa nada).
+        table = icp.get_param("l10n_pe_ne_biller.results_table", "")
+        if table:
+            try:
+                boto3.client("dynamodb", region_name=region).delete_item(
+                    TableName=table,
+                    Key={
+                        "ruc_emisor": {"S": msg["ruc"]},
+                        "serie_correlativo": {"S": msg["serie_correlativo"]},
+                    },
+                )
+            except Exception as exc:  # noqa: BLE001
+                _logger.warning("async biller: no se pudo limpiar resultado previo: %s", exc)
         try:
             boto3.client("sqs", region_name=region).send_message(
                 QueueUrl=queue_url,

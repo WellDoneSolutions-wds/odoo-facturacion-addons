@@ -76,7 +76,8 @@ class TestBillerEmail(TransactionCase):
 
     def _find_mail(self):
         return self.env['mail.mail'].search(
-            [('model', '=', 'account.move'), ('res_id', '=', self.move.id)],
+            [('model', '=', 'account.move'), ('res_id', '=', self.move.id),
+             ('subject', 'like', 'Comprobante%')],
             order='id desc', limit=1)
 
     def test_rechaza_sin_cdr_aceptado(self):

@@ -637,6 +637,20 @@ class L10nPeNeApi(http.Controller):
         except Exception as e:  # noqa: BLE001
             return self._fail(e)
 
+    @http.route("/ne/api/comprobantes/<int:rec_id>/email", **_POST)
+    def email_comprobante(self, rec_id, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+
+        def op():
+            b = self._body()
+            return self._move(uid).browse(rec_id).l10n_pe_ne_email_comprobante(
+                to=b.get("to"), cc=b.get("cc")
+            )
+
+        return self._run(op)
+
     @http.route("/ne/api/otrocpe/<int:rec_id>/<string:kind>", **_GET)
     def otrocpe_file(self, rec_id, kind, **kw):
         uid = self._identify()

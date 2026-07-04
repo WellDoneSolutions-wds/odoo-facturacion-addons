@@ -121,3 +121,14 @@ class TestBillerEmail(TransactionCase):
         mail = self._find_mail()
         self.assertTrue(mail)
         self.assertIn(self.move.l10n_pe_ne_serie_emit, mail.subject or '')
+
+
+from odoo.tests import HttpCase
+
+
+@tagged('post_install', '-at_install')
+class TestBillerEmailRoutes(HttpCase):
+    def test_email_requiere_auth(self):
+        r = self.url_open('/ne/api/comprobantes/1/email', data='{}',
+                          headers={'Content-Type': 'application/json'})
+        self.assertEqual(r.status_code, 401)

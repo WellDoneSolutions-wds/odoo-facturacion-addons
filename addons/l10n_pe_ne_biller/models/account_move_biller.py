@@ -76,6 +76,24 @@ UOM_CODE_BY_XMLID = {
 DEFAULT_UNIT_CODE = "NIU"
 
 
+class AccountMoveLine(models.Model):
+    _inherit = "account.move.line"
+
+    # Overrides SUNAT por línea para el flujo rápido (sin depender de la UoM/producto de Odoo,
+    # evitando el problema de categorías de unidad de medida).
+    l10n_pe_ne_unit_code = fields.Char(
+        string="Unidad SUNAT (cat.03)",
+        copy=False,
+        help="Código de unidad de medida SUNAT de la línea (ej. NIU, KGM, ZZ). "
+        "Si está vacío se deriva de la unidad de medida del producto.",
+    )
+    l10n_pe_ne_cod_producto_sunat = fields.Char(
+        string="Cód. producto SUNAT (cat.25)",
+        copy=False,
+        help="Código de producto SUNAT (UNSPSC, catálogo 25) de la línea, si aplica.",
+    )
+
+
 class AccountMove(models.Model):
     _inherit = "account.move"
 
@@ -502,8 +520,10 @@ class AccountMove(models.Model):
         )
 
     def _l10n_pe_unit_code(self, line):
-        """Código de unidad SUNAT (cat. 03) de la línea: override manual en la UoM, si no el mapeo
-        por XMLID de la unidad estándar de Odoo, si no 'NIU'."""
+        """Código de unidad SUNAT (cat. 03) de la línea: override por línea, luego override manual en
+        la UoM, si no el mapeo por XMLID de la unidad estándar de Odoo, si no 'NIU'."""
+        if line.l10n_pe_ne_unit_code:
+            return line.l10n_pe_ne_unit_code
         uom = line.product_uom_id
         if not uom:
             return DEFAULT_UNIT_CODE
@@ -533,7 +553,7 @@ class AccountMove(models.Model):
             item = {
                 "tipAfeIGV": tip_afe,
                 "codProducto": line.product_id.default_code or "-",
-                "codProductoSUNAT": "-",
+                "codProductoSUNAT": line.l10n_pe_ne_cod_producto_sunat or "-",
                 "codUnidadMedida": self._l10n_pe_unit_code(line),
                 "ctdUnidadItem": fmt(qty),
                 "desItem": line.name or line.product_id.display_name or "",
@@ -1310,6 +1330,10 @@ class AccountMove(models.Model):
             }
             if prod:
                 lvals["product_id"] = prod.id
+            if ln.get("unidad"):
+                lvals["l10n_pe_ne_unit_code"] = ln["unidad"]
+            if ln.get("codSunat"):
+                lvals["l10n_pe_ne_cod_producto_sunat"] = ln["codSunat"]
             lines.append((0, 0, lvals))
         # Otros cargos (que afectan la base imponible): se agregan como una línea gravada adicional, así
         # suben gravada/IGV/total con la maquinaria de líneas ya validada (no se prorratea el desc. global).

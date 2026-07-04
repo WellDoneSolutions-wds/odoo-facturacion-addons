@@ -2785,6 +2785,7 @@ class AccountMove(models.Model):
         template.send_mail(
             self.id,
             force_send=True,
+            raise_exception=True,
             email_values={
                 "email_to": to,
                 "email_cc": cc or "",

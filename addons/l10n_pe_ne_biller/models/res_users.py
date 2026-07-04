@@ -95,29 +95,47 @@ class ResUsers(models.Model):
 
     @api.model
     def l10n_pe_ne_request_password_reset(self, login, origin):
-        """Fase 2 self-service: genera token de reset (auth_signup) y envía un correo
-        con link al SPA. Respuesta SIEMPRE genérica (sin enumeración de usuarios)."""
+        """Fase 2 self-service: valida la cuenta, genera el token de reset
+        (auth_signup) y envía el correo con link al SPA. Lanza errores explícitos
+        (como el reset nativo de Odoo): sin cuenta / sin correo. El correo va SIEMPRE
+        al email de la ficha del usuario (no al texto ingresado)."""
         origin = (origin or '').rstrip('/')
         ok_origin = bool(_L10N_PE_NE_SPA_ORIGIN_RE.match(origin)) or origin.startswith('http://localhost')
+        if not ok_origin:
+            raise UserError(_("Origen no permitido."))
         login = (login or '').strip()
-        if ok_origin and login:
-            # Acepta usuario (login exacto) o correo (case-insensitive), como el reset nativo.
-            user = self.sudo().search([('active', '=', True), ('login', '=', login)], limit=1) \
-                or self.sudo().search([('active', '=', True), ('email', '=ilike', login)], limit=1)
-            if user and user.email and not user.share:
-                # Rate-limit simple: 1 correo por usuario cada 60s.
-                icp = self.env['ir.config_parameter'].sudo()
-                key = 'l10n_pe_ne.reset_cooldown.%d' % user.id
-                last = icp.get_param(key)
-                now = fields.Datetime.now()
-                recent = last and (now - fields.Datetime.to_datetime(last)).total_seconds() < 60
-                if not recent:
-                    icp.set_param(key, fields.Datetime.to_string(now))
-                    user.partner_id.signup_prepare(signup_type='reset')
-                    token = user.partner_id._generate_signup_token()
-                    link = '%s/reset?token=%s' % (origin, werkzeug.urls.url_quote(token))
-                    self._l10n_pe_ne_send_reset_email(user, link)
-        return {'ok': True}
+        if not login:
+            raise UserError(_("Indica tu usuario o correo."))
+        # Acepta usuario (login exacto) o correo (case-insensitive), como el reset nativo.
+        user = self.sudo().search([('active', '=', True), ('login', '=', login)], limit=1) \
+            or self.sudo().search([('active', '=', True), ('email', '=ilike', login)], limit=1)
+        if not user or user.share:
+            raise UserError(_("No se encontró una cuenta para este inicio de sesión."))
+        if not user.email:
+            raise UserError(_("No se puede enviar el correo electrónico: el usuario %s no tiene dirección de correo electrónico.") % user.name)
+        # Rate-limit simple: 1 correo por usuario cada 60s.
+        icp = self.env['ir.config_parameter'].sudo()
+        key = 'l10n_pe_ne.reset_cooldown.%d' % user.id
+        last = icp.get_param(key)
+        now = fields.Datetime.now()
+        if last and (now - fields.Datetime.to_datetime(last)).total_seconds() < 60:
+            raise UserError(_("Ya te enviamos un enlace hace un momento. Revisa tu correo (y spam) o espera un minuto."))
+        icp.set_param(key, fields.Datetime.to_string(now))
+        user.partner_id.signup_prepare(signup_type='reset')
+        token = user.partner_id._generate_signup_token()
+        link = '%s/reset?token=%s' % (origin, werkzeug.urls.url_quote(token))
+        self._l10n_pe_ne_send_reset_email(user, link)
+        return {'ok': True, 'email': self._l10n_pe_ne_mask_email(user.email)}
+
+    @api.model
+    def _l10n_pe_ne_mask_email(self, email):
+        """a***o@dominio.com — para confirmar el destino sin exponerlo entero."""
+        try:
+            local, domain = (email or '').split('@', 1)
+        except ValueError:
+            return email or ''
+        shown = local[:1] + '*' if len(local) <= 2 else local[0] + ('*' * (len(local) - 2)) + local[-1]
+        return '%s@%s' % (shown, domain)
 
     def _l10n_pe_ne_send_reset_email(self, user, link):
         company_name = user.company_id.name or 'NE Express'

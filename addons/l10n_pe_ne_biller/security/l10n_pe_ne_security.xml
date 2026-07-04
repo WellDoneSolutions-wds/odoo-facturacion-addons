@@ -33,5 +33,19 @@
             <field name="domain_force">['|', ('company_id', '=', False), ('company_id', 'in', company_ids)]</field>
             <field name="global" eval="True"/>
         </record>
+
+        <!-- Mismo aislamiento por compañía para cotizaciones y sus líneas. -->
+        <record id="rule_l10n_pe_ne_cotizacion_company" model="ir.rule">
+            <field name="name">Cotización NE Express: aislamiento por compañía</field>
+            <field name="model_id" ref="model_l10n_pe_ne_cotizacion"/>
+            <field name="domain_force">['|', ('company_id', '=', False), ('company_id', 'in', company_ids)]</field>
+            <field name="global" eval="True"/>
+        </record>
+        <record id="rule_l10n_pe_ne_cotizacion_line_company" model="ir.rule">
+            <field name="name">Línea de cotización NE Express: aislamiento por compañía</field>
+            <field name="model_id" ref="model_l10n_pe_ne_cotizacion_line"/>
+            <field name="domain_force">['|', ('company_id', '=', False), ('company_id', 'in', company_ids)]</field>
+            <field name="global" eval="True"/>
+        </record>
     </data>
 </odoo>

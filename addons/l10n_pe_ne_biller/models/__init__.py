@@ -5,3 +5,4 @@ from . import account_move_biller
 from . import account_payment_retencion
 from . import l10n_pe_ne_gasto
 from . import l10n_pe_ne_cotizacion
+from . import res_users

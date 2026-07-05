@@ -404,6 +404,128 @@ class L10nPeNeLote(models.Model):
         return {"filename": "plantilla-ventas-factorii.xlsx",
                 "contentB64": base64.b64encode(buf.getvalue()).decode("ascii")}
 
+    # ------------------------------------------------------------- serializadores
+    def _l10n_pe_ne_contadores(self):
+        self.ensure_one()
+        d = {"pendientes": 0, "emitidos": 0, "rechazados": 0, "errores": 0, "cancelados": 0}
+        key = {"pendiente": "pendientes", "emitido": "emitidos", "rechazado": "rechazados",
+               "error": "errores", "cancelado": "cancelados"}
+        for f in self.fila_ids:
+            k = key.get(f.estado)
+            if k:
+                d[k] += 1
+        return d
+
+    def l10n_pe_ne_lote_detalle(self):
+        self.ensure_one()
+        c = self._l10n_pe_ne_contadores()
+        rep = json.loads(self.reporte_json or "{}")
+        return {
+            "id": self.id, "filename": self.name,
+            "fecha": self.create_date.strftime("%Y-%m-%d") if self.create_date else "",
+            "estado": self.estado, "totalFilas": self.total_filas,
+            "totalComprobantes": self.total_comprobantes,
+            "pendientes": c["pendientes"], "emitidos": c["emitidos"],
+            "rechazados": c["rechazados"], "errores": c["errores"], "cancelados": c["cancelados"],
+            "filas": [f._l10n_pe_ne_fila_dict() for f in self.fila_ids.sorted("secuencia")],
+            "erroresValidacion": rep.get("errores") or [],
+            "advertencias": rep.get("advertencias") or [],
+            "duplicadoDe": rep.get("duplicadoDe"),
+        }
+
+    @api.model
+    def l10n_pe_ne_list_lotes(self):
+        out = []
+        for l in self.search([], limit=100):
+            c = l._l10n_pe_ne_contadores()
+            out.append({
+                "id": l.id, "filename": l.name,
+                "fecha": l.create_date.strftime("%Y-%m-%d") if l.create_date else "",
+                "estado": l.estado, "totalComprobantes": l.total_comprobantes,
+                "emitidos": c["emitidos"], "rechazados": c["rechazados"], "errores": c["errores"]})
+        return out
+
+    # ------------------------------------------------------------- procesamiento
+    def l10n_pe_ne_procesar(self, max_filas=1):
+        """Procesa hasta min(max_filas, masivo_max_chunk) filas 'pendiente' por secuencia. Cada
+        fila en su propio savepoint; commit por fila (si _masivo_can_commit) para no perder un doc
+        aceptado por SUNAT ante el rollback de una fila posterior. Devuelve el progreso con
+        `filas` = SOLO las procesadas en esta llamada."""
+        self.ensure_one()
+        if self.estado == "con_errores":
+            raise UserError(_("El lote tiene errores de validación; corrige el Excel y súbelo de nuevo"))
+        if self.estado in ("validado", "en_proceso"):
+            self.estado = "en_proceso"
+        # terminado/cancelado: sin pendientes → no-op idempotente (no re-emite).
+        chunk = max(1, min(int(max_filas or 1), self._masivo_param("masivo_max_chunk", _MASIVO_DEFAULTS["masivo_max_chunk"])))
+        pendientes = self.fila_ids.filtered(lambda f: f.estado == "pendiente").sorted("secuencia")[:chunk]
+        procesadas = self.env["l10n_pe_ne.lote.fila"]
+        for fila in pendientes:
+            try:
+                with self.env.cr.savepoint():
+                    fila.invalidate_recordset(["estado"])   # relee: otra pestaña pudo tomarla
+                    if fila.estado != "pendiente":
+                        continue
+                    fila._l10n_pe_ne_procesar_fila()
+            except (UserError, ValidationError) as exc:
+                fila.write({"estado": "error", "mensaje": exc.args[0] if exc.args else str(exc)})
+            procesadas |= fila
+            if self._masivo_can_commit():
+                self.env.cr.commit()
+        if not self.fila_ids.filtered(lambda f: f.estado == "pendiente"):
+            self.estado = "terminado"
+            if self._masivo_can_commit():
+                self.env.cr.commit()
+        res = self.l10n_pe_ne_lote_detalle()
+        res["filas"] = [f._l10n_pe_ne_fila_dict() for f in procesadas.sorted("secuencia")]
+        return res
+
+    def l10n_pe_ne_reintentar(self):
+        """Filas 'error'/'rechazado' → 'pendiente' CONSERVANDO move_id (reenvía el mismo move con
+        la misma serie-correlativo). Nunca limpia move_id."""
+        self.ensure_one()
+        reenc = self.fila_ids.filtered(lambda f: f.estado in ("error", "rechazado"))
+        reenc.write({"estado": "pendiente"})
+        if reenc:
+            self.estado = "en_proceso"
+        res = self.l10n_pe_ne_lote_detalle()
+        res["reencoladas"] = len(reenc)
+        return res
+
+    def l10n_pe_ne_cancelar(self):
+        """Filas 'pendiente' → 'cancelado'; el lote → 'cancelado'. Lo ya emitido queda emitido."""
+        self.ensure_one()
+        self.fila_ids.filtered(lambda f: f.estado == "pendiente").write({"estado": "cancelado"})
+        self.estado = "cancelado"
+        return self.l10n_pe_ne_lote_detalle()
+
+    def l10n_pe_ne_resultados(self):
+        """xlsx de resultados (mismo estilo que l10n_pe_ne_export). {filename, count, contentB64}."""
+        self.ensure_one()
+        import xlsxwriter
+        headers = ["Venta", "Filas Excel", "Tipo", "Serie", "Número", "Cliente", "Total",
+                   "Moneda", "Estado", "Mensaje SUNAT"]
+        estados = dict(self.fila_ids._fields["estado"].selection)
+        buf = io.BytesIO()
+        wb = xlsxwriter.Workbook(buf, {"in_memory": True})
+        ws = wb.add_worksheet("Resultados")
+        head = wb.add_format({"bold": True, "bg_color": "#2563eb", "font_color": "white", "border": 1})
+        for c, h in enumerate(headers):
+            ws.write(0, c, h, head)
+            ws.set_column(c, c, max(12, len(h) + 2))
+        filas = self.fila_ids.sorted("secuencia")
+        for r, f in enumerate(filas, 1):
+            ws.write_row(r, 0, ["#%s" % f.secuencia, f.filas_excel or "", f.tipo_doc or "",
+                                f.serie or "", f.correlativo or "", f.cliente or "", f.total or 0.0,
+                                f.moneda or "PEN", estados.get(f.estado, f.estado), f.mensaje or ""])
+        ws.autofilter(0, 0, max(1, len(filas)), len(headers) - 1)
+        ws.freeze_panes(1, 0)
+        wb.close()
+        ruc = (self.env.company.vat or "").strip()
+        return {"filename": "resultados-lote-%s-%s.xlsx" % (self.id, ruc),
+                "count": len(filas),
+                "contentB64": base64.b64encode(buf.getvalue()).decode("ascii")}
+
 
 class L10nPeNeLoteFila(models.Model):
     _name = "l10n_pe_ne.lote.fila"
@@ -431,3 +553,33 @@ class L10nPeNeLoteFila(models.Model):
     cliente = fields.Char()
     total = fields.Float()
     moneda = fields.Char(default="PEN")
+
+    # ------------------------------------------------------------- procesamiento de fila
+    def _l10n_pe_ne_procesar_fila(self):
+        """Emite (o reenvía) el comprobante de esta fila. Si ya hay move_id → reenvía el MISMO
+        move (idempotente, misma serie-correlativo); si no → quick_emit crea+postea+envía. Mapea
+        el biller_state a estado de fila. Sin lógica de emisión nueva."""
+        self.ensure_one()
+        if self.move_id:
+            self.move_id.action_l10n_pe_send_to_biller()
+            result = self.move_id.l10n_pe_ne_quick_result()
+        else:
+            result = self.env["account.move"].l10n_pe_ne_quick_emit(json.loads(self.payload_json))
+            self.move_id = result["id"]
+        self.write({
+            "estado": _ESTADO_MAP.get(result.get("estado"), "error"),
+            "mensaje": result.get("mensaje") or "",
+            "tipo_doc": result.get("tipoDoc") or self.tipo_doc,
+            "serie": result.get("serie") or self.serie,
+            "correlativo": result.get("correlativo") or self.correlativo,
+            "total": result.get("total") or self.total,
+            "cliente": result.get("cliente") or self.cliente,
+        })
+
+    def _l10n_pe_ne_fila_dict(self):
+        self.ensure_one()
+        return {"secuencia": self.secuencia, "filasExcel": self.filas_excel or "",
+                "estado": self.estado, "tipoDoc": self.tipo_doc or "", "serie": self.serie or "",
+                "correlativo": self.correlativo or "", "cliente": self.cliente or "",
+                "total": self.total or 0.0, "moneda": self.moneda or "PEN",
+                "mensaje": self.mensaje or "", "moveId": self.move_id.id or False}

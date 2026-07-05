@@ -142,3 +142,94 @@ class TestMasivo(TransactionCase):
         r2 = self.Lote.l10n_pe_ne_crear_lote({"filename": "a2.xlsx", "contentB64": b64})
         self.assertIsNone(r1["duplicadoDe"])
         self.assertEqual(r2["duplicadoDe"], r1["id"])
+
+    def test_validacion_reporte_por_fila_procesar_raises(self):
+        b64 = _xlsx_b64([
+            ["", "FACTURA", "F001", "", "RUC", "20100070971", "MAL RUC SAC", "", "ITEM", 1, 10.0, 0, "GRAVADO", "NO", "PEN"],
+        ])
+        rep = self.Lote.l10n_pe_ne_crear_lote({"filename": "v.xlsx", "contentB64": b64})
+        self.assertEqual(rep["estado"], "con_errores")
+        lote = self.Lote.browse(rep["id"])
+        with self.assertRaises(UserError):
+            lote.l10n_pe_ne_procesar()
+
+    # -------------------------------------------------- QW10 Task 3: proceso del lote
+    def _crear(self, rows):
+        rep = self.Lote.l10n_pe_ne_crear_lote({"filename": "v.xlsx", "contentB64": _xlsx_b64(rows)})
+        return self.Lote.browse(rep["id"])
+
+    _BOLETA = ["", "BOLETA", "", "", "", "", "", "", "AGUA 625ML", 1, 1.50, 0, "GRAVADO", "NO", "PEN"]
+
+    def test_procesar_emite_secuencial(self):
+        lote = self._crear([list(self._BOLETA), list(self._BOLETA), list(self._BOLETA)])
+        self.assertEqual(lote.estado, "validado")
+        with patch(_TARGET, return_value=_resp(200, _SIGNED)) as mp:
+            for _ in range(5):
+                if lote.estado == "terminado":
+                    break
+                lote.l10n_pe_ne_procesar(max_filas=1)
+        self.assertEqual(lote.estado, "terminado")
+        self.assertEqual([f.estado for f in lote.fila_ids.sorted("secuencia")], ["emitido"] * 3)
+        self.assertTrue(all(f.move_id for f in lote.fila_ids))
+        self.assertEqual(mp.call_count, 3)
+        corr = [f.move_id.l10n_pe_ne_corr_emit for f in lote.fila_ids.sorted("secuencia")]
+        self.assertEqual(len(set(corr)), 3, "correlativos consecutivos y únicos")
+
+    def test_rechazo_no_detiene(self):
+        lote = self._crear([list(self._BOLETA), list(self._BOLETA), list(self._BOLETA)])
+        resps = [_resp(200, _SIGNED), _resp(400, "XSLT error 2017"), _resp(200, _SIGNED)]
+        with patch(_TARGET, side_effect=resps):
+            for _ in range(3):
+                lote.l10n_pe_ne_procesar(max_filas=1)
+        filas = lote.fila_ids.sorted("secuencia")
+        self.assertEqual([f.estado for f in filas], ["emitido", "rechazado", "emitido"])
+        self.assertIn("2017", filas[1].mensaje)
+        self.assertEqual(lote.estado, "terminado")
+
+    def test_procesar_idempotente(self):
+        lote = self._crear([list(self._BOLETA)])
+        with patch(_TARGET, return_value=_resp(200, _SIGNED)) as mp:
+            lote.l10n_pe_ne_procesar(max_filas=1)
+            self.assertEqual(lote.estado, "terminado")
+            lote.l10n_pe_ne_procesar(max_filas=1)   # tras terminar: no-op idempotente
+        self.assertEqual(mp.call_count, 1)
+        self.assertEqual(lote.fila_ids.estado, "emitido")
+
+    def test_reintento_reusa_move(self):
+        import requests as _rq
+        lote = self._crear([list(self._BOLETA)])
+        with patch(_TARGET, side_effect=_rq.RequestException("conexión caída")):
+            lote.l10n_pe_ne_procesar(max_filas=1)
+        fila = lote.fila_ids
+        self.assertEqual(fila.estado, "error")
+        self.assertTrue(fila.move_id, "el move persiste (send_to_biller no relanza RequestException)")
+        move_id = fila.move_id.id
+        lote.l10n_pe_ne_reintentar()
+        self.assertEqual(fila.estado, "pendiente")
+        self.assertEqual(fila.move_id.id, move_id, "reintentar NO limpia move_id")
+        with patch(_TARGET, return_value=_resp(200, _SIGNED)) as mp:
+            lote.l10n_pe_ne_procesar(max_filas=1)
+        self.assertEqual(fila.estado, "emitido")
+        self.assertEqual(fila.move_id.id, move_id, "reusa el MISMO move (misma serie-correlativo)")
+        mp.assert_called_once()
+        self.assertEqual(self.env["account.move"].search_count([("id", "=", move_id)]), 1)
+
+    def test_cancelar(self):
+        lote = self._crear([list(self._BOLETA), list(self._BOLETA)])
+        with patch(_TARGET, return_value=_resp(200, _SIGNED)):
+            lote.l10n_pe_ne_procesar(max_filas=1)
+        lote.l10n_pe_ne_cancelar()
+        self.assertEqual([f.estado for f in lote.fila_ids.sorted("secuencia")], ["emitido", "cancelado"])
+        self.assertEqual(lote.estado, "cancelado")
+
+    def test_resultados_xlsx(self):
+        import openpyxl
+        lote = self._crear([list(self._BOLETA)])
+        with patch(_TARGET, return_value=_resp(200, _SIGNED)):
+            lote.l10n_pe_ne_procesar(max_filas=1)
+        out = lote.l10n_pe_ne_resultados()
+        self.assertEqual(out["count"], 1)
+        self.assertTrue(out["filename"].endswith(".xlsx"))
+        ws = openpyxl.load_workbook(io.BytesIO(base64.b64decode(out["contentB64"]))).active
+        self.assertEqual(ws.cell(1, 1).value, "Venta")
+        self.assertEqual(ws.max_row, 2)   # cabecera + 1 fila

@@ -1484,8 +1484,14 @@ class AccountMove(models.Model):
             "mensaje": msg,
         }
 
-    def l10n_pe_ne_get_baja_files(self):
-        """{cdr} base64 de la anulación (RA/RC), para que el BFF lo sirva."""
+    def l10n_pe_ne_get_baja_files(self, kind=None):
+        """{cdr} base64 de la anulación (RA/RC), para que el BFF lo sirva.
+
+        Acepta e ignora ``kind`` (una baja no tiene ticket): la ruta
+        ``/ne/api/anulacion/<id>/cdr`` invoca este método vía
+        ``_serve_file`` con ``kind='cdr'`` — simétrico con
+        ``l10n_pe_ne_get_files``.
+        """
         self.ensure_one()
         out = {}
         att = self.l10n_pe_ne_baja_cdr

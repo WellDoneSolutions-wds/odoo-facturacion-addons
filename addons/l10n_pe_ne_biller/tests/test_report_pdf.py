@@ -141,3 +141,22 @@ class TestBillerReportPdf(TransactionCase):
         self.move.l10n_pe_biller_xml = False
         with self.assertRaises(UserError):
             self.move.action_l10n_pe_download_ticket()
+
+    def test_get_baja_files_acepta_kind(self):
+        # Regresion: _serve_file (ruta /ne/api/anulacion/<id>/cdr) invoca
+        # l10n_pe_ne_get_baja_files(kind='cdr'). Tras QW08-ticket, _serve_file
+        # pasa kind SIEMPRE; si el metodo no acepta el kwarg -> TypeError ->
+        # la descarga del CDR de anulacion falla en cada request. Debe aceptar
+        # e IGNORAR kind (una baja no tiene ticket) y devolver un dict.
+        out = self.move.l10n_pe_ne_get_baja_files(kind='cdr')
+        self.assertIsInstance(out, dict)
+        # Sin datos de baja, el dict va vacio (no revienta): contrato minimo.
+        self.assertNotIn('cdr', out)
+        # Con un CDR de anulacion adjunto, kind='cdr' lo devuelve igual.
+        att = self.env['ir.attachment'].create({
+            'name': 'R-20605145648-RA-1.zip', 'res_model': 'account.move',
+            'res_id': self.move.id, 'mimetype': 'application/zip',
+            'datas': self.PNG_1X1_B64})
+        self.move.l10n_pe_ne_baja_cdr = att.id
+        out = self.move.l10n_pe_ne_get_baja_files(kind='cdr')
+        self.assertEqual(out.get('cdr'), self.PNG_1X1_B64)

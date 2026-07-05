@@ -2,13 +2,14 @@
 import base64
 import io
 import json
+from datetime import timedelta
 
 import xlsxwriter
 from unittest.mock import patch
 
 from odoo import fields
 from odoo.exceptions import AccessError, UserError
-from odoo.tests import TransactionCase, tagged
+from odoo.tests import HttpCase, TransactionCase, tagged
 
 # Patch donde se USA requests.post (dentro del módulo del modelo base), igual que test_send.py.
 _TARGET = "odoo.addons.l10n_pe_ne_biller.models.account_move_biller.requests.post"
@@ -260,3 +261,61 @@ class TestMasivo(TransactionCase):
         ws = openpyxl.load_workbook(io.BytesIO(base64.b64decode(out["contentB64"]))).active
         self.assertEqual(ws.cell(1, 1).value, "Venta")
         self.assertEqual(ws.max_row, 2)   # cabecera + 1 fila
+
+
+# -------------------------------------------------- QW10 Task 4: rutas HTTP /ne/api/lotes*
+@tagged("post_install", "-at_install")
+class TestMasivoHttp(HttpCase):
+    def setUp(self):
+        super().setUp()
+        from odoo.addons.l10n_pe_ne_biller.controllers.main import _SCOPE
+        self.company = self.env.company
+        if not self.company.vat:
+            self.company.vat = "20321856145"
+        grp = self.env.ref("l10n_pe_ne_biller.group_l10n_pe_ne_emisor")
+        self.user = self.env["res.users"].create({
+            "name": "Emisor HTTP", "login": "emisor_http_masivo",
+            "company_id": self.company.id, "company_ids": [(6, 0, [self.company.id])],
+            "group_ids": [(4, grp.id)]})
+        self.key = self.env["res.users.apikeys"].with_user(self.user)._generate(
+            _SCOPE, "masivo-http", fields.Datetime.now() + timedelta(days=1))
+
+    def _get(self, path):
+        return self.url_open(path, headers={"Authorization": "Bearer %s" % self.key})
+
+    def _post(self, path, payload):
+        return self.url_open(path, data=json.dumps(payload), headers={
+            "Authorization": "Bearer %s" % self.key, "Content-Type": "application/json"})
+
+    def test_sin_token_401(self):
+        self.assertEqual(self.url_open("/ne/api/lotes").status_code, 401)
+
+    def test_list_lotes_vacio(self):
+        r = self._get("/ne/api/lotes")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json(), [])
+
+    def test_plantilla_descarga(self):
+        r = self._get("/ne/api/lotes/plantilla")
+        self.assertEqual(r.status_code, 200)
+        d = r.json()
+        self.assertTrue(d["filename"].endswith(".xlsx"))
+        self.assertTrue(d["contentB64"])
+
+    def test_lote_inexistente_404(self):
+        self.assertEqual(self._get("/ne/api/lotes/999999").status_code, 404)
+
+    def test_crear_lote_valida(self):
+        b64 = _xlsx_b64([["", "BOLETA", "", "", "", "", "", "", "AGUA 625ML", 2, 1.50, 0, "GRAVADO", "NO", "PEN"]])
+        r = self._post("/ne/api/lotes", {"filename": "ventas.xlsx", "contentB64": b64})
+        self.assertEqual(r.status_code, 200)
+        d = r.json()
+        self.assertEqual(d["estado"], "validado")
+        self.assertEqual(d["totalComprobantes"], 1)
+        self.assertEqual(d["errores"], [])
+
+    def test_aislamiento_403(self):
+        company_b = self.env["res.company"].create({"name": "RUC B", "vat": "20999999991"})
+        lote_b = self.env["l10n_pe_ne.lote"].with_company(company_b).create(
+            {"name": "b.xlsx", "estado": "validado", "company_id": company_b.id})
+        self.assertEqual(self._get("/ne/api/lotes/%s" % lote_b.id).status_code, 403)

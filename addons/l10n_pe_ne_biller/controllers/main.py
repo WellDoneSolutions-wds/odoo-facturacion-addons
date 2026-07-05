@@ -148,6 +148,10 @@ class L10nPeNeApi(http.Controller):
         u = self._user(uid)
         return request.env["l10n_pe_ne.caja.sesion"].with_user(uid).with_company(u.company_id)
 
+    def _lote(self, uid):
+        u = self._user(uid)
+        return request.env["l10n_pe_ne.lote"].with_user(uid).with_company(u.company_id)
+
     def _body(self):
         raw = request.httprequest.get_data() or b""
         return json.loads(raw) if raw else {}
@@ -1039,6 +1043,93 @@ class L10nPeNeApi(http.Controller):
             return self._json(rec._l10n_pe_ne_arqueo_dict())
         except Exception as e:  # noqa: BLE001
             return self._fail(e)
+
+    # ----------------------------------------------------- Emisión masiva (lotes)
+    @http.route("/ne/api/lotes", **_GET)
+    def list_lotes(self, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        try:
+            return self._json(self._lote(uid).l10n_pe_ne_list_lotes())
+        except Exception as e:  # noqa: BLE001
+            return self._fail(e)
+
+    @http.route("/ne/api/lotes", **_POST)
+    def create_lote(self, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(lambda: self._lote(uid).l10n_pe_ne_crear_lote(self._body()))
+
+    @http.route("/ne/api/lotes/plantilla", **_GET)
+    def lote_plantilla(self, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        try:
+            return self._json(self._lote(uid).l10n_pe_ne_plantilla())
+        except Exception as e:  # noqa: BLE001
+            return self._fail(e)
+
+    @http.route("/ne/api/lotes/<int:rec_id>", **_GET)
+    def lote_detalle(self, rec_id, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        rec = self._lote(uid).browse(int(rec_id))
+        if not rec.exists():
+            return self._err("El lote %s no existe" % rec_id, status=404)
+        try:
+            return self._json(rec.l10n_pe_ne_lote_detalle())
+        except Exception as e:  # noqa: BLE001
+            return self._fail(e)
+
+    @http.route("/ne/api/lotes/<int:rec_id>/procesar", **_POST)
+    def lote_procesar(self, rec_id, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        rec = self._lote(uid).browse(int(rec_id))
+        if not rec.exists():
+            return self._err("El lote %s no existe" % rec_id, status=404)
+        body = self._body()
+        return self._run(lambda: rec.l10n_pe_ne_procesar(max_filas=int(body.get("max") or 1)))
+
+    @http.route("/ne/api/lotes/<int:rec_id>/reintentar", **_POST)
+    def lote_reintentar(self, rec_id, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        rec = self._lote(uid).browse(int(rec_id))
+        if not rec.exists():
+            return self._err("El lote %s no existe" % rec_id, status=404)
+        return self._run(lambda: rec.l10n_pe_ne_reintentar())
+
+    @http.route("/ne/api/lotes/<int:rec_id>/cancelar", **_POST)
+    def lote_cancelar(self, rec_id, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        rec = self._lote(uid).browse(int(rec_id))
+        if not rec.exists():
+            return self._err("El lote %s no existe" % rec_id, status=404)
+        return self._run(lambda: rec.l10n_pe_ne_cancelar())
+
+    @http.route("/ne/api/lotes/<int:rec_id>/resultados", **_GET)
+    def lote_resultados(self, rec_id, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        rec = self._lote(uid).browse(int(rec_id))
+        if not rec.exists():
+            return self._err("El lote %s no existe" % rec_id, status=404)
+        try:
+            return self._json(rec.l10n_pe_ne_resultados())
+        except Exception as e:  # noqa: BLE001
+            return self._fail(e)
+
+    
 
     
 

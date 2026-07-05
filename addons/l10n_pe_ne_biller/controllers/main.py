@@ -42,6 +42,7 @@ _PG_RETRY = ("40001", "40P01")
 # Mensaje amigable (ES) para constraints conocidas; el resto cae al texto pg legible.
 _CONSTRAINT_MSGS = {
     "account_move_unique_name_latam": "Ya existe un comprobante con ese número para ese cliente (número duplicado).",
+    "l10n_pe_ne_caja_sesion_unica_abierta": "Ya hay una caja abierta para tu negocio. Ciérrala antes de abrir otra.",
 }
 
 # Tipo de archivo descargable → (content-type, extensión de archivo).

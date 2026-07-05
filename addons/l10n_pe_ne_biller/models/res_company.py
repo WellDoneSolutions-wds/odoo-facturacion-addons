@@ -70,6 +70,7 @@ class ResCompany(models.Model):
                 'name': (vals.get('userName') or razon).strip(),
                 'login': login,
                 'password': password,
+                'tz': 'America/Lima',
                 'company_id': company.id,
                 'company_ids': [(6, 0, [company.id])],
                 'group_ids': [(4, grp.id)],

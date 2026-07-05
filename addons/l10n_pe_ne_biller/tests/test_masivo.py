@@ -195,6 +195,21 @@ class TestMasivo(TransactionCase):
         self.assertEqual(mp.call_count, 1)
         self.assertEqual(lote.fila_ids.estado, "emitido")
 
+    def test_procesar_chunk_multiple(self):
+        """QW10 Task 3 review (cobertura): con max_filas=3 (<= masivo_max_chunk=5) el chunk
+        procesa las 3 filas EN UNA sola llamada. El mock devuelve [200, 400, 200]: la fila 2
+        queda 'rechazado' pero el for-loop sigue con la fila 3 dentro de la MISMA llamada (no
+        solo entre llamadas top-level, como ya cubre test_rechazo_no_detiene)."""
+        lote = self._crear([list(self._BOLETA), list(self._BOLETA), list(self._BOLETA)])
+        resps = [_resp(200, _SIGNED), _resp(400, "XSLT error 2017"), _resp(200, _SIGNED)]
+        with patch(_TARGET, side_effect=resps) as mp:
+            lote.l10n_pe_ne_procesar(max_filas=3)
+        self.assertEqual(mp.call_count, 3, "las 3 filas se procesaron en UNA sola llamada")
+        filas = lote.fila_ids.sorted("secuencia")
+        self.assertEqual([f.estado for f in filas], ["emitido", "rechazado", "emitido"])
+        self.assertIn("2017", filas[1].mensaje)
+        self.assertEqual(lote.estado, "terminado")
+
     def test_reintento_reusa_move(self):
         import requests as _rq
         lote = self._crear([list(self._BOLETA)])
@@ -204,6 +219,7 @@ class TestMasivo(TransactionCase):
         self.assertEqual(fila.estado, "error")
         self.assertTrue(fila.move_id, "el move persiste (send_to_biller no relanza RequestException)")
         move_id = fila.move_id.id
+        n0 = self.env["account.move"].search_count([])
         lote.l10n_pe_ne_reintentar()
         self.assertEqual(fila.estado, "pendiente")
         self.assertEqual(fila.move_id.id, move_id, "reintentar NO limpia move_id")
@@ -213,6 +229,8 @@ class TestMasivo(TransactionCase):
         self.assertEqual(fila.move_id.id, move_id, "reusa el MISMO move (misma serie-correlativo)")
         mp.assert_called_once()
         self.assertEqual(self.env["account.move"].search_count([("id", "=", move_id)]), 1)
+        self.assertEqual(self.env["account.move"].search_count([]), n0,
+                         "reintentar+procesar no crea un move nuevo (defensa en profundidad)")
 
     def test_cancelar(self):
         lote = self._crear([list(self._BOLETA), list(self._BOLETA)])
@@ -221,6 +239,15 @@ class TestMasivo(TransactionCase):
         lote.l10n_pe_ne_cancelar()
         self.assertEqual([f.estado for f in lote.fila_ids.sorted("secuencia")], ["emitido", "cancelado"])
         self.assertEqual(lote.estado, "cancelado")
+        # QW10 Task 3 review (Important): la fila 2 quedó 'cancelado' (no 'pendiente'), así que
+        # sin el guard de estado terminal el bloque final "sin pendientes -> terminado" pisaba
+        # el 'cancelado' con 'terminado' en un procesar() de más (doble submit/poll tardío).
+        n0 = self.env["account.move"].search_count([])
+        with patch(_TARGET, return_value=_resp(200, _SIGNED)) as mp:
+            lote.l10n_pe_ne_procesar()
+        self.assertEqual(lote.estado, "cancelado", "procesar() no debe voltear cancelado -> terminado")
+        mp.assert_not_called()
+        self.assertEqual(self.env["account.move"].search_count([]), n0, "no se emite nada nuevo")
 
     def test_resultados_xlsx(self):
         import openpyxl

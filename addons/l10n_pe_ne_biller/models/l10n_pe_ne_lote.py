@@ -472,7 +472,13 @@ class L10nPeNeLote(models.Model):
             procesadas |= fila
             if self._masivo_can_commit():
                 self.env.cr.commit()
-        if not self.fila_ids.filtered(lambda f: f.estado == "pendiente"):
+        # Guarda: solo pasa a 'terminado' si el lote seguía en curso. Un lote 'cancelado' (o ya
+        # 'terminado') tampoco tiene filas 'pendiente' -> sin este guard, un procesar() de más
+        # (doble submit del SPA, poll fuera de tiempo) pisaba el estado 'cancelado' con
+        # 'terminado' aunque no se reemitiera nada (revisión QW10 Task 3).
+        if self.estado not in ("cancelado", "terminado") and not self.fila_ids.filtered(
+            lambda f: f.estado == "pendiente"
+        ):
             self.estado = "terminado"
             if self._masivo_can_commit():
                 self.env.cr.commit()

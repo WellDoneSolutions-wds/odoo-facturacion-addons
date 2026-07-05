@@ -73,3 +73,150 @@ class TestCaja(TransactionCase):
         })
         with self.assertRaises(AccessError):
             ses.with_user(user).unlink()
+
+    # ------------------------------------------------------------ métodos (Task 3)
+    def test_abrir_y_esperado_efectivo(self):
+        d = self.Sesion.l10n_pe_ne_abrir_caja({"saldoInicial": 150, "nota": "sencillo"})
+        self.assertEqual(d["estado"], "abierta")
+        self.assertEqual(d["saldoInicial"], 150.0)
+        efec = {f["medio"]: f["monto"] for f in d["esperado"]}
+        self.assertEqual(efec["Efectivo"], 150.0)     # sin ventas ni movs
+        self.assertEqual(d["esperadoTotal"], 150.0)
+
+    def test_abrir_guardas(self):
+        self.Sesion.l10n_pe_ne_abrir_caja({"saldoInicial": 10})
+        with self.assertRaisesRegex(UserError, "Ya hay una caja abierta"):
+            self.Sesion.l10n_pe_ne_abrir_caja({"saldoInicial": 10})
+        # cerrar para poder probar el saldo negativo en una nueva apertura
+        self.Sesion.l10n_pe_ne_cerrar_caja({"conteos": [{"medio": "Efectivo", "contado": 10}]})
+        with self.assertRaisesRegex(UserError, "no puede ser negativo"):
+            self.Sesion.l10n_pe_ne_abrir_caja({"saldoInicial": -1})
+
+    def test_movimientos_afectan_efectivo(self):
+        self.Sesion.l10n_pe_ne_abrir_caja({"saldoInicial": 150})
+        d = self.Sesion.l10n_pe_ne_caja_movimiento({"tipo": "retiro", "motivo": "Pago proveedor", "monto": 80})
+        efec = {f["medio"]: f["monto"] for f in d["esperado"]}
+        self.assertEqual(efec["Efectivo"], 70.0)      # 150 - 80
+        self.assertEqual(d["retiros"], 80.0)
+        d = self.Sesion.l10n_pe_ne_caja_movimiento({"tipo": "ingreso", "motivo": "Sencillo del dueño", "monto": 50})
+        efec = {f["medio"]: f["monto"] for f in d["esperado"]}
+        self.assertEqual(efec["Efectivo"], 120.0)     # 70 + 50
+        self.assertEqual(d["ingresos"], 50.0)
+        self.assertEqual(len(d["movimientos"]), 2)
+
+    def test_movimiento_validaciones(self):
+        # sin caja abierta
+        with self.assertRaisesRegex(UserError, "No hay una caja abierta"):
+            self.Sesion.l10n_pe_ne_caja_movimiento({"tipo": "ingreso", "motivo": "x", "monto": 1})
+        self.Sesion.l10n_pe_ne_abrir_caja({"saldoInicial": 0})
+        with self.assertRaisesRegex(UserError, "ingreso o retiro"):
+            self.Sesion.l10n_pe_ne_caja_movimiento({"tipo": "otro", "motivo": "x", "monto": 1})
+        with self.assertRaisesRegex(UserError, "necesita un motivo"):
+            self.Sesion.l10n_pe_ne_caja_movimiento({"tipo": "ingreso", "motivo": "  ", "monto": 1})
+        with self.assertRaisesRegex(UserError, "mayor a 0"):
+            self.Sesion.l10n_pe_ne_caja_movimiento({"tipo": "ingreso", "motivo": "ok", "monto": 0})
+
+    def test_cerrar_y_snapshot(self):
+        self.Sesion.l10n_pe_ne_abrir_caja({"saldoInicial": 100})
+        self.Sesion.l10n_pe_ne_caja_movimiento({"tipo": "retiro", "motivo": "banco", "monto": 20})
+        arq = self.Sesion.l10n_pe_ne_cerrar_caja({
+            "conteos": [{"medio": "Efectivo", "contado": 75}], "nota": "cierre"})
+        self.assertEqual(arq["estado"], "cerrada")
+        efec = {f["medio"]: f for f in arq["arqueo"]}
+        self.assertEqual(efec["Efectivo"]["esperado"], 80.0)     # 100 - 20
+        self.assertEqual(efec["Efectivo"]["diferencia"], -5.0)   # 75 - 80
+        self.assertEqual(arq["diferenciaTotal"], -5.0)
+        sid = arq["id"]
+        # re-cerrar / mover sobre cerrada -> UserError
+        with self.assertRaisesRegex(UserError, "No hay una caja abierta"):
+            self.Sesion.l10n_pe_ne_cerrar_caja({"conteos": [{"medio": "Efectivo", "contado": 75}]})
+        # cerrar sin conteos -> UserError
+        self.Sesion.l10n_pe_ne_abrir_caja({"saldoInicial": 0})
+        with self.assertRaisesRegex(UserError, "al menos un medio"):
+            self.Sesion.l10n_pe_ne_cerrar_caja({"conteos": []})
+        # snapshot inmutable: el arqueo de la cerrada no cambia entre llamadas
+        a1 = self.Sesion.l10n_pe_ne_caja_arqueo(sid)
+        a2 = self.Sesion.l10n_pe_ne_caja_arqueo(sid)
+        self.assertEqual(a1["arqueo"], a2["arqueo"])
+        self.assertEqual(a1["diferenciaTotal"], -5.0)
+
+    def test_actual_y_list(self):
+        self.assertEqual(self.Sesion.l10n_pe_ne_caja_actual(), {"abierta": False, "sesion": None})
+        d = self.Sesion.l10n_pe_ne_abrir_caja({"saldoInicial": 30})
+        act = self.Sesion.l10n_pe_ne_caja_actual()
+        self.assertTrue(act["abierta"] and act["sesion"]["id"] == d["id"])
+        filas = self.Sesion.l10n_pe_ne_list_cajas()
+        self.assertIn(d["id"], [f["id"] for f in filas])
+        fila = next(f for f in filas if f["id"] == d["id"])
+        self.assertIsNone(fila["contadoTotal"])     # abierta -> contado/diferencia null
+
+    # ------------------------------------------------- amarre de ventas (hermético)
+    def _venta_enviada(self, correlativo, forma="Contado", medios=None, moneda=None):
+        """Crea una venta posted+'enviado' que cae en la ventana de la sesión (sin red;
+        el amarre real vs SUNAT beta es Task 7). Devuelve el account.move."""
+        vals = {
+            "move_type": "out_invoice", "partner_id": self._caja_partner.id,
+            "invoice_date": "2026-07-02", "l10n_pe_serie": "F001",
+            "l10n_pe_correlativo": correlativo, "l10n_pe_ne_forma_pago": forma,
+            "invoice_line_ids": [(0, 0, {
+                "product_id": self._caja_product.id, "quantity": 1.0,
+                "price_unit": 100.0, "tax_ids": [(6, 0, self._caja_igv.ids)]})],
+        }
+        if moneda:
+            vals["currency_id"] = moneda.id
+        move = self.env["account.move"].create(vals)
+        if medios is not None:
+            move.l10n_pe_ne_medios_pago = medios
+        move.action_post()
+        move.l10n_pe_biller_state = "enviado"
+        return move
+
+    def test_amarre_ventas(self):
+        # fixtures de facturación (misma localización PE que usan los demás tests)
+        self._caja_igv = self.env["account.tax"].search([
+            ("company_id", "=", self.company.id), ("type_tax_use", "=", "sale"),
+            ("l10n_pe_edi_tax_code", "=", "1000")], limit=1)
+        self.assertTrue(self._caja_igv, "Falta el IGV 1000 de la localización PE")
+        ruc_type = self.env["l10n_latam.identification.type"].search(
+            [("l10n_pe_vat_code", "=", "6")], limit=1)
+        self._caja_partner = self.env["res.partner"].create({
+            "name": "CLIENTE CAJA SAC", "vat": "20100070970",
+            "l10n_latam_identification_type_id": ruc_type.id})
+        self._caja_product = self.env["product.product"].create(
+            {"name": "PRODUCTO CAJA", "default_code": "QW7C"})
+        usd = self.env.ref("base.USD")
+        usd.active = True
+
+        # abrir la caja ANTES de emitir para que las ventas caigan en la ventana create_date
+        self.Sesion.l10n_pe_ne_abrir_caja({"saldoInicial": 100})
+        v_medios = self._venta_enviada("1101", medios=[{"medio": "Yape", "monto": 30},
+                                                       {"medio": "Efectivo", "monto": 20}])
+        v_efec = self._venta_enviada("1102", medios=None)                 # Contado sin medios
+        v_cred = self._venta_enviada("1103", forma="Credito", medios=None)  # Crédito: excluido
+        v_usd = self._venta_enviada("1104", moneda=usd)                   # USD: aparte
+
+        d = self.Sesion.l10n_pe_ne_caja_actual()["sesion"]
+        efec = {f["medio"]: f["monto"] for f in d["esperado"]}
+        # Yape = 30 (solo el medio detallado); Efectivo = saldo + medio Efectivo(20) + v_efec total
+        self.assertEqual(efec["Yape"], 30.0)
+        self.assertEqual(efec["Efectivo"], round(100 + 20 + v_efec.amount_total, 2))
+        # Crédito NO aporta a ningún medio; USD no aparece en porMedio
+        self.assertNotIn("USD", efec)
+        # ventas PEN: v_medios, v_efec, v_cred (3); un solo sinMedio (v_efec); USD aparte
+        self.assertEqual(d["ventas"]["count"], 3)
+        self.assertEqual(d["ventas"]["sinMedio"], 1)
+        self.assertEqual(d["ventas"]["countUsd"], 1)
+        self.assertEqual(d["ventas"]["totalUsd"], round(v_usd.amount_total, 2))
+        self.assertEqual(d["ventas"]["total"],
+                         round(v_medios.amount_total + v_efec.amount_total + v_cred.amount_total, 2))
+
+    def test_arqueo_cross_tenant(self):
+        d = self.Sesion.l10n_pe_ne_abrir_caja({"saldoInicial": 10})
+        company_b = self.env["res.company"].create({"name": "CAJA C SAC"})
+        user_b = self.env["res.users"].create({
+            "name": "Cajero C", "login": "cajero_c_qw07",
+            "company_id": company_b.id, "company_ids": [(6, 0, [company_b.id])],
+            "group_ids": [(4, self.env.ref("l10n_pe_ne_biller.group_l10n_pe_ne_emisor").id)],
+        })
+        with self.assertRaises(AccessError):
+            self.Sesion.with_user(user_b).l10n_pe_ne_caja_arqueo(d["id"])

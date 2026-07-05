@@ -48,6 +48,7 @@ _CONSTRAINT_MSGS = {
 # Tipo de archivo descargable → (content-type, extensión de archivo).
 _FILE_KINDS = {
     "pdf": ("application/pdf", "pdf"),
+    "ticket": ("application/pdf", "pdf"),  # ticket 80mm; extensión .pdf
     "xml": ("application/xml", "xml"),
     "cdr": ("application/zip", "zip"),
 }
@@ -253,7 +254,7 @@ class L10nPeNeApi(http.Controller):
             .with_company(u.company_id)
             .browse(int(rec_id))
         )
-        files = getattr(rec, method)() or {}
+        files = getattr(rec, method)(kind=kind) or {}
         b64 = files.get(kind)
         if not b64:
             return self._err(f"El {prefix} {rec_id} no tiene {kind}", status=404)

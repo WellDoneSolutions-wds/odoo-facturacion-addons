@@ -16,6 +16,9 @@
         <button name="action_l10n_pe_download_pdf" type="object"
                 string="Descargar PDF" class="btn-secondary" icon="fa-file-pdf-o"
                 invisible="not l10n_pe_biller_xml"/>
+        <button name="action_l10n_pe_download_ticket" type="object"
+                string="Descargar Ticket" class="btn-secondary" icon="fa-print"
+                invisible="not l10n_pe_biller_xml or move_type != 'out_invoice' or debit_origin_id"/>
         <button name="action_l10n_pe_download_xml" type="object"
                 string="Descargar XML" class="btn-secondary" icon="fa-file-code-o"
                 invisible="not l10n_pe_biller_xml"/>

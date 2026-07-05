@@ -442,6 +442,9 @@ class AccountMove(models.Model):
     l10n_pe_biller_pdf = fields.Many2one(
         "ir.attachment", string="PDF (representación impresa)", copy=False
     )
+    l10n_pe_biller_pdf_ticket = fields.Many2one(
+        "ir.attachment", string="PDF ticket 80mm (representación impresa)", copy=False
+    )
     l10n_pe_biller_message = fields.Text(string="Mensaje Facturador", copy=False)
 
     # ----------------------------------------------------------------- helpers
@@ -2767,8 +2770,10 @@ class AccountMove(models.Model):
             },
         }
 
-    def l10n_pe_ne_get_files(self):
-        """Devuelve {xml, cdr, pdf} en base64 del comprobante, para que el BFF los sirva (sin /web/content)."""
+    def l10n_pe_ne_get_files(self, kind=None):
+        """Devuelve {xml, cdr, pdf[, ticket]} en base64 del comprobante, para que el BFF los sirva
+        (sin /web/content). `ticket` (80mm) solo se incluye cuando kind == 'ticket' — así una descarga
+        normal no dispara el render del ticket."""
         self.ensure_one()
 
         def b64(att):
@@ -2788,6 +2793,13 @@ class AccountMove(models.Model):
                 out["pdf"] = b64(pdf_att)
         except Exception:
             pass
+        if kind == "ticket":
+            try:
+                t = self._l10n_pe_get_pdf_attachment(formato="TICKET") if self.l10n_pe_biller_xml else False
+                if t:
+                    out["ticket"] = b64(t)
+            except Exception:
+                pass
         return out
 
     # ------------------------------------------------- descargas / PDF (SFS 2.4)
@@ -2800,12 +2812,18 @@ class AccountMove(models.Model):
             "target": "self",
         }
 
-    def _l10n_pe_get_pdf_attachment(self):
+    def _l10n_pe_get_pdf_attachment(self, formato="A4"):
         """Devuelve (o genera y cachea) el PDF de la representación impresa pidiéndolo al micro
-        (POST /report/pdf con el XML firmado). El micro lo renderiza con las plantillas del SFS 2.4."""
+        (POST /report/pdf con el XML firmado). El micro lo renderiza con las plantillas del SFS 2.4.
+        formato: 'A4' (SFS 2.4) o 'TICKET' (80mm, solo 01/03; otros tipos caen al A4)."""
         self.ensure_one()
-        if self.l10n_pe_biller_pdf:
-            return self.l10n_pe_biller_pdf
+        tipo, serie, correlativo = self._l10n_pe_baja_identidad()
+        es_ticket = formato == "TICKET" and tipo in ("01", "03")
+        if formato == "TICKET" and not es_ticket:
+            return self._l10n_pe_get_pdf_attachment()  # fallback A4 (NC/ND/retención…)
+        cache_field = "l10n_pe_biller_pdf_ticket" if es_ticket else "l10n_pe_biller_pdf"
+        if self[cache_field]:
+            return self[cache_field]
         if not self.l10n_pe_biller_xml:
             raise UserError(
                 _("El comprobante no tiene XML firmado; envíelo primero a SUNAT.")
@@ -2815,12 +2833,13 @@ class AccountMove(models.Model):
             "/"
         )
         timeout = int(icp.get_param("l10n_pe_ne_biller.timeout", "60"))
-        tipo, serie, correlativo = self._l10n_pe_baja_identidad()
         payload = {
             "ruc": self.company_id.vat or "",
             "tipoDoc": tipo,
             "xml": (self.l10n_pe_biller_xml.raw or b"").decode("utf-8"),
         }
+        if es_ticket:
+            payload["formato"] = "TICKET"
         headers = {"X-Api-Key": self.company_id.sudo().l10n_pe_ne_api_key or ""}
         try:
             resp = requests.post(
@@ -2835,15 +2854,20 @@ class AccountMove(models.Model):
             )
         att = self.env["ir.attachment"].create(
             {
-                "name": "%s-%s-%s.pdf"
-                % (self.company_id.vat or "", serie, correlativo.zfill(8)),
+                "name": "%s-%s-%s%s.pdf"
+                % (
+                    self.company_id.vat or "",
+                    serie,
+                    correlativo.zfill(8),
+                    "-ticket" if es_ticket else "",
+                ),
                 "res_model": "account.move",
                 "res_id": self.id,
                 "mimetype": "application/pdf",
                 "raw": resp.content,
             }
         )
-        self.l10n_pe_biller_pdf = att.id
+        self[cache_field] = att.id
         return att
 
     def _l10n_pe_ne_is_aceptado(self):
@@ -2889,6 +2913,10 @@ class AccountMove(models.Model):
     def action_l10n_pe_download_pdf(self):
         self.ensure_one()
         return self._l10n_pe_download_url(self._l10n_pe_get_pdf_attachment())
+
+    def action_l10n_pe_download_ticket(self):
+        self.ensure_one()
+        return self._l10n_pe_download_url(self._l10n_pe_get_pdf_attachment(formato="TICKET"))
 
     def action_l10n_pe_download_xml(self):
         self.ensure_one()

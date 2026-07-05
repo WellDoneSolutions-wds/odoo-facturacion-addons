@@ -86,3 +86,58 @@ class TestBillerReportPdf(TransactionCase):
         names = zipfile.ZipFile(io.BytesIO(self.env['ir.attachment'].browse(att_id).raw)).namelist()
         self.assertTrue(any(n.endswith('.xml') for n in names), names)
         self.assertTrue(any(n.endswith('.pdf') for n in names), names)
+
+# ---------------------------------------------------- QW08: ticket 80mm
+    def test_download_ticket_genera_y_cachea(self):
+        with patch(_TARGET, return_value=self._pdf_resp()) as mp:
+            act = self.move.action_l10n_pe_download_ticket()
+        self.assertTrue(self.move.l10n_pe_biller_pdf_ticket, "cachea en el adjunto ticket")
+        self.assertFalse(self.move.l10n_pe_biller_pdf, "el A4 queda vacio (adjuntos independientes)")
+        self.assertTrue(self.move.l10n_pe_biller_pdf_ticket.name.endswith('-ticket.pdf'))
+        self.assertEqual(act['type'], 'ir.actions.act_url')
+        mp.assert_called_once()
+        self.assertEqual(mp.call_args.kwargs['json']['formato'], 'TICKET')
+        self.assertEqual(mp.call_args.kwargs['json']['tipoDoc'], '01')
+        # Cache: segunda descarga NO vuelve a llamar al micro.
+        with patch(_TARGET) as mp2:
+            self.move.action_l10n_pe_download_ticket()
+            mp2.assert_not_called()
+
+    def test_ticket_y_a4_caches_independientes(self):
+        with patch(_TARGET, return_value=self._pdf_resp()) as mp:
+            self.move.action_l10n_pe_download_pdf()      # A4
+            self.move.action_l10n_pe_download_ticket()   # ticket
+        self.assertEqual(mp.call_count, 2, "dos renders (A4 + ticket)")
+        self.assertTrue(self.move.l10n_pe_biller_pdf and self.move.l10n_pe_biller_pdf_ticket)
+        self.assertNotEqual(self.move.l10n_pe_biller_pdf.id, self.move.l10n_pe_biller_pdf_ticket.id)
+        # El payload A4 (primera llamada) NO lleva la clave `formato` (byte-identico al actual).
+        self.assertNotIn('formato', mp.call_args_list[0].kwargs['json'])
+        self.assertEqual(mp.call_args_list[1].kwargs['json']['formato'], 'TICKET')
+
+    def test_ticket_nc_cae_a_a4(self):
+        # tipoDoc forzado 07 (NC): formato=TICKET debe caer al A4 (cachea en l10n_pe_biller_pdf, sin `formato`).
+        self.move.l10n_pe_ne_tipo_doc = '07'
+        with patch(_TARGET, return_value=self._pdf_resp()) as mp:
+            self.move._l10n_pe_get_pdf_attachment(formato='TICKET')
+        self.assertTrue(self.move.l10n_pe_biller_pdf, "fallback: cachea el A4")
+        self.assertFalse(self.move.l10n_pe_biller_pdf_ticket, "no cachea ticket para NC")
+        self.assertNotIn('formato', mp.call_args.kwargs['json'])
+
+    def test_get_files_kind_ticket(self):
+        # Sin kind: NO incluye ticket ni dispara render de ticket (solo el pdf A4 best-effort).
+        with patch(_TARGET, return_value=self._pdf_resp()):
+            out = self.move.l10n_pe_ne_get_files()
+        self.assertIn('pdf', out)
+        self.assertNotIn('ticket', out)
+        # kind='ticket': incluye la clave ticket.
+        self.move.l10n_pe_biller_pdf = False
+        self.move.l10n_pe_biller_pdf_ticket = False
+        with patch(_TARGET, return_value=self._pdf_resp()):
+            out = self.move.l10n_pe_ne_get_files(kind='ticket')
+        self.assertIn('ticket', out)
+        self.assertTrue(out['ticket'])
+
+    def test_ticket_sin_xml_rechaza(self):
+        self.move.l10n_pe_biller_xml = False
+        with self.assertRaises(UserError):
+            self.move.action_l10n_pe_download_ticket()

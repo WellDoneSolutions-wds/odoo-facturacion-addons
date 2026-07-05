@@ -463,7 +463,23 @@ class L10nPeNeLote(models.Model):
         for fila in pendientes:
             try:
                 with self.env.cr.savepoint():
-                    fila.invalidate_recordset(["estado"])   # relee: otra pestaña pudo tomarla
+                    # Lock por fila (NO por chunk): cierra la carrera de doble-emisión cuando dos
+                    # llamadas a procesar() concurrentes (dos pestañas "Reanudar", o un retry que
+                    # pisa una llamada en vuelo) leen la misma fila 'pendiente' antes de que
+                    # cualquiera de las dos comitee. SKIP LOCKED salta la fila si otra transacción
+                    # la está emitiendo AHORA MISMO; estado='pendiente' la salta si una llamada
+                    # anterior YA la emitió y comiteó. El lock se toma aquí adentro -y no al
+                    # principio de procesar()- porque con commit-por-fila el primer
+                    # self.env.cr.commit() libera cualquier lock tomado antes; debe vivir
+                    # exactamente entre esta adquisición y el commit de ESTA fila más abajo.
+                    self.env.cr.execute(
+                        "SELECT id FROM l10n_pe_ne_lote_fila WHERE id = %s AND estado = 'pendiente' "
+                        "FOR UPDATE SKIP LOCKED",
+                        (fila.id,),
+                    )
+                    if not self.env.cr.fetchone():
+                        continue   # otra transacción concurrente ya la tomó, o ya no está pendiente
+                    fila.invalidate_recordset(["estado", "move_id"])   # relee el estado real bajo el lock
                     if fila.estado != "pendiente":
                         continue
                     fila._l10n_pe_ne_procesar_fila()

@@ -1,5 +1,8 @@
+from datetime import timedelta
+
 from psycopg2 import IntegrityError
 
+from odoo import fields
 from odoo.exceptions import AccessError, UserError
 from odoo.tests import TransactionCase, tagged
 
@@ -151,9 +154,37 @@ class TestCaja(TransactionCase):
         self.assertIsNone(fila["contadoTotal"])     # abierta -> contado/diferencia null
 
     # ------------------------------------------------- amarre de ventas (hermético)
+    def _caja_fixtures(self):
+        """Fixtures de facturación (misma localización PE que usan los demás tests)."""
+        self._caja_igv = self.env["account.tax"].search([
+            ("company_id", "=", self.company.id), ("type_tax_use", "=", "sale"),
+            ("l10n_pe_edi_tax_code", "=", "1000")], limit=1)
+        self.assertTrue(self._caja_igv, "Falta el IGV 1000 de la localización PE")
+        ruc_type = self.env["l10n_latam.identification.type"].search(
+            [("l10n_pe_vat_code", "=", "6")], limit=1)
+        self._caja_partner = self.env["res.partner"].create({
+            "name": "CLIENTE CAJA SAC", "vat": "20100070970",
+            "l10n_latam_identification_type_id": ruc_type.id})
+        self._caja_product = self.env["product.product"].create(
+            {"name": "PRODUCTO CAJA", "default_code": "QW7C"})
+
+    def _caja_abrir(self, saldo=100):
+        """Abre la caja y ANCLA fecha_apertura en el pasado para que la ventana
+        [fecha_apertura, now()] incluya de forma DETERMINISTA las ventas que se crean a
+        continuación. Sin esto el test es flaky: create_date lo pone Postgres al INICIO de
+        la transacción (constante en toda la TransactionCase), mientras fecha_apertura es un
+        Python now() truncado al segundo; al cruzar un borde de segundo create_date puede
+        caer una fracción ANTES de fecha_apertura y la venta queda fuera de la ventana."""
+        d = self.Sesion.l10n_pe_ne_abrir_caja({"saldoInicial": saldo})
+        sesion = self.Sesion.browse(d["id"])
+        sesion.fecha_apertura = fields.Datetime.now() - timedelta(minutes=5)
+        self._caja_sesion = sesion
+        return sesion
+
     def _venta_enviada(self, correlativo, forma="Contado", medios=None, moneda=None):
-        """Crea una venta posted+'enviado' que cae en la ventana de la sesión (sin red;
-        el amarre real vs SUNAT beta es Task 7). Devuelve el account.move."""
+        """Crea una venta posted+'enviado' cuya create_date se fija DENTRO de la ventana de
+        la sesión (sin red; el amarre real vs SUNAT beta es caja_flow.py). Requiere que la
+        sesión se haya abierto con _caja_abrir. Devuelve el account.move."""
         vals = {
             "move_type": "out_invoice", "partner_id": self._caja_partner.id,
             "invoice_date": "2026-07-02", "l10n_pe_serie": "F001",
@@ -169,26 +200,22 @@ class TestCaja(TransactionCase):
             move.l10n_pe_ne_medios_pago = medios
         move.action_post()
         move.l10n_pe_biller_state = "enviado"
+        # create_date normalmente es read-only y la fija Postgres; la forzamos a un instante
+        # holgadamente dentro de la ventana para eliminar el flake del borde del segundo.
+        move.flush_recordset()
+        dentro = self._caja_sesion.fecha_apertura + timedelta(seconds=5)
+        self.env.cr.execute(
+            "UPDATE account_move SET create_date=%s WHERE id=%s", (dentro, move.id))
+        move.invalidate_recordset(["create_date"])
         return move
 
     def test_amarre_ventas(self):
-        # fixtures de facturación (misma localización PE que usan los demás tests)
-        self._caja_igv = self.env["account.tax"].search([
-            ("company_id", "=", self.company.id), ("type_tax_use", "=", "sale"),
-            ("l10n_pe_edi_tax_code", "=", "1000")], limit=1)
-        self.assertTrue(self._caja_igv, "Falta el IGV 1000 de la localización PE")
-        ruc_type = self.env["l10n_latam.identification.type"].search(
-            [("l10n_pe_vat_code", "=", "6")], limit=1)
-        self._caja_partner = self.env["res.partner"].create({
-            "name": "CLIENTE CAJA SAC", "vat": "20100070970",
-            "l10n_latam_identification_type_id": ruc_type.id})
-        self._caja_product = self.env["product.product"].create(
-            {"name": "PRODUCTO CAJA", "default_code": "QW7C"})
+        self._caja_fixtures()
         usd = self.env.ref("base.USD")
         usd.active = True
 
         # abrir la caja ANTES de emitir para que las ventas caigan en la ventana create_date
-        self.Sesion.l10n_pe_ne_abrir_caja({"saldoInicial": 100})
+        self._caja_abrir(100)
         v_medios = self._venta_enviada("1101", medios=[{"medio": "Yape", "monto": 30},
                                                        {"medio": "Efectivo", "monto": 20}])
         v_efec = self._venta_enviada("1102", medios=None)                 # Contado sin medios
@@ -209,6 +236,42 @@ class TestCaja(TransactionCase):
         self.assertEqual(d["ventas"]["totalUsd"], round(v_usd.amount_total, 2))
         self.assertEqual(d["ventas"]["total"],
                          round(v_medios.amount_total + v_efec.amount_total + v_cred.amount_total, 2))
+
+    def test_snapshot_inmutable_bajo_mutacion(self):
+        """HU4: el arqueo de una sesión CERRADA lee los snapshots congelados
+        (conteos_cierre/ventas_cierre), NO re-consulta las ventas. Se prueba MUTANDO una
+        venta amarrada tras el cierre (anulándola): si el arqueo re-consultara, la venta
+        saldría de la ventana y el conteo bajaría; como está congelado, el arqueo no cambia."""
+        self._caja_fixtures()
+        sesion = self._caja_abrir(100)
+        # una venta contado Efectivo 118 amarrada a la sesión
+        self._venta_enviada("1201", medios=[{"medio": "Efectivo", "monto": 118}])
+        d = self.Sesion.l10n_pe_ne_caja_actual()["sesion"]
+        self.assertEqual(d["ventas"]["count"], 1)     # amarrada mientras está abierta
+        esp = {f["medio"]: f["monto"] for f in d["esperado"]}
+        self.assertEqual(esp["Efectivo"], 218.0)      # saldo 100 + medio 118
+
+        # cerrar: congela conteos_cierre + ventas_cierre (arqueo con diferencia -2.30)
+        arq = self.Sesion.l10n_pe_ne_cerrar_caja({
+            "conteos": [{"medio": "Efectivo", "contado": esp["Efectivo"] - 2.30}]})
+        sid = arq["id"]
+        self.assertEqual(arq["diferenciaTotal"], -2.30)
+
+        before = self.Sesion.l10n_pe_ne_caja_arqueo(sid)
+        self.assertEqual(before["ventas"]["count"], 1)
+
+        # MUTACIÓN post-cierre: anular la venta amarrada. Una re-consulta la excluiría
+        # (el filtro exige l10n_pe_biller_state == 'enviado'); el snapshot NO debe moverse.
+        venta = self.env["account.move"].search(
+            [("l10n_pe_correlativo", "=", "1201"), ("company_id", "=", self.company.id)], limit=1)
+        self.assertTrue(venta)
+        venta.l10n_pe_biller_state = "anulado"
+
+        after = self.Sesion.l10n_pe_ne_caja_arqueo(sid)
+        # el arqueo histórico completo es idéntico: lee los snapshots, no re-consulta
+        self.assertEqual(after, before)
+        self.assertEqual(after["ventas"]["count"], 1)          # sigue contando la venta congelada
+        self.assertEqual(after["diferenciaTotal"], -2.30)
 
     def test_arqueo_cross_tenant(self):
         d = self.Sesion.l10n_pe_ne_abrir_caja({"saldoInicial": 10})

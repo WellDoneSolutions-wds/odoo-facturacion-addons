@@ -144,6 +144,10 @@ class L10nPeNeApi(http.Controller):
         u = self._user(uid)
         return request.env["l10n_pe_ne.cotizacion"].with_user(uid).with_company(u.company_id)
 
+    def _caja(self, uid):
+        u = self._user(uid)
+        return request.env["l10n_pe_ne.caja.sesion"].with_user(uid).with_company(u.company_id)
+
     def _body(self):
         raw = request.httprequest.get_data() or b""
         return json.loads(raw) if raw else {}
@@ -979,6 +983,64 @@ class L10nPeNeApi(http.Controller):
         return self._run(
             lambda: self._cotizacion(uid).l10n_pe_ne_delete_cotizacion(int(rec_id))
         )
+
+    # ------------------------------------------------------------------- caja
+    @http.route("/ne/api/caja", **_GET)
+    def caja_actual(self, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        try:
+            return self._json(self._caja(uid).l10n_pe_ne_caja_actual())
+        except Exception as e:  # noqa: BLE001
+            return self._fail(e)
+
+    @http.route("/ne/api/caja/abrir", **_POST)
+    def caja_abrir(self, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(lambda: self._caja(uid).l10n_pe_ne_abrir_caja(self._body()))
+
+    @http.route("/ne/api/caja/movimientos", **_POST)
+    def caja_movimiento(self, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(lambda: self._caja(uid).l10n_pe_ne_caja_movimiento(self._body()))
+
+    @http.route("/ne/api/caja/cerrar", **_POST)
+    def caja_cerrar(self, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(lambda: self._caja(uid).l10n_pe_ne_cerrar_caja(self._body()))
+
+    @http.route("/ne/api/caja/historial", **_GET)
+    def caja_historial(self, periodo=None, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        try:
+            return self._json(self._caja(uid).l10n_pe_ne_list_cajas(periodo=periodo or None))
+        except Exception as e:  # noqa: BLE001
+            return self._fail(e)
+
+    @http.route("/ne/api/caja/<int:rec_id>/arqueo", **_GET)
+    def caja_arqueo(self, rec_id, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        try:
+            rec = self._caja(uid).browse(int(rec_id)).exists()
+            if not rec:
+                return self._err("Sesión de caja no encontrada", 404)
+            # Cross-tenant: leer campos dispara AccessError (ir.rule) -> _fail -> 403.
+            return self._json(rec._l10n_pe_ne_arqueo_dict())
+        except Exception as e:  # noqa: BLE001
+            return self._fail(e)
+
+    
 
     @http.route("/ne/api/cotizaciones/<int:rec_id>/detalle", **_GET)
     def cotizacion_detalle(self, rec_id, **kw):

@@ -1518,7 +1518,7 @@ class AccountMove(models.Model):
 
     def _l10n_pe_ne_tax_by_code(self, code):
         """account.tax de venta por código cat-05 (l10n_pe_edi_tax_code); default 1000 (IGV gravado)."""
-        return self.env["account.tax"].search(
+        tax = self.env["account.tax"].search(
             [
                 ("company_id", "=", self.env.company.id),
                 ("type_tax_use", "=", "sale"),
@@ -1526,6 +1526,28 @@ class AccountMove(models.Model):
             ],
             limit=1,
         )
+        return self._l10n_pe_ne_normalize_tax_excluded(tax)
+
+    @api.model
+    def _l10n_pe_ne_normalize_tax_excluded(self, tax):
+        """Garantiza que la IGV/IVAP de venta trate el precio como VALOR (sin IGV).
+
+        Contrato del app: `precioUnitario` es el valor unitario SIN IGV — el front
+        (Emitir) lo muestra como `Gravada` y suma el IGV 18% por encima. Pero la base
+        que emitimos sale de `line.price_subtotal`, que respeta el flag `price_include`
+        de la tax: si en la BD la IGV quedó como "precio incluye impuesto"
+        (`price_include_override='tax_included'`, o por el default de la compañía),
+        Odoo descompone la base dividiendo por 1+tasa (100 -> 84.75) y el comprobante
+        emitido NO coincide con el preview (que mostraba 118). Para que preview==emitido
+        sin depender de la config ambiente, fijamos tax-excluded en la IGV/IVAP de venta
+        de forma idempotente (solo escribe si hace falta; se autocorrige en el 1er emit)."""
+        if (
+            tax
+            and tax.l10n_pe_edi_tax_code in ("1000", "1016")
+            and tax.price_include_override != "tax_excluded"
+        ):
+            tax.sudo().write({"price_include_override": "tax_excluded"})
+        return tax
 
     def _l10n_pe_ne_ensure_icbper_tax(self):
         """Tax ICBPER (cat-05 7152): monto FIJO por unidad (S/ 0.50 vigente desde 2023). Se crea en Odoo

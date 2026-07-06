@@ -181,6 +181,14 @@ class L10nPeNeCotizacion(models.Model):
         if not lines:
             raise UserError(_('La cotización necesita al menos un ítem.'))
         cot = self.create({
+            # Ancla explícita del company_id a self.env.company — la MISMA fuente que usa
+            # la factura (que deriva su compañía del diario de ventas de self.env.company).
+            # Sin esto, la cotización dependía del default del campo y podía quedar bajo una
+            # compañía distinta a la de los comprobantes; entonces la regla multi-compañía
+            # (company_id ∈ company_ids) la ocultaba de la lista aunque el POST devolviera OK
+            # (se creaba, pero "invisible"). Anclándola igual que la factura, la cotización
+            # queda siempre en la misma compañía del emisor y se ve donde se ven las facturas.
+            'company_id': self.env.company.id,
             'partner_id': partner.id,
             'fecha': payload.get('fecha') or fields.Date.context_today(self),
             'validez_dias': int(payload.get('validezDias') or 15),

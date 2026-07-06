@@ -76,6 +76,24 @@ UOM_CODE_BY_XMLID = {
 DEFAULT_UNIT_CODE = "NIU"
 
 
+class AccountMoveLine(models.Model):
+    _inherit = "account.move.line"
+
+    # Overrides SUNAT por línea para el flujo rápido (sin depender de la UoM/producto de Odoo,
+    # evitando el problema de categorías de unidad de medida).
+    l10n_pe_ne_unit_code = fields.Char(
+        string="Unidad SUNAT (cat.03)",
+        copy=False,
+        help="Código de unidad de medida SUNAT de la línea (ej. NIU, KGM, ZZ). "
+        "Si está vacío se deriva de la unidad de medida del producto.",
+    )
+    l10n_pe_ne_cod_producto_sunat = fields.Char(
+        string="Cód. producto SUNAT (cat.25)",
+        copy=False,
+        help="Código de producto SUNAT (UNSPSC, catálogo 25) de la línea, si aplica.",
+    )
+
+
 class AccountMove(models.Model):
     _inherit = "account.move"
 
@@ -502,8 +520,10 @@ class AccountMove(models.Model):
         )
 
     def _l10n_pe_unit_code(self, line):
-        """Código de unidad SUNAT (cat. 03) de la línea: override manual en la UoM, si no el mapeo
-        por XMLID de la unidad estándar de Odoo, si no 'NIU'."""
+        """Código de unidad SUNAT (cat. 03) de la línea: override por línea, luego override manual en
+        la UoM, si no el mapeo por XMLID de la unidad estándar de Odoo, si no 'NIU'."""
+        if line.l10n_pe_ne_unit_code:
+            return line.l10n_pe_ne_unit_code
         uom = line.product_uom_id
         if not uom:
             return DEFAULT_UNIT_CODE
@@ -533,7 +553,7 @@ class AccountMove(models.Model):
             item = {
                 "tipAfeIGV": tip_afe,
                 "codProducto": line.product_id.default_code or "-",
-                "codProductoSUNAT": "-",
+                "codProductoSUNAT": line.l10n_pe_ne_cod_producto_sunat or "-",
                 "codUnidadMedida": self._l10n_pe_unit_code(line),
                 "ctdUnidadItem": fmt(qty),
                 "desItem": line.name or line.product_id.display_name or "",
@@ -1294,6 +1314,10 @@ class AccountMove(models.Model):
             if ln.get("icbper"):
                 # Bolsa plástica: el ICBPER (monto fijo por unidad) se SUMA al IGV de la línea.
                 taxes = tax + self._l10n_pe_ne_ensure_icbper_tax()
+            isc_rate = float(ln.get("isc") or 0)
+            if isc_rate > 0:
+                # ISC (ad-valorem): se agrega a la línea; el IGV se recalcula sobre valor + ISC.
+                taxes = taxes + self._l10n_pe_ne_ensure_isc_tax(isc_rate)
             prod = self._l10n_pe_ne_quick_product(ln, tax)
             d = float(ln.get("descuento") or 0)
             disc = round(100.0 * (1 - (1 - d / 100.0) * (1 - g / 100.0)), 6) if g else d
@@ -1306,6 +1330,10 @@ class AccountMove(models.Model):
             }
             if prod:
                 lvals["product_id"] = prod.id
+            if ln.get("unidad"):
+                lvals["l10n_pe_ne_unit_code"] = ln["unidad"]
+            if ln.get("codSunat"):
+                lvals["l10n_pe_ne_cod_producto_sunat"] = ln["codSunat"]
             lines.append((0, 0, lvals))
         # Otros cargos (que afectan la base imponible): se agregan como una línea gravada adicional, así
         # suben gravada/IGV/total con la maquinaria de líneas ya validada (no se prorratea el desc. global).
@@ -1523,6 +1551,40 @@ class AccountMove(models.Model):
                 "l10n_pe_edi_tax_code": "7152",
                 "company_id": company.id,
                 "description": "ICBPER",
+            }
+        )
+
+    def _l10n_pe_ne_ensure_isc_tax(self, rate):
+        """Tax ISC (Impuesto Selectivo al Consumo, cat-05 2000) — Sistema al Valor (ad-valorem %).
+        Se crea/reusa por tasa. include_base_amount=True y secuencia ANTES del IGV → el IGV se
+        computa sobre (valor venta + ISC), como exige SUNAT (mtoBaseIgvItem = base + ISC)."""
+        Tax = self.env["account.tax"].sudo()
+        company = self.env.company
+        rate = round(float(rate or 0), 4)
+        tax = Tax.search(
+            [
+                ("company_id", "=", company.id),
+                ("type_tax_use", "=", "sale"),
+                ("l10n_pe_edi_tax_code", "=", "2000"),
+                ("amount_type", "=", "percent"),
+                ("amount", "=", rate),
+            ],
+            limit=1,
+        )
+        if tax:
+            return tax
+        igv = self._l10n_pe_ne_tax_by_code("1000")
+        return Tax.create(
+            {
+                "name": "ISC %g%%" % rate,
+                "amount_type": "percent",
+                "amount": rate,
+                "type_tax_use": "sale",
+                "l10n_pe_edi_tax_code": "2000",
+                "include_base_amount": True,   # el IGV se calcula sobre valor + ISC
+                "sequence": (igv.sequence - 1) if igv else 1,   # ISC se aplica antes que el IGV
+                "company_id": company.id,
+                "description": "ISC",
             }
         )
 

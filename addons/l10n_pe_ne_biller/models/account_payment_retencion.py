@@ -388,12 +388,20 @@ class AccountPayment(models.Model):
         jtype = 'purchase' if move_type == 'in_invoice' else 'sale'
         journal = self.env['account.journal'].search(
             [('type', '=', jtype), ('company_id', '=', self.env.company.id)], limit=1)
+        # Retención (20) y Percepción (40) son SIEMPRE en soles. Si la move se crea sin
+        # currency_id explícita, hereda la del diario/compañía; en entornos donde el diario
+        # de compras quedó en USD, el documento relacionado sale en dólares y el XML pone
+        # `SUNATNetTotalPaid/currencyID="USD"` -> SUNAT rechaza (errorCode 2748). Forzamos PEN
+        # para que el otro-CPE sea consistente sin depender de la config de la compañía.
+        pen = self.env.ref('base.PEN', raise_if_not_found=False) \
+            or self.env['res.currency'].search([('name', '=', 'PEN')], limit=1)
         moves = AM
         for doc in payload.get('documentos') or []:
             vals = {
                 'move_type': move_type,
                 'partner_id': partner.id,
                 'journal_id': journal.id,
+                **({'currency_id': pen.id} if pen else {}),
                 'invoice_date': doc.get('fecha') or fields.Date.context_today(self),
                 'invoice_line_ids': [(0, 0, {
                     'name': doc.get('descripcion') or 'OPERACION',

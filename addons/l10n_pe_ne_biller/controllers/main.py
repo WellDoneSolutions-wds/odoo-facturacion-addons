@@ -661,6 +661,21 @@ class L10nPeNeApi(http.Controller):
 
         return self._run(op)
 
+    @http.route("/ne/api/comprobantes/<int:rec_id>/reenviar", **_POST)
+    def reenviar_comprobante(self, rec_id, **kw):
+        """Reenvía a SUNAT un comprobante pendiente (por_enviar) o que quedó en
+        error/rechazado. Reutiliza el mismo move (misma serie-correlativo)."""
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+
+        def op():
+            move = self._move(uid).browse(rec_id)
+            move.action_l10n_pe_send_to_biller()
+            return move.l10n_pe_ne_quick_result()
+
+        return self._run(op)
+
     @http.route("/ne/api/otrocpe/<int:rec_id>/<string:kind>", **_GET)
     def otrocpe_file(self, rec_id, kind, **kw):
         uid = self._identify()

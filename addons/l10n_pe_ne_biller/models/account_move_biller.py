@@ -2721,7 +2721,9 @@ class AccountMove(models.Model):
 
         Paginación opt-in: con `offset` devuelve {items, total} (total vía
         search_count sobre el mismo dominio); sin él, la lista plana de siempre."""
-        domain = [("l10n_pe_biller_state", "!=", "por_enviar")]
+        # Se incluyen los 'por_enviar' (pendientes de envío) para que sean visibles y
+        # reenviables desde la UI; antes se excluían y quedaban sin dónde verse.
+        domain = [("l10n_pe_biller_state", "!=", False)]
         if desde:
             domain.append(("invoice_date", ">=", desde))
         if hasta:

@@ -1377,6 +1377,14 @@ class AccountMove(models.Model):
                 vals["debit_origin_id"] = origin.id
         if payload.get("correlativo"):
             vals["l10n_pe_correlativo"] = str(payload["correlativo"])
+            # Con correlativo MANUAL no aplica la unicidad de la secuencia por diario:
+            # dos emisiones forzadas comparten serie+correlativo fiscal pero tienen
+            # 'name' internos distintos, así que account_move_unique_name_latam no las
+            # detecta. Verificamos el número fiscal (serie_emit+corr_emit) contra los ya
+            # emitidos/anulados de la compañía antes de crear y mandar a SUNAT.
+            self._l10n_pe_ne_check_numero_libre(
+                vals["l10n_pe_serie"], str(payload["correlativo"])
+            )
         move = self.env["account.move"].create(vals)
         self._l10n_pe_ne_quick_flags(move, payload)
         move.action_post()
@@ -1389,6 +1397,28 @@ class AccountMove(models.Model):
                 cot.l10n_pe_ne_vincular_comprobante(move.id)
         move.action_l10n_pe_send_to_biller()
         return move.l10n_pe_ne_quick_result()
+
+    def _l10n_pe_ne_check_numero_libre(self, serie, correlativo):
+        """Impide reutilizar un número fiscal (serie+correlativo) ya emitido/anulado en
+        la compañía. Necesario solo con correlativo manual: la unicidad de la secuencia
+        del diario no cubre este caso (ver quick_emit)."""
+        corr = (correlativo or "").strip().zfill(8)
+        dup = self.env["account.move"].sudo().search(
+            [
+                ("company_id", "=", self.env.company.id),
+                ("l10n_pe_ne_serie_emit", "=", serie),
+                ("l10n_pe_ne_corr_emit", "=", corr),
+                ("l10n_pe_biller_state", "in", ("enviado", "anulado")),
+            ],
+            limit=1,
+        )
+        if dup:
+            raise UserError(
+                _(
+                    "Ya existe un comprobante con ese número para ese cliente "
+                    "(número duplicado)."
+                )
+            )
 
     def _l10n_pe_ne_default_serie(self, tipo, origin=None):
         """Serie por defecto: F001/B001 para factura/boleta; FC01/FD01 (o BC01/BD01 si el afectado es

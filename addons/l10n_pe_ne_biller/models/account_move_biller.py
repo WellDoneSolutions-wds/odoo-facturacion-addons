@@ -1297,7 +1297,9 @@ class AccountMove(models.Model):
             "/"
         )
         _logger.info("URL: %s", base)
-        timeout = int(icp.get_param("l10n_pe_ne_biller.timeout", "360"))
+        # >240 es inalcanzable: limit_time_real=240 mata el worker de Odoo
+        # antes (SIGKILL con rollback), con el POST quizá ya aceptado en SUNAT.
+        timeout = int(icp.get_param("l10n_pe_ne_biller.timeout", "240"))
         _logger.info("Timeout: %s", timeout)
         use_async = icp.get_param(
             "l10n_pe_ne_biller.async_enabled", ""
@@ -1321,7 +1323,9 @@ class AccountMove(models.Model):
                     base + "/generator/" + endpoint,
                     json=payload,
                     headers=headers,
-                    timeout=timeout,
+                    # connect corto aparte: un endpoint inalcanzable (SG, DNS)
+                    # falla en 5s en vez de colgar el worker hasta el read.
+                    timeout=(5, timeout),
                 )
                 _logger.info(
                     "RESP %s -> POST %s/generator/%s -> HTTP %s | %s",
@@ -2881,7 +2885,9 @@ class AccountMove(models.Model):
         base = icp.get_param("l10n_pe_ne_biller.url", "http://localhost:8090").rstrip(
             "/"
         )
-        timeout = int(icp.get_param("l10n_pe_ne_biller.timeout", "60"))
+        # Clave propia: reusar l10n_pe_ne_biller.timeout hacía que subir el
+        # timeout de emisión (240s) arrastrara también la espera de un PDF.
+        timeout = int(icp.get_param("l10n_pe_ne_biller.pdf_timeout", "60"))
         tipo, serie, correlativo = self._l10n_pe_baja_identidad()
         payload = {
             "ruc": self.company_id.vat or "",
@@ -2891,7 +2897,10 @@ class AccountMove(models.Model):
         headers = {"X-Api-Key": self.company_id.sudo().l10n_pe_ne_api_key or ""}
         try:
             resp = requests.post(
-                base + "/report/pdf", json=payload, headers=headers, timeout=timeout
+                base + "/report/pdf",
+                json=payload,
+                headers=headers,
+                timeout=(5, timeout),
             )
         except requests.RequestException as exc:
             raise UserError(_("Error de conexión con el facturador: %s") % exc)
@@ -3262,7 +3271,10 @@ class AccountMove(models.Model):
         base = icp.get_param("l10n_pe_ne_biller.url", "http://localhost:8090").rstrip(
             "/"
         )
-        timeout = int(icp.get_param("l10n_pe_ne_biller.baja_timeout", "120"))
+        # En producción el biller está tras API Gateway (tope duro 30s): esperar
+        # 120s solo alargaba el error. 40 = margen sobre el 504 del gateway; el
+        # cron/reintento resuelve las bajas que SUNAT termina aceptando después.
+        timeout = int(icp.get_param("l10n_pe_ne_biller.baja_timeout", "40"))
         for move in self:
             if move.l10n_pe_biller_state == "anulado":
                 continue  # ya dado de baja: no reenviar el mismo RA (SUNAT lo rechaza por duplicado)
@@ -3289,7 +3301,10 @@ class AccountMove(models.Model):
             headers = {"X-Api-Key": move.company_id.sudo().l10n_pe_ne_api_key or ""}
             try:
                 resp = requests.post(
-                    base + endpoint, json=payload, headers=headers, timeout=timeout
+                    base + endpoint,
+                    json=payload,
+                    headers=headers,
+                    timeout=(5, timeout),
                 )
             except requests.RequestException as exc:
                 # Nunca llegó a SUNAT: libera el resumen para reintentar con uno fresco.

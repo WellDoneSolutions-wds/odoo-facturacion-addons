@@ -2556,6 +2556,11 @@ class AccountMove(models.Model):
             "total": self.amount_total or 0.0,
             "moneda": self.currency_id.name or "PEN",
             "estado": self.state,
+            # Descripción = nombre de la línea (para prefill al editar; la línea de
+            # detalle simple lleva la descripción original o "COMPRA").
+            "descripcion": (self.invoice_line_ids[:1].name or "")
+            if self.invoice_line_ids
+            else "",
         }
 
     @api.model
@@ -2646,6 +2651,62 @@ class AccountMove(models.Model):
         move = self.create(vals)
         move.action_post()
         return move._l10n_pe_ne_compra_dict()
+
+    @api.model
+    def l10n_pe_ne_update_compra(self, rec_id, compra):
+        """Actualiza una compra existente: la pasa a borrador, reescribe cabecera y
+        la línea única, y la vuelve a postear. Mismas validaciones que el alta."""
+        m = self.browse(int(rec_id or 0)).exists()
+        if not m or m.move_type != "in_invoice":
+            raise UserError(_("Compra no encontrada."))
+        compra = compra or {}
+        prov = self._l10n_pe_ne_quick_partner(compra.get("proveedor") or {})
+        if not prov.supplier_rank:
+            prov.supplier_rank = 1
+        serie = (compra.get("serie") or "").strip()
+        numero = (compra.get("numero") or "").strip()
+        doc_num = ("%s-%s" % (serie, numero)) if serie and numero else (numero or serie)
+        if not doc_num:
+            raise UserError(_("Indica el número del documento del proveedor."))
+        total = float(compra.get("total") or 0)
+        if total <= 0:
+            raise UserError(_("Indica el monto total de la compra."))
+        if m.state == "posted":
+            m.button_draft()
+        vals = {
+            "partner_id": prov.id,
+            "invoice_date": compra.get("fecha") or m.invoice_date,
+            "ref": doc_num,
+            "l10n_latam_document_number": doc_num,
+            "invoice_line_ids": [
+                (5, 0, 0),
+                (
+                    0,
+                    0,
+                    {
+                        "name": compra.get("descripcion") or "COMPRA",
+                        "quantity": 1,
+                        "price_unit": total,
+                        "tax_ids": [(6, 0, [])],
+                    },
+                ),
+            ],
+        }
+        moneda = self._l10n_pe_ne_quick_currency(compra.get("moneda"))
+        if moneda:
+            vals["currency_id"] = moneda.id
+        dt = self.env["l10n_latam.document.type"].search(
+            [
+                ("code", "=", compra.get("tipoComprobante") or "01"),
+                ("country_id.code", "=", "PE"),
+            ],
+            limit=1,
+        )
+        if dt:
+            vals["l10n_latam_document_type_id"] = dt.id
+        m.write(vals)
+        m.action_post()
+        return m._l10n_pe_ne_compra_dict()
 
     @api.model
     def l10n_pe_ne_delete_compra(self, rec_id):

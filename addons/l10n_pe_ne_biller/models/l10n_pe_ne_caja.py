@@ -218,9 +218,11 @@ class L10nPeNeCajaSesion(models.Model):
         tipo = datos.get("tipo")
         if tipo not in ("ingreso", "retiro"):
             raise UserError(_("Elige ingreso o retiro."))
+        # Mínimo 3 caracteres, igual que la validación del formulario (antes el
+        # backend aceptaba cualquier motivo no vacío — divergencia con la UI).
         motivo = (datos.get("motivo") or "").strip()
-        if not motivo:
-            raise UserError(_("El movimiento necesita un motivo."))
+        if len(motivo) < 3:
+            raise UserError(_("El motivo debe tener al menos 3 caracteres."))
         monto = float(datos.get("monto") or 0.0)
         if monto <= 0:
             raise UserError(_("El monto debe ser mayor a 0."))

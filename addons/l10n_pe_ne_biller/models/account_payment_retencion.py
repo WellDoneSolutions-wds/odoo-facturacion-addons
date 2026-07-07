@@ -192,7 +192,7 @@ class AccountPayment(models.Model):
             payload = pay._l10n_pe_ret_payload()
             headers = {'X-Api-Key': pay.company_id.sudo().l10n_pe_ne_api_key or ''}
             try:
-                resp = requests.post(base + '/generator/retencion', json=payload, headers=headers, timeout=timeout)
+                resp = requests.post(base + '/generator/retencion', json=payload, headers=headers, timeout=(5, timeout))
             except requests.RequestException as exc:
                 pay.l10n_pe_ret_state = 'error'
                 pay.l10n_pe_ret_message = _("Error de conexión con el facturador: %s") % exc
@@ -314,7 +314,7 @@ class AccountPayment(models.Model):
             payload = pay._l10n_pe_per_payload()
             headers = {'X-Api-Key': pay.company_id.sudo().l10n_pe_ne_api_key or ''}
             try:
-                resp = requests.post(base + '/generator/percepcion', json=payload, headers=headers, timeout=timeout)
+                resp = requests.post(base + '/generator/percepcion', json=payload, headers=headers, timeout=(5, timeout))
             except requests.RequestException as exc:
                 pay.l10n_pe_per_state = 'error'
                 pay.l10n_pe_per_message = _("Error de conexión con el facturador: %s") % exc
@@ -509,12 +509,14 @@ class AccountPayment(models.Model):
             raise UserError(_("El comprobante no tiene XML firmado; emítalo primero a SUNAT."))
         icp = self.env['ir.config_parameter'].sudo()
         base = icp.get_param('l10n_pe_ne_biller.url', 'http://localhost:8090').rstrip('/')
-        timeout = int(icp.get_param('l10n_pe_ne_biller.timeout', '60'))
+        # pdf_timeout separado del timeout de emisión (mismo criterio que en
+        # account_move_biller): subir el de emisión no debe alargar el del PDF.
+        timeout = int(icp.get_param('l10n_pe_ne_biller.pdf_timeout', '60'))
         payload = {'ruc': self.company_id.vat or '', 'tipoDoc': tipo_doc,
                    'xml': (xml_att.raw or b'').decode('utf-8')}
         headers = {'X-Api-Key': self.company_id.sudo().l10n_pe_ne_api_key or ''}
         try:
-            resp = requests.post(base + '/report/pdf', json=payload, headers=headers, timeout=timeout)
+            resp = requests.post(base + '/report/pdf', json=payload, headers=headers, timeout=(5, timeout))
         except requests.RequestException as exc:
             raise UserError(_("Error de conexión con el facturador: %s") % exc)
         if resp.status_code != 200 or not resp.content.startswith(b'%PDF'):

@@ -2847,18 +2847,29 @@ class AccountMove(models.Model):
         }
 
     @api.model
-    def l10n_pe_ne_quick_list(self, query=None, desde=None, hasta=None, estado=None, limit=100, offset=None):
+    def l10n_pe_ne_quick_list(self, query=None, desde=None, hasta=None, estado=None, tipo=None, limit=100, offset=None):
         """Lista de comprobantes emitidos (sin los blobs), para la UI. Filtros
-        opcionales: query (cliente/RUC/correlativo), rango de fechas (desde/hasta)
-        y estado del facturador (por_enviar/en_proceso/enviado/anulado/rechazado/error).
+        opcionales: query (cliente/RUC/correlativo), rango de fechas (desde/hasta),
+        estado del facturador (por_enviar/en_proceso/enviado/anulado/rechazado/error)
+        y tipo de comprobante (01/03/07/08). `estado` y `tipo` aceptan varios valores
+        (lista o CSV "a,b") → filtran con `in` (multiselect en la UI).
 
         Paginación opt-in: con `offset` devuelve {items, total} (total vía
         search_count sobre el mismo dominio); sin él, la lista plana de siempre."""
+        def _as_list(v):
+            if not v:
+                return None
+            vals = [x for x in v.split(",") if x] if isinstance(v, str) else list(v)
+            return vals or None
+        estados = _as_list(estado)
+        tipos = _as_list(tipo)
         # Se incluyen los 'por_enviar' (pendientes de envío) para que sean visibles y
         # reenviables desde la UI; antes se excluían y quedaban sin dónde verse.
         domain = [("l10n_pe_biller_state", "!=", False)]
-        if estado:
-            domain.append(("l10n_pe_biller_state", "=", estado))
+        if estados:
+            domain.append(("l10n_pe_biller_state", "in", estados))
+        if tipos:
+            domain.append(("l10n_pe_ne_tipo_doc", "in", tipos))
         if desde:
             domain.append(("invoice_date", ">=", desde))
         if hasta:

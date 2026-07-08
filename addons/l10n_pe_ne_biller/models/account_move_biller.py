@@ -2847,11 +2847,13 @@ class AccountMove(models.Model):
         }
 
     @api.model
-    def l10n_pe_ne_quick_list(self, query=None, desde=None, hasta=None, estado=None, tipo=None, limit=100, offset=None):
+    def l10n_pe_ne_quick_list(self, query=None, desde=None, hasta=None, estado=None, tipo=None,
+                              forma_pago=None, monto_min=None, monto_max=None, limit=100, offset=None):
         """Lista de comprobantes emitidos (sin los blobs), para la UI. Filtros
         opcionales: query (cliente/RUC/correlativo), rango de fechas (desde/hasta),
-        estado del facturador (por_enviar/en_proceso/enviado/anulado/rechazado/error)
-        y tipo de comprobante (01/03/07/08). `estado` y `tipo` aceptan varios valores
+        estado del facturador (por_enviar/en_proceso/enviado/anulado/rechazado/error),
+        tipo de comprobante (01/03/07/08), forma de pago (Contado/Credito) y rango de
+        monto total (monto_min/monto_max). `estado` y `tipo` aceptan varios valores
         (lista o CSV "a,b") → filtran con `in` (multiselect en la UI).
 
         Paginación opt-in: con `offset` devuelve {items, total} (total vía
@@ -2861,8 +2863,15 @@ class AccountMove(models.Model):
                 return None
             vals = [x for x in v.split(",") if x] if isinstance(v, str) else list(v)
             return vals or None
+
+        def _num(v):
+            try:
+                return float(v) if v not in (None, "") else None
+            except (TypeError, ValueError):
+                return None
         estados = _as_list(estado)
         tipos = _as_list(tipo)
+        mmin, mmax = _num(monto_min), _num(monto_max)
         # Se incluyen los 'por_enviar' (pendientes de envío) para que sean visibles y
         # reenviables desde la UI; antes se excluían y quedaban sin dónde verse.
         domain = [("l10n_pe_biller_state", "!=", False)]
@@ -2870,6 +2879,12 @@ class AccountMove(models.Model):
             domain.append(("l10n_pe_biller_state", "in", estados))
         if tipos:
             domain.append(("l10n_pe_ne_tipo_doc", "in", tipos))
+        if forma_pago:
+            domain.append(("l10n_pe_ne_forma_pago", "=", forma_pago))
+        if mmin is not None:
+            domain.append(("amount_total", ">=", mmin))
+        if mmax is not None:
+            domain.append(("amount_total", "<=", mmax))
         if desde:
             domain.append(("invoice_date", ">=", desde))
         if hasta:

@@ -589,6 +589,9 @@ class L10nPeNeApi(http.Controller):
                 hasta=kw.get("hasta") or None,
                 estado=kw.get("estado") or None,
                 tipo=kw.get("tipo") or None,
+                forma_pago=kw.get("formaPago") or None,
+                monto_min=kw.get("montoMin") or None,
+                monto_max=kw.get("montoMax") or None,
                 limit=pg["limit"] if pg else 100,
                 offset=pg["offset"] if pg else None,
             )

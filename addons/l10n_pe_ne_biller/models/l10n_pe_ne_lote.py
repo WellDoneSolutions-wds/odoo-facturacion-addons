@@ -44,7 +44,11 @@ _TIPODOC_CLIENTE = {
 # tipo comprobante humano → código catálogo-01 (solo 01/03 en la masiva v1).
 _TIPO_COMPROBANTE = {"FACTURA": "01", "BOLETA": "03", "01": "01", "03": "03"}
 # l10n_pe_biller_state (que devuelve quick_result como 'estado') → estado de fila del lote.
-_ESTADO_MAP = {"enviado": "emitido", "rechazado": "rechazado", "error": "error"}
+# 'en_proceso' es el estado del modo ASÍNCRONO (SQS): al emitir, el biller encola y responde
+# 'en_proceso'; el resultado real de SUNAT llega minutos después vía cron. Antes no estaba en el
+# mapa y caía al default 'error', mostrando como fallidos comprobantes que en realidad se aceptaban.
+_ESTADO_MAP = {"enviado": "emitido", "rechazado": "rechazado", "error": "error",
+               "en_proceso": "en_proceso"}
 
 
 class L10nPeNeLote(models.Model):
@@ -405,11 +409,23 @@ class L10nPeNeLote(models.Model):
                 "contentB64": base64.b64encode(buf.getvalue()).decode("ascii")}
 
     # ------------------------------------------------------------- serializadores
+    def _l10n_pe_ne_sync_async(self):
+        """Reconcilia las filas 'en_proceso' (encoladas en modo async) con el estado FINAL del
+        move, que el cron de biller (_l10n_pe_cron_poll_async) actualiza minutos después. Sin
+        esto, una fila encolada se quedaba en 'en_proceso' aunque su comprobante ya estuviera
+        aceptado/rechazado. Idempotente: solo escribe cuando el move ya resolvió."""
+        self.ensure_one()
+        for f in self.fila_ids.filtered(lambda x: x.estado == "en_proceso" and x.move_id):
+            nuevo = _ESTADO_MAP.get(f.move_id.l10n_pe_biller_state)
+            if nuevo and nuevo != "en_proceso":
+                f.write({"estado": nuevo,
+                         "mensaje": f.move_id.l10n_pe_biller_message or f.mensaje or ""})
+
     def _l10n_pe_ne_contadores(self):
         self.ensure_one()
-        d = {"pendientes": 0, "emitidos": 0, "rechazados": 0, "errores": 0, "cancelados": 0}
-        key = {"pendiente": "pendientes", "emitido": "emitidos", "rechazado": "rechazados",
-               "error": "errores", "cancelado": "cancelados"}
+        d = {"pendientes": 0, "enProceso": 0, "emitidos": 0, "rechazados": 0, "errores": 0, "cancelados": 0}
+        key = {"pendiente": "pendientes", "en_proceso": "enProceso", "emitido": "emitidos",
+               "rechazado": "rechazados", "error": "errores", "cancelado": "cancelados"}
         for f in self.fila_ids:
             k = key.get(f.estado)
             if k:
@@ -418,6 +434,7 @@ class L10nPeNeLote(models.Model):
 
     def l10n_pe_ne_lote_detalle(self):
         self.ensure_one()
+        self._l10n_pe_ne_sync_async()   # trae el resultado async ya resuelto antes de serializar
         c = self._l10n_pe_ne_contadores()
         rep = json.loads(self.reporte_json or "{}")
         return {
@@ -425,7 +442,7 @@ class L10nPeNeLote(models.Model):
             "fecha": self.create_date.strftime("%Y-%m-%d") if self.create_date else "",
             "estado": self.estado, "totalFilas": self.total_filas,
             "totalComprobantes": self.total_comprobantes,
-            "pendientes": c["pendientes"], "emitidos": c["emitidos"],
+            "pendientes": c["pendientes"], "enProceso": c["enProceso"], "emitidos": c["emitidos"],
             "rechazados": c["rechazados"], "errores": c["errores"], "cancelados": c["cancelados"],
             "filas": [f._l10n_pe_ne_fila_dict() for f in self.fila_ids.sorted("secuencia")],
             "erroresValidacion": rep.get("errores") or [],
@@ -437,12 +454,14 @@ class L10nPeNeLote(models.Model):
     def l10n_pe_ne_list_lotes(self):
         out = []
         for l in self.search([], limit=100):
+            l._l10n_pe_ne_sync_async()   # reconcilia async antes de contar
             c = l._l10n_pe_ne_contadores()
             out.append({
                 "id": l.id, "filename": l.name,
                 "fecha": l.create_date.strftime("%Y-%m-%d") if l.create_date else "",
                 "estado": l.estado, "totalComprobantes": l.total_comprobantes,
-                "emitidos": c["emitidos"], "rechazados": c["rechazados"], "errores": c["errores"]})
+                "emitidos": c["emitidos"], "enProceso": c["enProceso"],
+                "rechazados": c["rechazados"], "errores": c["errores"]})
         return out
 
     # ------------------------------------------------------------- procesamiento
@@ -562,6 +581,7 @@ class L10nPeNeLoteFila(models.Model):
     estado = fields.Selection([
         ("error_validacion", "Error de validación"),
         ("pendiente", "Pendiente"),
+        ("en_proceso", "En proceso"),  # modo async: encolado a SUNAT, resultado por cron
         ("emitido", "Emitido"),
         ("rechazado", "Rechazado"),   # SUNAT/biller rechazó (move existe)
         ("error", "Error"),           # error de conexión/infra (move puede existir)

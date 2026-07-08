@@ -5,7 +5,7 @@ import json
 from datetime import timedelta
 
 import xlsxwriter
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 
 from odoo import fields
 from odoo.exceptions import AccessError, UserError
@@ -195,6 +195,39 @@ class TestMasivo(TransactionCase):
             lote.l10n_pe_ne_procesar(max_filas=1)   # tras terminar: no-op idempotente
         self.assertEqual(mp.call_count, 1)
         self.assertEqual(lote.fila_ids.estado, "emitido")
+
+    def test_async_en_proceso_y_reconciliacion(self):
+        """Modo async (SQS): al emitir, el biller encola y el move queda 'en_proceso'. La fila NO
+        debe caer a 'error' (bug previo: _ESTADO_MAP no conocía 'en_proceso') sino quedar
+        'en_proceso'; y cuando el cron resuelve el move, releer el detalle reconcilia la fila con
+        el estado final del comprobante."""
+        icp = self.env["ir.config_parameter"].sudo()
+        icp.set_param("l10n_pe_ne_biller.async_enabled", "1")
+        icp.set_param("l10n_pe_ne_biller.sqs_queue_url", "https://sqs.fake/q")
+        icp.set_param("l10n_pe_ne_biller.results_table", "")   # sin DynamoDB (skip delete_item)
+        lote = self._crear([list(self._BOLETA)])
+        with patch("odoo.addons.l10n_pe_ne_biller.models.account_move_biller.boto3") as mb:
+            mb.client.return_value = MagicMock()   # sqs.send_message = no-op
+            lote.l10n_pe_ne_procesar(max_filas=1)
+        fila = lote.fila_ids
+        # 1) encolado → fila 'en_proceso' (NO 'error'); el move quedó 'en_proceso'
+        self.assertEqual(fila.estado, "en_proceso")
+        self.assertTrue(fila.move_id)
+        self.assertEqual(fila.move_id.l10n_pe_biller_state, "en_proceso")
+        det = lote.l10n_pe_ne_lote_detalle()
+        self.assertEqual(det["enProceso"], 1)
+        self.assertEqual(det["errores"], 0)
+        self.assertEqual(det["emitidos"], 0)
+        # 2) el cron resuelve el move → releer el detalle reconcilia la fila a 'emitido'
+        fila.move_id.write({
+            "l10n_pe_biller_state": "enviado",
+            "l10n_pe_biller_message": "Aceptado por SUNAT — CDR ResponseCode 0",
+        })
+        det = lote.l10n_pe_ne_lote_detalle()
+        self.assertEqual(fila.estado, "emitido")
+        self.assertEqual(det["enProceso"], 0)
+        self.assertEqual(det["emitidos"], 1)
+        self.assertIn("Aceptado", fila.mensaje)
 
     def test_procesar_chunk_multiple(self):
         """QW10 Task 3 review (cobertura): con max_filas=3 (<= masivo_max_chunk=5) el chunk

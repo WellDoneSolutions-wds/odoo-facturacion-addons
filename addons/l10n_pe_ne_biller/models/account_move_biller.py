@@ -2848,7 +2848,8 @@ class AccountMove(models.Model):
 
     @api.model
     def l10n_pe_ne_quick_list(self, query=None, desde=None, hasta=None, estado=None, tipo=None,
-                              forma_pago=None, monto_min=None, monto_max=None, limit=100, offset=None):
+                              forma_pago=None, monto_min=None, monto_max=None, serie=None,
+                              moneda=None, limit=100, offset=None):
         """Lista de comprobantes emitidos (sin los blobs), para la UI. Filtros
         opcionales: query (cliente/RUC/correlativo), rango de fechas (desde/hasta),
         estado del facturador (por_enviar/en_proceso/enviado/anulado/rechazado/error),
@@ -2871,6 +2872,7 @@ class AccountMove(models.Model):
                 return None
         estados = _as_list(estado)
         tipos = _as_list(tipo)
+        series = _as_list(serie)
         mmin, mmax = _num(monto_min), _num(monto_max)
         # Se incluyen los 'por_enviar' (pendientes de envío) para que sean visibles y
         # reenviables desde la UI; antes se excluían y quedaban sin dónde verse.
@@ -2879,6 +2881,10 @@ class AccountMove(models.Model):
             domain.append(("l10n_pe_biller_state", "in", estados))
         if tipos:
             domain.append(("l10n_pe_ne_tipo_doc", "in", tipos))
+        if series:
+            domain.append(("l10n_pe_ne_serie_emit", "in", series))
+        if moneda:
+            domain.append(("currency_id.name", "=", moneda))
         if forma_pago:
             domain.append(("l10n_pe_ne_forma_pago", "=", forma_pago))
         if mmin is not None:

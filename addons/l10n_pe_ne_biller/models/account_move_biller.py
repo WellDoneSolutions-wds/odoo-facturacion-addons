@@ -2847,15 +2847,18 @@ class AccountMove(models.Model):
         }
 
     @api.model
-    def l10n_pe_ne_quick_list(self, query=None, desde=None, hasta=None, limit=100, offset=None):
+    def l10n_pe_ne_quick_list(self, query=None, desde=None, hasta=None, estado=None, limit=100, offset=None):
         """Lista de comprobantes emitidos (sin los blobs), para la UI. Filtros
-        opcionales: query (cliente/RUC/correlativo) y rango de fechas (desde/hasta).
+        opcionales: query (cliente/RUC/correlativo), rango de fechas (desde/hasta)
+        y estado del facturador (por_enviar/en_proceso/enviado/anulado/rechazado/error).
 
         Paginación opt-in: con `offset` devuelve {items, total} (total vía
         search_count sobre el mismo dominio); sin él, la lista plana de siempre."""
         # Se incluyen los 'por_enviar' (pendientes de envío) para que sean visibles y
         # reenviables desde la UI; antes se excluían y quedaban sin dónde verse.
         domain = [("l10n_pe_biller_state", "!=", False)]
+        if estado:
+            domain.append(("l10n_pe_biller_state", "=", estado))
         if desde:
             domain.append(("invoice_date", ">=", desde))
         if hasta:

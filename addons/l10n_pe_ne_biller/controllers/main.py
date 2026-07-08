@@ -587,6 +587,7 @@ class L10nPeNeApi(http.Controller):
                 query=kw.get("q") or None,
                 desde=kw.get("desde") or None,
                 hasta=kw.get("hasta") or None,
+                estado=kw.get("estado") or None,
                 limit=pg["limit"] if pg else 100,
                 offset=pg["offset"] if pg else None,
             )

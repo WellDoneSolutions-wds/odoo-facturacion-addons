@@ -48,7 +48,14 @@ mkdir -p backups
 DBS=$(docker compose exec -T postgres psql -U odoo -d postgres -tAc \
   "SELECT datname FROM pg_database WHERE NOT datistemplate AND datname <> 'postgres'")
 
-ACTUALIZADAS=""
+# ── Pass 1: detección + backup (Postgres arriba) ────────────────────────────
+# Detecta qué addons del repo tiene instalada cada BD y saca el backup
+# pre-deploy. OJO: acá NO se actualiza todavía. El --update tiene que correr
+# con el CÓDIGO NUEVO, así que primero horneamos la imagen (build) y recién
+# después corremos el upgrade en un contenedor fresco de esa imagen. Antes el
+# --update corría por 'exec' en el contenedor VIEJO → upgradeaba con el código
+# previo y los cambios (modelos/tablas/rutas nuevas) no aparecían.
+PENDIENTES=()
 for DB in $DBS; do
   INSTALADOS=$(docker compose exec -T postgres psql -U odoo -d "$DB" -tAc \
     "SELECT string_agg(name, ',') FROM ir_module_module WHERE name IN ('$SQL_IN') AND state IN ('installed','to upgrade')" 2>/dev/null || true)
@@ -58,23 +65,36 @@ for DB in $DBS; do
   fi
   echo "-- $DB: backup pre-deploy"
   docker compose exec -T postgres pg_dump -U odoo -Fc "$DB" > "backups/pre-deploy-$DB.dump"
-  echo "-- $DB: actualizando [$INSTALADOS]"
-  docker compose exec -T -e DB="$DB" -e MODS="$INSTALADOS" odoo sh -c \
-    'odoo -d "$DB" --db_host "$HOST" --db_user "$USER" --db_password "$PASSWORD" --update="$MODS" --stop-after-init --no-http --workers 0 --max-cron-threads 0'
-  ACTUALIZADAS="$ACTUALIZADAS $DB"
+  PENDIENTES+=("$DB|$INSTALADOS")
 done
 
-if [ -z "$ACTUALIZADAS" ]; then
+if [ ${#PENDIENTES[@]} -eq 0 ]; then
   echo "Ninguna BD tiene addons del repo instalados - nada que actualizar (no se reinicia)"
   exit 0
 fi
 
-echo "Reiniciando stack (BDs actualizadas:$ACTUALIZADAS)"
-# build ANTES de bajar el stack: si el Dockerfile cambió (ej. nuevas deps
-# Python como boto3), la imagen se reconstruye con el viejo stack aún arriba
-# (menos downtime); si no cambió, el cache lo hace instantáneo.
+# ── Hornea la imagen con el CÓDIGO NUEVO antes del upgrade ───────────────────
+# Si el Dockerfile cambió (ej. nuevas deps Python como boto3), se reconstruye
+# con el stack aún arriba; si no cambió, el cache lo hace instantáneo.
+echo "Building imagen odoo con el código nuevo"
 docker compose build odoo
-docker compose down
+
+# Detiene SOLO Odoo (Postgres sigue arriba): el --update corre offline —sin un
+# proceso viejo sirviendo contra un esquema a medio migrar— y en un contenedor
+# nuevo de la imagen recién horneada. ESTE es el fix del orden.
+docker compose stop odoo
+
+# ── Pass 2: upgrade con el código nuevo (contenedor fresco de la imagen) ─────
+ACTUALIZADAS=""
+for ENTRY in "${PENDIENTES[@]}"; do
+  DB="${ENTRY%%|*}"; MODS="${ENTRY#*|}"
+  echo "-- $DB: actualizando [$MODS] con el código nuevo"
+  docker compose run --rm -T -e DB="$DB" -e MODS="$MODS" odoo sh -c \
+    'odoo -d "$DB" --db_host "$HOST" --db_user "$USER" --db_password "$PASSWORD" --update="$MODS" --stop-after-init --no-http --workers 0 --max-cron-threads 0'
+  ACTUALIZADAS="$ACTUALIZADAS $DB"
+done
+
+echo "Levantando stack con el código nuevo (BDs actualizadas:$ACTUALIZADAS)"
 docker compose up -d
 
 OK=""

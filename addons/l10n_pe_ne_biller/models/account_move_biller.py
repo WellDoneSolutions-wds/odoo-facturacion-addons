@@ -2886,6 +2886,10 @@ class AccountMove(models.Model):
                 "fechaEmision": m.invoice_date.strftime("%Y-%m-%d")
                 if m.invoice_date
                 else "",
+                # Hora de creación del comprobante (≈ emisión), en tz local (Lima).
+                "hora": fields.Datetime.context_timestamp(m, m.create_date).strftime("%H:%M")
+                if m.create_date
+                else "",
                 "mensaje": m.l10n_pe_biller_message or "",
             }
             for m in moves

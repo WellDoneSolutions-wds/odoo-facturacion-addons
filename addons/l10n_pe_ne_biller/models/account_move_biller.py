@@ -3125,6 +3125,9 @@ class AccountMove(models.Model):
             "ruc": self.company_id.vat or "",
             "tipoDoc": tipo,
             "xml": (self.l10n_pe_biller_xml.raw or b"").decode("utf-8"),
+            # Serie-correlativo AUTORITATIVO desde Odoo (no se depende del xpath /Invoice/ID
+            # de la plantilla, que en algún entorno no resolvía y dejaba el número en blanco).
+            "numComprobante": "%s-%s" % (serie, (correlativo or "").zfill(8)),
         }
         # Logo del emisor (si lo tiene): va en ambos formatos (A4 y ticket).
         logo = self.company_id.logo

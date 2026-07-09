@@ -50,8 +50,50 @@ class TestBillerSerie(TransactionCase):
 
     def test_correlativo_manual_override(self):
         """El correlativo manual tiene prioridad sobre el folio."""
-        move = self._move(l10n_pe_serie='B001', l10n_pe_correlativo='7')
+        move = self._move(l10n_pe_serie='F777', l10n_pe_correlativo='7')
         move.action_post()
         payload = move._l10n_pe_build_invoice_request()
-        self.assertEqual(payload['id']['serie'], 'B001')
+        self.assertEqual(payload['id']['serie'], 'F777')
         self.assertEqual(payload['id']['correlativo'], '00000007')
+
+    def test_serie_boleta_ajusta_letra(self):
+        """Cliente sin RUC (boleta): la serie por defecto del diario (F…) cambia a B…."""
+        dni_type = self.env['l10n_latam.identification.type'].search(
+            [('l10n_pe_vat_code', '=', '1')], limit=1)
+        if not dni_type:
+            self.skipTest('sin tipo de documento DNI en la localización')
+        consumidor = self.env['res.partner'].create({
+            'name': 'CONSUMIDOR FINAL', 'vat': '45678912',
+            'l10n_latam_identification_type_id': dni_type.id})
+        self.journal.l10n_pe_ne_serie = 'F001'
+        move = self._move(partner_id=consumidor.id)
+        self.assertEqual(move._l10n_pe_document_type(), '03')
+        self.assertEqual(move.l10n_pe_serie, 'B001')
+
+    def test_serie_boleta_cliente_ruc_tipo_elegido(self):
+        """Cliente RUC pero tipo Boleta elegido en el comprobante: la serie también pasa a B…."""
+        self.journal.l10n_pe_ne_serie = 'F001'
+        boleta_type = self.env.ref('l10n_pe.document_type02')
+        move = self._move(l10n_latam_document_type_id=boleta_type.id)
+        self.assertEqual(move._l10n_pe_document_type(), '03')
+        self.assertEqual(move.l10n_pe_serie, 'B001')
+
+    def test_serie_familia_equivocada_bloquea_emision(self):
+        """Serie F… en una boleta (o B… en factura) corta la emisión antes de ir a SUNAT."""
+        from odoo.exceptions import UserError
+        dni_type = self.env['l10n_latam.identification.type'].search(
+            [('l10n_pe_vat_code', '=', '1')], limit=1)
+        if not dni_type:
+            self.skipTest('sin tipo de documento DNI en la localización')
+        consumidor = self.env['res.partner'].create({
+            'name': 'CONSUMIDOR FINAL DOS', 'vat': '45678913',
+            'l10n_latam_identification_type_id': dni_type.id})
+        boleta = self._move(partner_id=consumidor.id, l10n_pe_serie='F001',
+                            l10n_pe_correlativo='9')
+        boleta.action_post()
+        with self.assertRaises(UserError):
+            boleta._l10n_pe_target()
+        factura = self._move(l10n_pe_serie='B001', l10n_pe_correlativo='9')
+        factura.action_post()
+        with self.assertRaises(UserError):
+            factura._l10n_pe_target()

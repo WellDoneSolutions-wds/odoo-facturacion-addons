@@ -6,3 +6,7 @@ access_ne_emisor_uom,ne.emisor.uom.uom,uom.model_uom_uom,group_l10n_pe_ne_emisor
 access_ne_emisor_gasto,ne.emisor.gasto,model_l10n_pe_ne_gasto,group_l10n_pe_ne_emisor,1,1,1,1
 access_ne_emisor_cotizacion,ne.emisor.cotizacion,model_l10n_pe_ne_cotizacion,group_l10n_pe_ne_emisor,1,1,1,1
 access_ne_emisor_cotizacion_line,ne.emisor.cotizacion.line,model_l10n_pe_ne_cotizacion_line,group_l10n_pe_ne_emisor,1,1,1,1
+access_ne_emisor_caja_sesion,ne.emisor.caja.sesion,model_l10n_pe_ne_caja_sesion,group_l10n_pe_ne_emisor,1,1,1,0
+access_ne_emisor_caja_movimiento,ne.emisor.caja.movimiento,model_l10n_pe_ne_caja_movimiento,group_l10n_pe_ne_emisor,1,1,1,0
+access_ne_emisor_lote,ne.emisor.lote,model_l10n_pe_ne_lote,group_l10n_pe_ne_emisor,1,1,1,1
+access_ne_emisor_lote_fila,ne.emisor.lote.fila,model_l10n_pe_ne_lote_fila,group_l10n_pe_ne_emisor,1,1,1,1

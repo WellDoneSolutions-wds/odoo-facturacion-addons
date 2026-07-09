@@ -17,6 +17,8 @@ import random
 
 CASES_FILE = os.environ.get('E2E_CASES_FILE', '/tmp/e2e_cases.json')
 RESULTS_FILE = os.environ.get('E2E_RESULTS_FILE', '/tmp/e2e_results.json')
+# QW08: formatos de representación impresa a verificar contra el biller-pdf real (p.ej. 'TICKET').
+PDF_FORMATS = [f.strip().upper() for f in os.environ.get('E2E_PDF_FORMATS', '').split(',') if f.strip()]
 
 env = env  # provisto por odoo shell  # noqa: F821
 company = env.company
@@ -263,6 +265,7 @@ def run_case(case):
     expected = case.get('expected', 'accepted')
     expect_reject = expected.startswith('rejected')
     doc = case['doc']
+    _mv = None   # ref al move para verificar el ticket 80mm (solo factura/boleta; QW08)
     # Negativos de "nota con descuento": inyectar el descuento que el caso espera que sea rechazado.
     if 'DESCUENTO' in case['id'].upper():
         for ln in case['lines']:
@@ -273,7 +276,8 @@ def run_case(case):
                 case['partner'] = 'extranjero'   # exportación exige adquirente no-RUC
             if doc == 'boleta' and case.get('partner', 'dni') == 'ruc':
                 case['partner'] = 'dni'
-            state, msg = _send_move(_build_factura(case))
+            _mv = _build_factura(case)
+            state, msg = _send_move(_mv)
         elif doc in ('nc', 'nd'):
             state, msg = _send_move(_build_nota(case, refund=(doc == 'nc')))
         elif doc in ('ra', 'rc'):
@@ -292,8 +296,17 @@ def run_case(case):
     code = m.group(1) if m else ''
     accepted = (state in ('enviado', 'anulado')) and (code == '0' or 'aceptad' in (msg or '').lower())
     ok = (not accepted) if expect_reject else accepted   # negativo: ok si NO fue aceptado
+    # QW08: ticket 80mm contra el biller-pdf real (solo boleta/factura aceptada). Diferible a staging
+    # con E2E_PDF_FORMATS=TICKET; usa el XML firmado real → valida el pipeline XSL/QR/plantilla completo.
+    ticket_ok = None
+    if 'TICKET' in PDF_FORMATS and accepted and _mv is not None and doc in ('factura', 'boleta'):
+        try:
+            att = _mv._l10n_pe_get_pdf_attachment(formato='TICKET')
+            ticket_ok = bool(att) and (att.raw or b'').startswith(b'%PDF') and att.name.endswith('-ticket.pdf')
+        except Exception as exc:   # noqa: BLE001
+            ticket_ok = 'error: %s' % exc
     return {'id': case['id'], 'doc': doc, 'title': case.get('title', ''),
-            'state': state, 'code': code, 'ok': bool(ok),
+            'state': state, 'code': code, 'ok': bool(ok), 'ticket_ok': ticket_ok,
             'expected': expected, 'msg': (msg or '')[:160]}
 
 

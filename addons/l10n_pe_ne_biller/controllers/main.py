@@ -42,11 +42,13 @@ _PG_RETRY = ("40001", "40P01")
 # Mensaje amigable (ES) para constraints conocidas; el resto cae al texto pg legible.
 _CONSTRAINT_MSGS = {
     "account_move_unique_name_latam": "Ya existe un comprobante con ese número para ese cliente (número duplicado).",
+    "l10n_pe_ne_caja_sesion_unica_abierta": "Ya hay una caja abierta para tu negocio. Ciérrala antes de abrir otra.",
 }
 
 # Tipo de archivo descargable → (content-type, extensión de archivo).
 _FILE_KINDS = {
     "pdf": ("application/pdf", "pdf"),
+    "ticket": ("application/pdf", "pdf"),  # ticket 80mm; extensión .pdf
     "xml": ("application/xml", "xml"),
     "cdr": ("application/zip", "zip"),
 }
@@ -142,6 +144,14 @@ class L10nPeNeApi(http.Controller):
     def _cotizacion(self, uid):
         u = self._user(uid)
         return request.env["l10n_pe_ne.cotizacion"].with_user(uid).with_company(u.company_id)
+
+    def _caja(self, uid):
+        u = self._user(uid)
+        return request.env["l10n_pe_ne.caja.sesion"].with_user(uid).with_company(u.company_id)
+
+    def _lote(self, uid):
+        u = self._user(uid)
+        return request.env["l10n_pe_ne.lote"].with_user(uid).with_company(u.company_id)
 
     def _body(self):
         raw = request.httprequest.get_data() or b""
@@ -244,7 +254,7 @@ class L10nPeNeApi(http.Controller):
             .with_company(u.company_id)
             .browse(int(rec_id))
         )
-        files = getattr(rec, method)() or {}
+        files = getattr(rec, method)(kind=kind) or {}
         b64 = files.get(kind)
         if not b64:
             return self._err(f"El {prefix} {rec_id} no tiene {kind}", status=404)
@@ -577,6 +587,13 @@ class L10nPeNeApi(http.Controller):
                 query=kw.get("q") or None,
                 desde=kw.get("desde") or None,
                 hasta=kw.get("hasta") or None,
+                estado=kw.get("estado") or None,
+                tipo=kw.get("tipo") or None,
+                forma_pago=kw.get("formaPago") or None,
+                monto_min=kw.get("montoMin") or None,
+                monto_max=kw.get("montoMax") or None,
+                serie=kw.get("serie") or None,
+                moneda=kw.get("moneda") or None,
                 limit=pg["limit"] if pg else 100,
                 offset=pg["offset"] if pg else None,
             )
@@ -648,6 +665,21 @@ class L10nPeNeApi(http.Controller):
             return self._move(uid).browse(rec_id).l10n_pe_ne_email_comprobante(
                 to=b.get("to"), cc=b.get("cc")
             )
+
+        return self._run(op)
+
+    @http.route("/ne/api/comprobantes/<int:rec_id>/reenviar", **_POST)
+    def reenviar_comprobante(self, rec_id, **kw):
+        """Reenvía a SUNAT un comprobante pendiente (por_enviar) o que quedó en
+        error/rechazado. Reutiliza el mismo move (misma serie-correlativo)."""
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+
+        def op():
+            move = self._move(uid).browse(rec_id)
+            move.action_l10n_pe_send_to_biller()
+            return move.l10n_pe_ne_quick_result()
 
         return self._run(op)
 
@@ -923,6 +955,15 @@ class L10nPeNeApi(http.Controller):
             return self._unauth()
         return self._run(lambda: self._move(uid).l10n_pe_ne_create_compra(self._body()))
 
+    @http.route("/ne/api/compras/<int:rec_id>", **_PUT)
+    def update_compra(self, rec_id, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(
+            lambda: self._move(uid).l10n_pe_ne_update_compra(int(rec_id), self._body())
+        )
+
     @http.route("/ne/api/compras/<int:rec_id>", **_DEL)
     def delete_compra(self, rec_id, **kw):
         uid = self._identify()
@@ -978,6 +1019,151 @@ class L10nPeNeApi(http.Controller):
         return self._run(
             lambda: self._cotizacion(uid).l10n_pe_ne_delete_cotizacion(int(rec_id))
         )
+
+    # ------------------------------------------------------------------- caja
+    @http.route("/ne/api/caja", **_GET)
+    def caja_actual(self, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        try:
+            return self._json(self._caja(uid).l10n_pe_ne_caja_actual())
+        except Exception as e:  # noqa: BLE001
+            return self._fail(e)
+
+    @http.route("/ne/api/caja/abrir", **_POST)
+    def caja_abrir(self, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(lambda: self._caja(uid).l10n_pe_ne_abrir_caja(self._body()))
+
+    @http.route("/ne/api/caja/movimientos", **_POST)
+    def caja_movimiento(self, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(lambda: self._caja(uid).l10n_pe_ne_caja_movimiento(self._body()))
+
+    @http.route("/ne/api/caja/cerrar", **_POST)
+    def caja_cerrar(self, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(lambda: self._caja(uid).l10n_pe_ne_cerrar_caja(self._body()))
+
+    @http.route("/ne/api/caja/historial", **_GET)
+    def caja_historial(self, periodo=None, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        try:
+            return self._json(self._caja(uid).l10n_pe_ne_list_cajas(periodo=periodo or None))
+        except Exception as e:  # noqa: BLE001
+            return self._fail(e)
+
+    @http.route("/ne/api/caja/<int:rec_id>/arqueo", **_GET)
+    def caja_arqueo(self, rec_id, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        try:
+            rec = self._caja(uid).browse(int(rec_id)).exists()
+            if not rec:
+                return self._err("Sesión de caja no encontrada", 404)
+            # Cross-tenant: leer campos dispara AccessError (ir.rule) -> _fail -> 403.
+            return self._json(rec._l10n_pe_ne_arqueo_dict())
+        except Exception as e:  # noqa: BLE001
+            return self._fail(e)
+
+    # ----------------------------------------------------- Emisión masiva (lotes)
+    @http.route("/ne/api/lotes", **_GET)
+    def list_lotes(self, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        try:
+            return self._json(self._lote(uid).l10n_pe_ne_list_lotes())
+        except Exception as e:  # noqa: BLE001
+            return self._fail(e)
+
+    @http.route("/ne/api/lotes", **_POST)
+    def create_lote(self, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(lambda: self._lote(uid).l10n_pe_ne_crear_lote(self._body()))
+
+    @http.route("/ne/api/lotes/plantilla", **_GET)
+    def lote_plantilla(self, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        try:
+            return self._json(self._lote(uid).l10n_pe_ne_plantilla())
+        except Exception as e:  # noqa: BLE001
+            return self._fail(e)
+
+    @http.route("/ne/api/lotes/<int:rec_id>", **_GET)
+    def lote_detalle(self, rec_id, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        rec = self._lote(uid).browse(int(rec_id))
+        if not rec.exists():
+            return self._err("El lote %s no existe" % rec_id, status=404)
+        try:
+            return self._json(rec.l10n_pe_ne_lote_detalle())
+        except Exception as e:  # noqa: BLE001
+            return self._fail(e)
+
+    @http.route("/ne/api/lotes/<int:rec_id>/procesar", **_POST)
+    def lote_procesar(self, rec_id, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        rec = self._lote(uid).browse(int(rec_id))
+        if not rec.exists():
+            return self._err("El lote %s no existe" % rec_id, status=404)
+        body = self._body()
+        return self._run(lambda: rec.l10n_pe_ne_procesar(max_filas=int(body.get("max") or 1)))
+
+    @http.route("/ne/api/lotes/<int:rec_id>/reintentar", **_POST)
+    def lote_reintentar(self, rec_id, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        rec = self._lote(uid).browse(int(rec_id))
+        if not rec.exists():
+            return self._err("El lote %s no existe" % rec_id, status=404)
+        return self._run(lambda: rec.l10n_pe_ne_reintentar())
+
+    @http.route("/ne/api/lotes/<int:rec_id>/cancelar", **_POST)
+    def lote_cancelar(self, rec_id, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        rec = self._lote(uid).browse(int(rec_id))
+        if not rec.exists():
+            return self._err("El lote %s no existe" % rec_id, status=404)
+        return self._run(lambda: rec.l10n_pe_ne_cancelar())
+
+    @http.route("/ne/api/lotes/<int:rec_id>/resultados", **_GET)
+    def lote_resultados(self, rec_id, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        rec = self._lote(uid).browse(int(rec_id))
+        if not rec.exists():
+            return self._err("El lote %s no existe" % rec_id, status=404)
+        try:
+            return self._json(rec.l10n_pe_ne_resultados())
+        except Exception as e:  # noqa: BLE001
+            return self._fail(e)
+
+    
+
+    
 
     @http.route("/ne/api/cotizaciones/<int:rec_id>/detalle", **_GET)
     def cotizacion_detalle(self, rec_id, **kw):

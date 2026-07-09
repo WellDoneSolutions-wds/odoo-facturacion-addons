@@ -457,8 +457,9 @@ class AccountPayment(models.Model):
             'cliente': self.partner_id.name or '',
         }
 
-    def l10n_pe_ne_get_files(self):
-        """{xml, cdr, pdf} base64 del otro-CPE (retención 20 / percepción 40), para que el BFF los sirva."""
+    def l10n_pe_ne_get_files(self, kind=None):
+        """{xml, cdr, pdf} base64 del otro-CPE (retención 20 / percepción 40), para que el BFF los sirva.
+        `kind` se ignora: el otro-CPE nunca tiene ticket 80mm (el controller responde 404 para 'ticket')."""
         self.ensure_one()
 
         def b64(att):

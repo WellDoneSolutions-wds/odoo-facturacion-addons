@@ -443,6 +443,9 @@ class AccountMove(models.Model):
     l10n_pe_biller_pdf = fields.Many2one(
         "ir.attachment", string="PDF (representación impresa)", copy=False
     )
+    l10n_pe_biller_pdf_ticket = fields.Many2one(
+        "ir.attachment", string="PDF ticket 80mm (representación impresa)", copy=False
+    )
     l10n_pe_biller_message = fields.Text(string="Mensaje Facturador", copy=False)
 
     # ----------------------------------------------------------------- helpers
@@ -1445,6 +1448,14 @@ class AccountMove(models.Model):
                 vals["debit_origin_id"] = origin.id
         if payload.get("correlativo"):
             vals["l10n_pe_correlativo"] = str(payload["correlativo"])
+            # Con correlativo MANUAL no aplica la unicidad de la secuencia por diario:
+            # dos emisiones forzadas comparten serie+correlativo fiscal pero tienen
+            # 'name' internos distintos, así que account_move_unique_name_latam no las
+            # detecta. Verificamos el número fiscal (serie_emit+corr_emit) contra los ya
+            # emitidos/anulados de la compañía antes de crear y mandar a SUNAT.
+            self._l10n_pe_ne_check_numero_libre(
+                vals["l10n_pe_serie"], str(payload["correlativo"])
+            )
         move = self.env["account.move"].create(vals)
         self._l10n_pe_ne_quick_flags(move, payload)
         move.action_post()
@@ -1457,6 +1468,28 @@ class AccountMove(models.Model):
                 cot.l10n_pe_ne_vincular_comprobante(move.id)
         move.action_l10n_pe_send_to_biller()
         return move.l10n_pe_ne_quick_result()
+
+    def _l10n_pe_ne_check_numero_libre(self, serie, correlativo):
+        """Impide reutilizar un número fiscal (serie+correlativo) ya emitido/anulado en
+        la compañía. Necesario solo con correlativo manual: la unicidad de la secuencia
+        del diario no cubre este caso (ver quick_emit)."""
+        corr = (correlativo or "").strip().zfill(8)
+        dup = self.env["account.move"].sudo().search(
+            [
+                ("company_id", "=", self.env.company.id),
+                ("l10n_pe_ne_serie_emit", "=", serie),
+                ("l10n_pe_ne_corr_emit", "=", corr),
+                ("l10n_pe_biller_state", "in", ("enviado", "anulado")),
+            ],
+            limit=1,
+        )
+        if dup:
+            raise UserError(
+                _(
+                    "Ya existe un comprobante con ese número para ese cliente "
+                    "(número duplicado)."
+                )
+            )
 
     def _l10n_pe_ne_default_serie(self, tipo, origin=None):
         """Serie por defecto: F001/B001 para factura/boleta; FC01/FD01 (o BC01/BD01 si el afectado es
@@ -1552,8 +1585,14 @@ class AccountMove(models.Model):
             "mensaje": msg,
         }
 
-    def l10n_pe_ne_get_baja_files(self):
-        """{cdr} base64 de la anulación (RA/RC), para que el BFF lo sirva."""
+    def l10n_pe_ne_get_baja_files(self, kind=None):
+        """{cdr} base64 de la anulación (RA/RC), para que el BFF lo sirva.
+
+        Acepta e ignora ``kind`` (una baja no tiene ticket): la ruta
+        ``/ne/api/anulacion/<id>/cdr`` invoca este método vía
+        ``_serve_file`` con ``kind='cdr'`` — simétrico con
+        ``l10n_pe_ne_get_files``.
+        """
         self.ensure_one()
         out = {}
         att = self.l10n_pe_ne_baja_cdr
@@ -2588,6 +2627,11 @@ class AccountMove(models.Model):
             "total": self.amount_total or 0.0,
             "moneda": self.currency_id.name or "PEN",
             "estado": self.state,
+            # Descripción = nombre de la línea (para prefill al editar; la línea de
+            # detalle simple lleva la descripción original o "COMPRA").
+            "descripcion": (self.invoice_line_ids[:1].name or "")
+            if self.invoice_line_ids
+            else "",
         }
 
     @api.model
@@ -2680,6 +2724,62 @@ class AccountMove(models.Model):
         return move._l10n_pe_ne_compra_dict()
 
     @api.model
+    def l10n_pe_ne_update_compra(self, rec_id, compra):
+        """Actualiza una compra existente: la pasa a borrador, reescribe cabecera y
+        la línea única, y la vuelve a postear. Mismas validaciones que el alta."""
+        m = self.browse(int(rec_id or 0)).exists()
+        if not m or m.move_type != "in_invoice":
+            raise UserError(_("Compra no encontrada."))
+        compra = compra or {}
+        prov = self._l10n_pe_ne_quick_partner(compra.get("proveedor") or {})
+        if not prov.supplier_rank:
+            prov.supplier_rank = 1
+        serie = (compra.get("serie") or "").strip()
+        numero = (compra.get("numero") or "").strip()
+        doc_num = ("%s-%s" % (serie, numero)) if serie and numero else (numero or serie)
+        if not doc_num:
+            raise UserError(_("Indica el número del documento del proveedor."))
+        total = float(compra.get("total") or 0)
+        if total <= 0:
+            raise UserError(_("Indica el monto total de la compra."))
+        if m.state == "posted":
+            m.button_draft()
+        vals = {
+            "partner_id": prov.id,
+            "invoice_date": compra.get("fecha") or m.invoice_date,
+            "ref": doc_num,
+            "l10n_latam_document_number": doc_num,
+            "invoice_line_ids": [
+                (5, 0, 0),
+                (
+                    0,
+                    0,
+                    {
+                        "name": compra.get("descripcion") or "COMPRA",
+                        "quantity": 1,
+                        "price_unit": total,
+                        "tax_ids": [(6, 0, [])],
+                    },
+                ),
+            ],
+        }
+        moneda = self._l10n_pe_ne_quick_currency(compra.get("moneda"))
+        if moneda:
+            vals["currency_id"] = moneda.id
+        dt = self.env["l10n_latam.document.type"].search(
+            [
+                ("code", "=", compra.get("tipoComprobante") or "01"),
+                ("country_id.code", "=", "PE"),
+            ],
+            limit=1,
+        )
+        if dt:
+            vals["l10n_latam_document_type_id"] = dt.id
+        m.write(vals)
+        m.action_post()
+        return m._l10n_pe_ne_compra_dict()
+
+    @api.model
     def l10n_pe_ne_delete_compra(self, rec_id):
         """Elimina la compra; si está posteada, la pasa a borrador y elimina; si no
         se puede, la anula (cancel)."""
@@ -2747,13 +2847,50 @@ class AccountMove(models.Model):
         }
 
     @api.model
-    def l10n_pe_ne_quick_list(self, query=None, desde=None, hasta=None, limit=100, offset=None):
+    def l10n_pe_ne_quick_list(self, query=None, desde=None, hasta=None, estado=None, tipo=None,
+                              forma_pago=None, monto_min=None, monto_max=None, serie=None,
+                              moneda=None, limit=100, offset=None):
         """Lista de comprobantes emitidos (sin los blobs), para la UI. Filtros
-        opcionales: query (cliente/RUC/correlativo) y rango de fechas (desde/hasta).
+        opcionales: query (cliente/RUC/correlativo), rango de fechas (desde/hasta),
+        estado del facturador (por_enviar/en_proceso/enviado/anulado/rechazado/error),
+        tipo de comprobante (01/03/07/08), forma de pago (Contado/Credito) y rango de
+        monto total (monto_min/monto_max). `estado` y `tipo` aceptan varios valores
+        (lista o CSV "a,b") → filtran con `in` (multiselect en la UI).
 
         Paginación opt-in: con `offset` devuelve {items, total} (total vía
         search_count sobre el mismo dominio); sin él, la lista plana de siempre."""
-        domain = [("l10n_pe_biller_state", "!=", "por_enviar")]
+        def _as_list(v):
+            if not v:
+                return None
+            vals = [x for x in v.split(",") if x] if isinstance(v, str) else list(v)
+            return vals or None
+
+        def _num(v):
+            try:
+                return float(v) if v not in (None, "") else None
+            except (TypeError, ValueError):
+                return None
+        estados = _as_list(estado)
+        tipos = _as_list(tipo)
+        series = _as_list(serie)
+        mmin, mmax = _num(monto_min), _num(monto_max)
+        # Se incluyen los 'por_enviar' (pendientes de envío) para que sean visibles y
+        # reenviables desde la UI; antes se excluían y quedaban sin dónde verse.
+        domain = [("l10n_pe_biller_state", "!=", False)]
+        if estados:
+            domain.append(("l10n_pe_biller_state", "in", estados))
+        if tipos:
+            domain.append(("l10n_pe_ne_tipo_doc", "in", tipos))
+        if series:
+            domain.append(("l10n_pe_ne_serie_emit", "in", series))
+        if moneda:
+            domain.append(("currency_id.name", "=", moneda))
+        if forma_pago:
+            domain.append(("l10n_pe_ne_forma_pago", "=", forma_pago))
+        if mmin is not None:
+            domain.append(("amount_total", ">=", mmin))
+        if mmax is not None:
+            domain.append(("amount_total", "<=", mmax))
         if desde:
             domain.append(("invoice_date", ">=", desde))
         if hasta:
@@ -2780,6 +2917,10 @@ class AccountMove(models.Model):
                 "cliente": m.partner_id.name or "",
                 "fechaEmision": m.invoice_date.strftime("%Y-%m-%d")
                 if m.invoice_date
+                else "",
+                # Hora de creación del comprobante (≈ emisión), en tz local (Lima).
+                "hora": fields.Datetime.context_timestamp(m, m.create_date).strftime("%H:%M")
+                if m.create_date
                 else "",
                 "mensaje": m.l10n_pe_biller_message or "",
             }
@@ -2838,8 +2979,10 @@ class AccountMove(models.Model):
             },
         }
 
-    def l10n_pe_ne_get_files(self):
-        """Devuelve {xml, cdr, pdf} en base64 del comprobante, para que el BFF los sirva (sin /web/content)."""
+    def l10n_pe_ne_get_files(self, kind=None):
+        """Devuelve {xml, cdr, pdf[, ticket]} en base64 del comprobante, para que el BFF los sirva
+        (sin /web/content). `ticket` (80mm) solo se incluye cuando kind == 'ticket' — así una descarga
+        normal no dispara el render del ticket."""
         self.ensure_one()
 
         def b64(att):
@@ -2859,6 +3002,13 @@ class AccountMove(models.Model):
                 out["pdf"] = b64(pdf_att)
         except Exception:
             pass
+        if kind == "ticket":
+            try:
+                t = self._l10n_pe_get_pdf_attachment(formato="TICKET") if self.l10n_pe_biller_xml else False
+                if t:
+                    out["ticket"] = b64(t)
+            except Exception:
+                pass
         return out
 
     # ------------------------------------------------- descargas / PDF (SFS 2.4)
@@ -2871,12 +3021,18 @@ class AccountMove(models.Model):
             "target": "self",
         }
 
-    def _l10n_pe_get_pdf_attachment(self):
+    def _l10n_pe_get_pdf_attachment(self, formato="A4"):
         """Devuelve (o genera y cachea) el PDF de la representación impresa pidiéndolo al micro
-        (POST /report/pdf con el XML firmado). El micro lo renderiza con las plantillas del SFS 2.4."""
+        (POST /report/pdf con el XML firmado). El micro lo renderiza con las plantillas del SFS 2.4.
+        formato: 'A4' (SFS 2.4) o 'TICKET' (80mm, solo 01/03; otros tipos caen al A4)."""
         self.ensure_one()
-        if self.l10n_pe_biller_pdf:
-            return self.l10n_pe_biller_pdf
+        tipo, serie, correlativo = self._l10n_pe_baja_identidad()
+        es_ticket = formato == "TICKET" and tipo in ("01", "03")
+        if formato == "TICKET" and not es_ticket:
+            return self._l10n_pe_get_pdf_attachment()  # fallback A4 (NC/ND/retención…)
+        cache_field = "l10n_pe_biller_pdf_ticket" if es_ticket else "l10n_pe_biller_pdf"
+        if self[cache_field]:
+            return self[cache_field]
         if not self.l10n_pe_biller_xml:
             raise UserError(
                 _("El comprobante no tiene XML firmado; envíelo primero a SUNAT.")
@@ -2888,12 +3044,13 @@ class AccountMove(models.Model):
         # Clave propia: reusar l10n_pe_ne_biller.timeout hacía que subir el
         # timeout de emisión (240s) arrastrara también la espera de un PDF.
         timeout = int(icp.get_param("l10n_pe_ne_biller.pdf_timeout", "60"))
-        tipo, serie, correlativo = self._l10n_pe_baja_identidad()
         payload = {
             "ruc": self.company_id.vat or "",
             "tipoDoc": tipo,
             "xml": (self.l10n_pe_biller_xml.raw or b"").decode("utf-8"),
         }
+        if es_ticket:
+            payload["formato"] = "TICKET"
         headers = {"X-Api-Key": self.company_id.sudo().l10n_pe_ne_api_key or ""}
         try:
             resp = requests.post(
@@ -2911,15 +3068,20 @@ class AccountMove(models.Model):
             )
         att = self.env["ir.attachment"].create(
             {
-                "name": "%s-%s-%s.pdf"
-                % (self.company_id.vat or "", serie, correlativo.zfill(8)),
+                "name": "%s-%s-%s%s.pdf"
+                % (
+                    self.company_id.vat or "",
+                    serie,
+                    correlativo.zfill(8),
+                    "-ticket" if es_ticket else "",
+                ),
                 "res_model": "account.move",
                 "res_id": self.id,
                 "mimetype": "application/pdf",
                 "raw": resp.content,
             }
         )
-        self.l10n_pe_biller_pdf = att.id
+        self[cache_field] = att.id
         return att
 
     def _l10n_pe_ne_is_aceptado(self):
@@ -2965,6 +3127,10 @@ class AccountMove(models.Model):
     def action_l10n_pe_download_pdf(self):
         self.ensure_one()
         return self._l10n_pe_download_url(self._l10n_pe_get_pdf_attachment())
+
+    def action_l10n_pe_download_ticket(self):
+        self.ensure_one()
+        return self._l10n_pe_download_url(self._l10n_pe_get_pdf_attachment(formato="TICKET"))
 
     def action_l10n_pe_download_xml(self):
         self.ensure_one()

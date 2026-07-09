@@ -1,1 +1,1 @@
-from . import test_install, test_mapper, test_send, test_documents, test_affectation, test_serie, test_retencion, test_detraccion, test_descuento, test_anticipo, test_baja, test_report_pdf, test_password_reset, test_email
+from . import test_install, test_mapper, test_send, test_documents, test_affectation, test_serie, test_retencion, test_detraccion, test_descuento, test_anticipo, test_baja, test_report_pdf, test_password_reset, test_email, test_caja, test_caja_http, test_masivo

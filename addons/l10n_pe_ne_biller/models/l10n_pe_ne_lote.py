@@ -287,12 +287,16 @@ class L10nPeNeLote(models.Model):
                 local.append((fx, _("Afectación no válida: %s") % afect)); taxcode = "1000"
             if f["bolsa"] not in ("SI", "NO", ""):
                 local.append((fx, _("El valor de 'bolsa' debe ser SI o NO")))
-            linea = {"descripcion": f["producto"], "cantidad": cant, "precioUnitario": pu,
+            # El 'precio' del CSV es CON IGV (precio final de venta). A SUNAT va el valor
+            # unitario SIN IGV: gravado (1000) se divide entre 1.18; el resto ya es base.
+            pu_base = pu / 1.18 if taxcode == "1000" else pu
+            linea = {"descripcion": f["producto"], "cantidad": cant, "precioUnitario": pu_base,
                      "descuento": desc, "taxCode": taxcode, "icbper": f["bolsa"] == "SI"}
             if f["cod"]:
                 linea["productCod"] = f["cod"]
             lineas.append(linea)
-            total_est += cant * pu * (1 - desc / 100.0) * (1.18 if taxcode == "1000" else 1.0)
+            # 'pu' ya incluye IGV, así que el estimado del total no vuelve a sumar el 18%.
+            total_est += cant * pu * (1 - desc / 100.0)
         if tipo == "03" and not cli_num and total_est >= 700:
             advertencias.append({"filaExcel": fn, "venta": venta,
                                  "mensaje": _("Boleta ≥ S/ 700 sin documento de identidad (SUNAT puede rechazarla)")})
@@ -393,19 +397,19 @@ class L10nPeNeLote(models.Model):
         wi = wb.add_worksheet("Instrucciones")
         wi.set_column(0, 0, 105)
         for r, line in enumerate([
-            "FACTORII — Plantilla de emisión masiva (boletas y facturas)",
+            "CHASKIFACT — Plantilla de emisión masiva (boletas y facturas)",
             "",
             "1. Una fila = una línea de venta. Usa la columna 'venta' para agrupar varias líneas en un mismo comprobante (mismo código en filas contiguas).",
             "2. 'tipo': FACTURA (01) o BOLETA (03). La factura exige RUC de cliente válido; la boleta acepta DNI/CE/PASAPORTE o queda a público general si dejas el cliente en blanco.",
             "3. 'serie' vacía = automática (F001 factura, B001 boleta). Puedes abrir una serie nueva (p.ej. B002) y aparecerá luego en Series.",
             "4. 'fecha' vacía = hoy. No puede ser futura; si tiene más de 3 días te avisamos (plazo de envío SUNAT).",
-            "5. 'precio unitario' es SIN IGV. 'afectacion' por línea (GRAVADO suma 18%). 'bolsa' = SI cobra ICBPER por unidad.",
+            "5. 'precio unitario' es CON IGV incluido (precio final de venta). 'afectacion' por línea (GRAVADO ya trae el 18%). 'bolsa' = SI cobra ICBPER por unidad.",
             "6. Límite: 500 filas / 200 comprobantes por archivo, hasta 2 MB.",
             "7. Sube el archivo, revisa el reporte de validación y recién ahí emite. Si hay errores, corrige el Excel y vuelve a subir.",
         ]):
             wi.write(r, 0, line)
         wb.close()
-        return {"filename": "plantilla-ventas-factorii.xlsx",
+        return {"filename": "plantilla-ventas-chaskifact.xlsx",
                 "contentB64": base64.b64encode(buf.getvalue()).decode("ascii")}
 
     # ------------------------------------------------------------- serializadores

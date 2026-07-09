@@ -6,6 +6,7 @@ import re
 import zipfile
 from datetime import timedelta
 
+import pytz
 import requests
 
 try:  # SQS para el modo asíncrono (l10n_pe_ne_biller.async_enabled); si falta
@@ -828,7 +829,11 @@ class AccountMove(models.Model):
             "fecEmision": self.invoice_date.strftime("%Y-%m-%d")
             if self.invoice_date
             else "",
-            "horEmision": fields.Datetime.now().strftime("%H:%M:%S"),
+            # Hora de emisión en hora local de Perú (América/Lima, UTC-5). `fields.Datetime.now()`
+            # es UTC-naive: sin convertir, el comprobante salía +5h (bug de zona horaria).
+            "horEmision": pytz.utc.localize(fields.Datetime.now())
+            .astimezone(pytz.timezone("America/Lima"))
+            .strftime("%H:%M:%S"),
             "fecVencimiento": self.invoice_date_due.strftime("%Y-%m-%d")
             if self.invoice_date_due
             else "",
@@ -1885,7 +1890,39 @@ class AccountMove(models.Model):
             "ubigeo": d.code if d else "",
             "provincia": (d.city_id.name if d and d.city_id else (p.city or "")),
             "departamento": p.state_id.name or "",
+            "hasLogo": bool(company.logo),
         }
+
+    def l10n_pe_ne_get_logo(self):
+        """(bytes, content_type) del logo del emisor para servirlo por HTTP, o (None, None)."""
+        logo = self.env.company.logo
+        if not logo:
+            return None, None
+        raw = base64.b64decode(logo)
+        ct = (
+            "image/png" if raw[:4] == b"\x89PNG"
+            else "image/jpeg" if raw[:2] == b"\xff\xd8"
+            else "application/octet-stream"
+        )
+        return raw, ct
+
+    def _l10n_pe_ne_set_logo(self, company, logo_b64):
+        """Valida y guarda el logo del emisor. Vacío/None → lo quita. Acepta data-URI o base64
+        pelado. Exige PNG/JPEG y ≤ ~1.4 MB (mismo tope que valida biller-pdf al imprimir)."""
+        if not logo_b64:
+            company.logo = False
+            return
+        if isinstance(logo_b64, str) and logo_b64.startswith("data:"):
+            logo_b64 = logo_b64.split(",", 1)[-1]
+        try:
+            raw = base64.b64decode(logo_b64, validate=True)
+        except Exception as exc:  # noqa: BLE001
+            raise UserError(_("El logo no es una imagen válida.")) from exc
+        if len(raw) > 1_400_000:
+            raise UserError(_("El logo es demasiado grande (máx. ~1.4 MB)."))
+        if not (raw[:4] == b"\x89PNG" or raw[:2] == b"\xff\xd8"):
+            raise UserError(_("El logo debe ser PNG o JPEG."))
+        company.logo = base64.b64encode(raw)
 
     @api.model
     def l10n_pe_ne_buscar_distrito(self, q=None, limit=20):
@@ -1941,6 +1978,8 @@ class AccountMove(models.Model):
                         pvals["country_id"] = d.city_id.country_id.id
         if pvals:
             p.write(pvals)
+        if "logo" in vals:
+            self._l10n_pe_ne_set_logo(company, vals.get("logo"))
         return self.l10n_pe_ne_negocio()
 
     # ============================================================ resumen estado
@@ -3098,6 +3137,32 @@ class AccountMove(models.Model):
             "target": "self",
         }
 
+    def _l10n_pe_ne_ticket_adicional(self):
+        """Bloque de pago del ticket 80mm (se manda como `adicionalTxt`): medios de pago del
+        POS, vuelto, cajero y nota. Estos datos NO van al XML SUNAT (son internos del punto de
+        venta), pero sí a la representación impresa. Devuelve HTML simple (el textField usa
+        markup html) o "" si no hay nada que mostrar."""
+        self.ensure_one()
+        partes = []
+        medios = self.l10n_pe_ne_medios_pago or []
+        if medios:
+            det = ", ".join(
+                "%s S/ %.2f" % (m.get("medio") or "", float(m.get("monto") or 0))
+                for m in medios
+            )
+            partes.append("Pago: " + det)
+            pagado = sum(float(m.get("monto") or 0) for m in medios)
+            vuelto = round(pagado - (self.amount_total or 0.0), 2)
+            if vuelto > 0:
+                partes.append("Vuelto: S/ %.2f" % vuelto)
+        if self.invoice_user_id:
+            partes.append("Atendido por: " + (self.invoice_user_id.name or ""))
+        nota = re.sub("<[^>]+>", " ", self.narration or "").strip()
+        if nota:
+            partes.append("Nota: " + nota)
+        # El micro (sanitizarAdicional) escapa el HTML y traduce '\n' -> <br/>; se envía texto plano.
+        return "\n".join(partes)
+
     def _l10n_pe_get_pdf_attachment(self, formato="A4"):
         """Devuelve (o genera y cachea) el PDF de la representación impresa pidiéndolo al micro
         (POST /report/pdf con el XML firmado). El micro lo renderiza con las plantillas del SFS 2.4.
@@ -3108,8 +3173,18 @@ class AccountMove(models.Model):
         if formato == "TICKET" and not es_ticket:
             return self._l10n_pe_get_pdf_attachment()  # fallback A4 (NC/ND/retención…)
         cache_field = "l10n_pe_biller_pdf_ticket" if es_ticket else "l10n_pe_biller_pdf"
-        if self[cache_field]:
-            return self[cache_field]
+        # Cache-busting: el PDF cacheado se etiqueta con la versión del template
+        # (config `pdf_ver`). Si esa versión cambió (mejora del template) o el PDF
+        # viejo no la trae, se descarta y se regenera → nadie ve representaciones
+        # desactualizadas. Para forzar regeneración masiva, subir el parámetro.
+        pdf_ver = "pdfver:" + self.env["ir.config_parameter"].sudo().get_param(
+            "l10n_pe_ne_biller.pdf_ver", "1"
+        )
+        cached = self[cache_field]
+        if cached:
+            if cached.description == pdf_ver:
+                return cached
+            cached.sudo().unlink()  # template cambió → descartar el PDF viejo
         if not self.l10n_pe_biller_xml:
             raise UserError(
                 _("El comprobante no tiene XML firmado; envíelo primero a SUNAT.")
@@ -3125,9 +3200,29 @@ class AccountMove(models.Model):
             "ruc": self.company_id.vat or "",
             "tipoDoc": tipo,
             "xml": (self.l10n_pe_biller_xml.raw or b"").decode("utf-8"),
+            # Serie-correlativo AUTORITATIVO desde Odoo (no se depende del xpath /Invoice/ID
+            # de la plantilla, que en algún entorno no resolvía y dejaba el número en blanco).
+            "numComprobante": "%s-%s" % (serie, (correlativo or "").zfill(8)),
         }
+        # Logo del emisor (si lo tiene): va en ambos formatos (A4 y ticket).
+        logo = self.company_id.logo
+        if logo:
+            payload["logo"] = logo.decode() if isinstance(logo, bytes) else logo
         if es_ticket:
             payload["formato"] = "TICKET"
+            # Bloque de pago (medios/vuelto/cajero/nota) — solo en el ticket 80mm.
+            adic = self._l10n_pe_ne_ticket_adicional()
+            if adic:
+                payload["adicionalTxt"] = adic
+            # Contacto del emisor (no va al XML SUNAT): teléfono y correo de la compañía.
+            contacto = "   ·   ".join(
+                p for p in (
+                    ("Tel: " + self.company_id.phone) if self.company_id.phone else "",
+                    self.company_id.email or "",
+                ) if p
+            )
+            if contacto:
+                payload["contactoEmisor"] = contacto
         headers = {"X-Api-Key": self.company_id.sudo().l10n_pe_ne_api_key or ""}
         try:
             resp = requests.post(
@@ -3156,6 +3251,7 @@ class AccountMove(models.Model):
                 "res_id": self.id,
                 "mimetype": "application/pdf",
                 "raw": resp.content,
+                "description": pdf_ver,   # etiqueta de versión para el cache-busting
             }
         )
         self[cache_field] = att.id

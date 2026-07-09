@@ -6,6 +6,7 @@ import re
 import zipfile
 from datetime import timedelta
 
+import pytz
 import requests
 
 try:  # SQS para el modo asíncrono (l10n_pe_ne_biller.async_enabled); si falta
@@ -770,7 +771,11 @@ class AccountMove(models.Model):
             "fecEmision": self.invoice_date.strftime("%Y-%m-%d")
             if self.invoice_date
             else "",
-            "horEmision": fields.Datetime.now().strftime("%H:%M:%S"),
+            # Hora de emisión en hora local de Perú (América/Lima, UTC-5). `fields.Datetime.now()`
+            # es UTC-naive: sin convertir, el comprobante salía +5h (bug de zona horaria).
+            "horEmision": pytz.utc.localize(fields.Datetime.now())
+            .astimezone(pytz.timezone("America/Lima"))
+            .strftime("%H:%M:%S"),
             "fecVencimiento": self.invoice_date_due.strftime("%Y-%m-%d")
             if self.invoice_date_due
             else "",
@@ -3023,6 +3028,32 @@ class AccountMove(models.Model):
             "target": "self",
         }
 
+    def _l10n_pe_ne_ticket_adicional(self):
+        """Bloque de pago del ticket 80mm (se manda como `adicionalTxt`): medios de pago del
+        POS, vuelto, cajero y nota. Estos datos NO van al XML SUNAT (son internos del punto de
+        venta), pero sí a la representación impresa. Devuelve HTML simple (el textField usa
+        markup html) o "" si no hay nada que mostrar."""
+        self.ensure_one()
+        partes = []
+        medios = self.l10n_pe_ne_medios_pago or []
+        if medios:
+            det = ", ".join(
+                "%s S/ %.2f" % (m.get("medio") or "", float(m.get("monto") or 0))
+                for m in medios
+            )
+            partes.append("Pago: " + det)
+            pagado = sum(float(m.get("monto") or 0) for m in medios)
+            vuelto = round(pagado - (self.amount_total or 0.0), 2)
+            if vuelto > 0:
+                partes.append("Vuelto: S/ %.2f" % vuelto)
+        if self.invoice_user_id:
+            partes.append("Atendido por: " + (self.invoice_user_id.name or ""))
+        nota = re.sub("<[^>]+>", " ", self.narration or "").strip()
+        if nota:
+            partes.append("Nota: " + nota)
+        # El micro (sanitizarAdicional) escapa el HTML y traduce '\n' -> <br/>; se envía texto plano.
+        return "\n".join(partes)
+
     def _l10n_pe_get_pdf_attachment(self, formato="A4"):
         """Devuelve (o genera y cachea) el PDF de la representación impresa pidiéndolo al micro
         (POST /report/pdf con el XML firmado). El micro lo renderiza con las plantillas del SFS 2.4.
@@ -3053,6 +3084,22 @@ class AccountMove(models.Model):
         }
         if es_ticket:
             payload["formato"] = "TICKET"
+            # Logo del emisor (si lo tiene) y bloque de pago (medios/vuelto/cajero/nota).
+            logo = self.company_id.logo
+            if logo:
+                payload["logo"] = logo.decode() if isinstance(logo, bytes) else logo
+            adic = self._l10n_pe_ne_ticket_adicional()
+            if adic:
+                payload["adicionalTxt"] = adic
+            # Contacto del emisor (no va al XML SUNAT): teléfono y correo de la compañía.
+            contacto = "   ·   ".join(
+                p for p in (
+                    ("Tel: " + self.company_id.phone) if self.company_id.phone else "",
+                    self.company_id.email or "",
+                ) if p
+            )
+            if contacto:
+                payload["contactoEmisor"] = contacto
         headers = {"X-Api-Key": self.company_id.sudo().l10n_pe_ne_api_key or ""}
         try:
             resp = requests.post(

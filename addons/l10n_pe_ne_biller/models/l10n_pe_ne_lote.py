@@ -287,12 +287,16 @@ class L10nPeNeLote(models.Model):
                 local.append((fx, _("Afectación no válida: %s") % afect)); taxcode = "1000"
             if f["bolsa"] not in ("SI", "NO", ""):
                 local.append((fx, _("El valor de 'bolsa' debe ser SI o NO")))
-            linea = {"descripcion": f["producto"], "cantidad": cant, "precioUnitario": pu,
+            # El 'precio' del CSV es CON IGV (precio final de venta). A SUNAT va el valor
+            # unitario SIN IGV: gravado (1000) se divide entre 1.18; el resto ya es base.
+            pu_base = pu / 1.18 if taxcode == "1000" else pu
+            linea = {"descripcion": f["producto"], "cantidad": cant, "precioUnitario": pu_base,
                      "descuento": desc, "taxCode": taxcode, "icbper": f["bolsa"] == "SI"}
             if f["cod"]:
                 linea["productCod"] = f["cod"]
             lineas.append(linea)
-            total_est += cant * pu * (1 - desc / 100.0) * (1.18 if taxcode == "1000" else 1.0)
+            # 'pu' ya incluye IGV, así que el estimado del total no vuelve a sumar el 18%.
+            total_est += cant * pu * (1 - desc / 100.0)
         if tipo == "03" and not cli_num and total_est >= 700:
             advertencias.append({"filaExcel": fn, "venta": venta,
                                  "mensaje": _("Boleta ≥ S/ 700 sin documento de identidad (SUNAT puede rechazarla)")})
@@ -399,7 +403,7 @@ class L10nPeNeLote(models.Model):
             "2. 'tipo': FACTURA (01) o BOLETA (03). La factura exige RUC de cliente válido; la boleta acepta DNI/CE/PASAPORTE o queda a público general si dejas el cliente en blanco.",
             "3. 'serie' vacía = automática (F001 factura, B001 boleta). Puedes abrir una serie nueva (p.ej. B002) y aparecerá luego en Series.",
             "4. 'fecha' vacía = hoy. No puede ser futura; si tiene más de 3 días te avisamos (plazo de envío SUNAT).",
-            "5. 'precio unitario' es SIN IGV. 'afectacion' por línea (GRAVADO suma 18%). 'bolsa' = SI cobra ICBPER por unidad.",
+            "5. 'precio unitario' es CON IGV incluido (precio final de venta). 'afectacion' por línea (GRAVADO ya trae el 18%). 'bolsa' = SI cobra ICBPER por unidad.",
             "6. Límite: 500 filas / 200 comprobantes por archivo, hasta 2 MB.",
             "7. Sube el archivo, revisa el reporte de validación y recién ahí emite. Si hay errores, corrige el Excel y vuelve a subir.",
         ]):

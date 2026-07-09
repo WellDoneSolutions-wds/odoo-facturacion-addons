@@ -397,7 +397,7 @@ class L10nPeNeLote(models.Model):
         wi = wb.add_worksheet("Instrucciones")
         wi.set_column(0, 0, 105)
         for r, line in enumerate([
-            "FACTORII — Plantilla de emisión masiva (boletas y facturas)",
+            "CHASKIFACT — Plantilla de emisión masiva (boletas y facturas)",
             "",
             "1. Una fila = una línea de venta. Usa la columna 'venta' para agrupar varias líneas en un mismo comprobante (mismo código en filas contiguas).",
             "2. 'tipo': FACTURA (01) o BOLETA (03). La factura exige RUC de cliente válido; la boleta acepta DNI/CE/PASAPORTE o queda a público general si dejas el cliente en blanco.",
@@ -409,7 +409,7 @@ class L10nPeNeLote(models.Model):
         ]):
             wi.write(r, 0, line)
         wb.close()
-        return {"filename": "plantilla-ventas-factorii.xlsx",
+        return {"filename": "plantilla-ventas-chaskifact.xlsx",
                 "contentB64": base64.b64encode(buf.getvalue()).decode("ascii")}
 
     # ------------------------------------------------------------- serializadores

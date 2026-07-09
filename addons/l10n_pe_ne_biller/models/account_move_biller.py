@@ -3098,8 +3098,18 @@ class AccountMove(models.Model):
         if formato == "TICKET" and not es_ticket:
             return self._l10n_pe_get_pdf_attachment()  # fallback A4 (NC/ND/retención…)
         cache_field = "l10n_pe_biller_pdf_ticket" if es_ticket else "l10n_pe_biller_pdf"
-        if self[cache_field]:
-            return self[cache_field]
+        # Cache-busting: el PDF cacheado se etiqueta con la versión del template
+        # (config `pdf_ver`). Si esa versión cambió (mejora del template) o el PDF
+        # viejo no la trae, se descarta y se regenera → nadie ve representaciones
+        # desactualizadas. Para forzar regeneración masiva, subir el parámetro.
+        pdf_ver = "pdfver:" + self.env["ir.config_parameter"].sudo().get_param(
+            "l10n_pe_ne_biller.pdf_ver", "1"
+        )
+        cached = self[cache_field]
+        if cached:
+            if cached.description == pdf_ver:
+                return cached
+            cached.sudo().unlink()  # template cambió → descartar el PDF viejo
         if not self.l10n_pe_biller_xml:
             raise UserError(
                 _("El comprobante no tiene XML firmado; envíelo primero a SUNAT.")
@@ -3163,6 +3173,7 @@ class AccountMove(models.Model):
                 "res_id": self.id,
                 "mimetype": "application/pdf",
                 "raw": resp.content,
+                "description": pdf_ver,   # etiqueta de versión para el cache-busting
             }
         )
         self[cache_field] = att.id

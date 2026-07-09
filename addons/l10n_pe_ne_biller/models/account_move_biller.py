@@ -336,7 +336,8 @@ class AccountMove(models.Model):
             )
         return out
 
-    @api.depends("journal_id", "partner_id", "move_type", "debit_origin_id", "reversed_entry_id")
+    @api.depends("journal_id", "partner_id", "move_type", "debit_origin_id",
+                 "reversed_entry_id", "l10n_latam_document_type_id")
     def _compute_l10n_pe_serie(self):
         for move in self:
             serie = move.l10n_pe_serie or move.journal_id.l10n_pe_ne_serie or "F001"
@@ -476,6 +477,13 @@ class AccountMove(models.Model):
         # (si fuese Boleta 03 con serie F, el validador de factura la rechaza por tipo/serie).
         if self.move_type == "out_invoice" and self._l10n_pe_tipo_operacion() == "0200":
             return "01"
+        # El tipo elegido en el comprobante manda: a un cliente con RUC se le puede emitir
+        # Boleta (compra como consumidor final). El documento de identidad solo decide
+        # cuando no hay tipo elegido (diario sin documentos latam, flujos por código).
+        if self.move_type == "out_invoice":
+            code = self.l10n_latam_document_type_id.code
+            if code in ("01", "03"):
+                return code
         vat_code = (
             self.partner_id.l10n_latam_identification_type_id.l10n_pe_vat_code or ""
         )
@@ -1488,6 +1496,22 @@ class AccountMove(models.Model):
             or self._l10n_pe_ne_default_serie(tipo, origin),
             "invoice_line_ids": lines,
         }
+        # Alinear el tipo latam con el tipoDoc pedido: sin esto, una BOLETA a un cliente
+        # con RUC se emitiría como Factura (el fallback decide por el documento del cliente).
+        es_boleta = tipo == "03" or (
+            tipo in ("07", "08")
+            and origin is not None
+            and (origin.l10n_pe_ne_tipo_doc or origin._l10n_pe_document_type()) == "03"
+        )
+        doc_xmlid = {
+            "01": "l10n_pe.document_type01",
+            "03": "l10n_pe.document_type02",
+            "07": "l10n_pe.document_type07b" if es_boleta else "l10n_pe.document_type07",
+            "08": "l10n_pe.document_type08b" if es_boleta else "l10n_pe.document_type08",
+        }.get(tipo)
+        doc_type = doc_xmlid and self.env.ref(doc_xmlid, raise_if_not_found=False)
+        if doc_type:
+            vals["l10n_latam_document_type_id"] = doc_type.id
         moneda = self._l10n_pe_ne_quick_currency(payload.get("moneda"))
         if moneda:
             vals["currency_id"] = moneda.id

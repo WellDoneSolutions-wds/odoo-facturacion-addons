@@ -852,12 +852,14 @@ class AccountMove(models.Model):
 
     def _l10n_pe_build_invoice_request(self):
         """Factura (01) / Boleta (03) — endpoint /generator/factura."""
+        _logger.info("---------------------------------------- Invoice request ------------------------------------------------")
         _logger.info(
-            "Invoice request: %s %s %s",
+            "%s %s %s",
             self._l10n_pe_id_block(with_document_type=True),
             self._l10n_pe_emisor(),
             self._l10n_pe_cabecera(),
         )
+        _logger.info("---------------------------------------- Invoice request ------------------------------------------------")
         self.ensure_one()
         self._l10n_pe_check_anticipo()
         # Boleta > S/700 exige el documento de identidad del cliente (SUNAT la rechaza sin él en prod).

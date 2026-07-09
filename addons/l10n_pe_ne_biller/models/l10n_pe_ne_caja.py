@@ -10,7 +10,7 @@ import calendar
 from odoo import _, api, fields, models
 from odoo.exceptions import UserError
 
-from ..tools.caja_arqueo import agrupar_ventas, calcular_arqueo
+from ..tools.caja_arqueo import agrupar_ventas, calcular_arqueo, EFECTIVO
 
 
 class L10nPeNeCajaSesion(models.Model):
@@ -226,6 +226,18 @@ class L10nPeNeCajaSesion(models.Model):
         monto = float(datos.get("monto") or 0.0)
         if monto <= 0:
             raise UserError(_("El monto debe ser mayor a 0."))
+        # Un RETIRO no puede superar el efectivo disponible = saldo inicial + ventas en efectivo
+        # + ingresos − retiros previos (misma fórmula que el esperado del arqueo). Sin esto, el
+        # esperado en efectivo podía quedar NEGATIVO (imposible físicamente en una caja).
+        if tipo == "retiro":
+            agr = agrupar_ventas(sesion._l10n_pe_ne_ventas_planas())
+            ingresos, retiros = sesion._l10n_pe_ne_ingresos_retiros()
+            disponible = round(sesion.saldo_inicial + agr["porMedio"].get(EFECTIVO, 0.0)
+                               + ingresos - retiros, 2)
+            if round(monto, 2) > disponible:
+                raise UserError(_(
+                    "No puedes retirar S/ %(monto).2f: la caja solo tiene S/ %(disp).2f "
+                    "en efectivo.", monto=round(monto, 2), disp=disponible))
         self.env["l10n_pe_ne.caja.movimiento"].create({
             "sesion_id": sesion.id, "tipo": tipo,
             "motivo": motivo, "monto": round(monto, 2),

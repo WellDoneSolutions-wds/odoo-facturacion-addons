@@ -119,6 +119,19 @@ class TestCaja(TransactionCase):
         with self.assertRaisesRegex(UserError, "mayor a 0"):
             self.Sesion.l10n_pe_ne_caja_movimiento({"tipo": "ingreso", "motivo": "ok", "monto": 0})
 
+    def test_retiro_no_supera_disponible(self):
+        # Escenario del reporte: 10 inicial + 323 de ingreso = 333 disponible en efectivo.
+        self.Sesion.l10n_pe_ne_abrir_caja({"saldoInicial": 10})
+        self.Sesion.l10n_pe_ne_caja_movimiento({"tipo": "ingreso", "motivo": "venta polo", "monto": 323})
+        # Retirar 500 (> 333) debe bloquearse — antes dejaba el esperado en −167 (imposible).
+        with self.assertRaisesRegex(UserError, "solo tiene"):
+            self.Sesion.l10n_pe_ne_caja_movimiento({"tipo": "retiro", "motivo": "test", "monto": 500})
+        # Retirar exactamente lo disponible (333) sí se permite y deja el efectivo en 0.
+        d = self.Sesion.l10n_pe_ne_caja_movimiento({"tipo": "retiro", "motivo": "cuadre", "monto": 333})
+        efec = {f["medio"]: f["monto"] for f in d["esperado"]}
+        self.assertEqual(efec["Efectivo"], 0.0)
+        self.assertEqual(d["retiros"], 333.0)
+
     def test_cerrar_y_snapshot(self):
         self.Sesion.l10n_pe_ne_abrir_caja({"saldoInicial": 100})
         self.Sesion.l10n_pe_ne_caja_movimiento({"tipo": "retiro", "motivo": "banco", "monto": 20})

@@ -3082,12 +3082,13 @@ class AccountMove(models.Model):
             "tipoDoc": tipo,
             "xml": (self.l10n_pe_biller_xml.raw or b"").decode("utf-8"),
         }
+        # Logo del emisor (si lo tiene): va en ambos formatos (A4 y ticket).
+        logo = self.company_id.logo
+        if logo:
+            payload["logo"] = logo.decode() if isinstance(logo, bytes) else logo
         if es_ticket:
             payload["formato"] = "TICKET"
-            # Logo del emisor (si lo tiene) y bloque de pago (medios/vuelto/cajero/nota).
-            logo = self.company_id.logo
-            if logo:
-                payload["logo"] = logo.decode() if isinstance(logo, bytes) else logo
+            # Bloque de pago (medios/vuelto/cajero/nota) — solo en el ticket 80mm.
             adic = self._l10n_pe_ne_ticket_adicional()
             if adic:
                 payload["adicionalTxt"] = adic

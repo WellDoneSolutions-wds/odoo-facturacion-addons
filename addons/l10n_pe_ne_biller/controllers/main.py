@@ -498,6 +498,21 @@ class L10nPeNeApi(http.Controller):
             lambda: self._move(uid).l10n_pe_ne_update_negocio(self._body())
         )
 
+    @http.route("/ne/api/negocio/logo", **_GET)
+    def negocio_logo(self, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        try:
+            raw, ct = self._move(uid).l10n_pe_ne_get_logo()
+            if not raw:
+                return self._err("El negocio no tiene logo", status=404)
+            return request.make_response(
+                raw, headers=[("Content-Type", ct), ("Cache-Control", "no-store")]
+            )
+        except Exception as e:  # noqa: BLE001
+            return self._fail(e)
+
     @http.route("/ne/api/distritos", **_GET)
     def distritos(self, q=None, **kw):
         uid = self._identify()

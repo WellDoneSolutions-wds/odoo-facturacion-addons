@@ -1815,7 +1815,39 @@ class AccountMove(models.Model):
             "ubigeo": d.code if d else "",
             "provincia": (d.city_id.name if d and d.city_id else (p.city or "")),
             "departamento": p.state_id.name or "",
+            "hasLogo": bool(company.logo),
         }
+
+    def l10n_pe_ne_get_logo(self):
+        """(bytes, content_type) del logo del emisor para servirlo por HTTP, o (None, None)."""
+        logo = self.env.company.logo
+        if not logo:
+            return None, None
+        raw = base64.b64decode(logo)
+        ct = (
+            "image/png" if raw[:4] == b"\x89PNG"
+            else "image/jpeg" if raw[:2] == b"\xff\xd8"
+            else "application/octet-stream"
+        )
+        return raw, ct
+
+    def _l10n_pe_ne_set_logo(self, company, logo_b64):
+        """Valida y guarda el logo del emisor. Vacío/None → lo quita. Acepta data-URI o base64
+        pelado. Exige PNG/JPEG y ≤ ~1.4 MB (mismo tope que valida biller-pdf al imprimir)."""
+        if not logo_b64:
+            company.logo = False
+            return
+        if isinstance(logo_b64, str) and logo_b64.startswith("data:"):
+            logo_b64 = logo_b64.split(",", 1)[-1]
+        try:
+            raw = base64.b64decode(logo_b64, validate=True)
+        except Exception as exc:  # noqa: BLE001
+            raise UserError(_("El logo no es una imagen válida.")) from exc
+        if len(raw) > 1_400_000:
+            raise UserError(_("El logo es demasiado grande (máx. ~1.4 MB)."))
+        if not (raw[:4] == b"\x89PNG" or raw[:2] == b"\xff\xd8"):
+            raise UserError(_("El logo debe ser PNG o JPEG."))
+        company.logo = base64.b64encode(raw)
 
     @api.model
     def l10n_pe_ne_buscar_distrito(self, q=None, limit=20):
@@ -1871,6 +1903,8 @@ class AccountMove(models.Model):
                         pvals["country_id"] = d.city_id.country_id.id
         if pvals:
             p.write(pvals)
+        if "logo" in vals:
+            self._l10n_pe_ne_set_logo(company, vals.get("logo"))
         return self.l10n_pe_ne_negocio()
 
     # ============================================================ resumen estado

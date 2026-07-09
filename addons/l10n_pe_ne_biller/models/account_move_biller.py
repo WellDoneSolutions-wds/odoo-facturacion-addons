@@ -147,7 +147,8 @@ class AccountMove(models.Model):
         store=True,
         readonly=False,
         copy=False,
-        help="Serie del comprobante. Por defecto, la del diario (l10n_pe_ne_serie).",
+        help="Serie del comprobante. Por defecto, la del diario (l10n_pe_ne_serie) con la "
+        "letra ajustada a la familia del comprobante (F factura / B boleta).",
     )
     l10n_pe_correlativo = fields.Char(
         string="Correlativo",
@@ -335,11 +336,24 @@ class AccountMove(models.Model):
             )
         return out
 
-    @api.depends("journal_id")
+    @api.depends("journal_id", "partner_id", "move_type", "debit_origin_id",
+                 "reversed_entry_id", "l10n_latam_document_type_id")
     def _compute_l10n_pe_serie(self):
         for move in self:
-            if not move.l10n_pe_serie:
-                move.l10n_pe_serie = move.journal_id.l10n_pe_ne_serie or "F001"
+            serie = move.l10n_pe_serie or move.journal_id.l10n_pe_ne_serie or "F001"
+            # La letra de la serie la manda la familia del comprobante (F factura / B boleta),
+            # no el diario: con un solo diario de ventas la serie del diario es de una familia
+            # y la boleta (cliente sin RUC) necesita la otra.
+            if (
+                move.state == "draft"
+                and move.move_type in ("out_invoice", "out_refund")
+                and move.partner_id
+                and serie[:1].upper() in ("F", "B")
+            ):
+                prefix = move._l10n_pe_serie_prefix()
+                if serie[:1].upper() != prefix:
+                    serie = prefix + serie[1:]
+            move.l10n_pe_serie = serie
 
     def _l10n_pe_detraccion_monto(self):
         self.ensure_one()
@@ -463,10 +477,54 @@ class AccountMove(models.Model):
         # (si fuese Boleta 03 con serie F, el validador de factura la rechaza por tipo/serie).
         if self.move_type == "out_invoice" and self._l10n_pe_tipo_operacion() == "0200":
             return "01"
+        # El tipo elegido en el comprobante manda: a un cliente con RUC se le puede emitir
+        # Boleta (compra como consumidor final). El documento de identidad solo decide
+        # cuando no hay tipo elegido (diario sin documentos latam, flujos por código).
+        if self.move_type == "out_invoice":
+            code = self.l10n_latam_document_type_id.code
+            if code in ("01", "03"):
+                return code
         vat_code = (
             self.partner_id.l10n_latam_identification_type_id.l10n_pe_vat_code or ""
         )
         return "01" if vat_code == "6" else "03"
+
+    def _l10n_pe_serie_prefix(self):
+        """Letra que SUNAT exige en la serie: F para Factura (01) y sus notas, B para Boleta (03)
+        y las suyas. En NC/ND manda la familia del documento afectado, no el partner."""
+        self.ensure_one()
+        origin = self.reversed_entry_id or self.debit_origin_id
+        if origin:
+            tipo = origin.l10n_pe_ne_tipo_doc or origin._l10n_pe_document_type()
+        else:
+            tipo = self._l10n_pe_document_type()
+        if tipo not in ("01", "03"):  # NC/ND sin documento afectado: decide el cliente
+            vat_code = (
+                self.partner_id.l10n_latam_identification_type_id.l10n_pe_vat_code or ""
+            )
+            tipo = "01" if vat_code == "6" else "03"
+        return "B" if tipo == "03" else "F"
+
+    def _l10n_pe_check_serie(self):
+        """Serie de familia equivocada (p.ej. F001 en una boleta) es rechazo seguro de SUNAT;
+        se corta aquí antes de enviar/encolar."""
+        self.ensure_one()
+        serie, _corr = self._l10n_pe_serie_correlativo()
+        prefix = self._l10n_pe_serie_prefix()
+        if (serie or "")[:1].upper() != prefix:
+            docname = {
+                "01": _("Factura"),
+                "03": _("Boleta"),
+                "07": _("Nota de Crédito"),
+                "08": _("Nota de Débito"),
+            }.get(self._l10n_pe_document_type(), "")
+            raise UserError(
+                _(
+                    "La serie '%(serie)s' no corresponde al tipo de comprobante: una %(doc)s "
+                    "debe usar una serie que empiece con '%(prefix)s' (p.ej. %(prefix)s001)."
+                )
+                % {"serie": serie, "doc": docname, "prefix": prefix}
+            )
 
     def _l10n_pe_product_lines(self):
         return self.invoice_line_ids.filtered(
@@ -977,6 +1035,7 @@ class AccountMove(models.Model):
 
     def _l10n_pe_target(self):
         """(endpoint, payload) según el tipo de comprobante."""
+        self._l10n_pe_check_serie()
         dt = self._l10n_pe_document_type()
         if dt == "07":
             return ("notaCredito", self._l10n_pe_build_note_request())
@@ -1437,6 +1496,22 @@ class AccountMove(models.Model):
             or self._l10n_pe_ne_default_serie(tipo, origin),
             "invoice_line_ids": lines,
         }
+        # Alinear el tipo latam con el tipoDoc pedido: sin esto, una BOLETA a un cliente
+        # con RUC se emitiría como Factura (el fallback decide por el documento del cliente).
+        es_boleta = tipo == "03" or (
+            tipo in ("07", "08")
+            and origin is not None
+            and (origin.l10n_pe_ne_tipo_doc or origin._l10n_pe_document_type()) == "03"
+        )
+        doc_xmlid = {
+            "01": "l10n_pe.document_type01",
+            "03": "l10n_pe.document_type02",
+            "07": "l10n_pe.document_type07b" if es_boleta else "l10n_pe.document_type07",
+            "08": "l10n_pe.document_type08b" if es_boleta else "l10n_pe.document_type08",
+        }.get(tipo)
+        doc_type = doc_xmlid and self.env.ref(doc_xmlid, raise_if_not_found=False)
+        if doc_type:
+            vals["l10n_latam_document_type_id"] = doc_type.id
         moneda = self._l10n_pe_ne_quick_currency(payload.get("moneda"))
         if moneda:
             vals["currency_id"] = moneda.id

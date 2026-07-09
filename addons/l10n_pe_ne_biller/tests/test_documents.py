@@ -37,6 +37,19 @@ class TestBillerDocuments(TransactionCase):
         self.assertEqual(endpoint, 'factura')
         self.assertEqual(payload['id']['documentType'], '01')
 
+    def test_boleta_a_cliente_ruc_por_tipo_elegido(self):
+        """Un cliente con RUC puede pedir Boleta: el tipo elegido en el comprobante manda
+        sobre el documento de identidad (antes se emitía Factura F001 mostrando Boleta)."""
+        boleta_type = self.env.ref('l10n_pe.document_type02')
+        move = self._invoice(self._partner('CLIENTE SAC BOLETA', '20605145648', self.ruc_type),
+                             serie='B001',
+                             l10n_latam_document_type_id=boleta_type.id)
+        self.assertEqual(move._l10n_pe_document_type(), '03')
+        endpoint, payload = move._l10n_pe_target()
+        self.assertEqual(payload['id']['documentType'], '03')
+        self.assertEqual(payload['id']['serie'], 'B001')
+        self.assertEqual(payload['cabecera']['tipDocUsuario'], '6')
+
     def test_boleta_dni(self):
         move = self._invoice(self._partner('CONSUMIDOR FINAL', '12345678', self.dni_type),
                              serie='B001')

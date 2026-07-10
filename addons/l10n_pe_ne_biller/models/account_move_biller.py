@@ -583,10 +583,13 @@ class AccountMove(models.Model):
         )
 
     def _l10n_pe_unit_code(self, line):
-        """Código de unidad SUNAT (cat. 03) de la línea: override por línea, luego override manual en
-        la UoM, si no el mapeo por XMLID de la unidad estándar de Odoo, si no 'NIU'."""
+        """Código de unidad SUNAT (cat. 03) de la línea: override por línea, luego el guardado en el
+        producto (POS/masiva no mandan unidad por línea), luego override manual en la UoM, si no el
+        mapeo por XMLID de la unidad estándar de Odoo, si no 'NIU'."""
         if line.l10n_pe_ne_unit_code:
             return line.l10n_pe_ne_unit_code
+        if line.product_id.l10n_pe_ne_unit_code:
+            return line.product_id.l10n_pe_ne_unit_code
         uom = line.product_uom_id
         if not uom:
             return DEFAULT_UNIT_CODE
@@ -2564,6 +2567,9 @@ class AccountMove(models.Model):
         bc = (ln.get("barcode") or "").strip()
         if bc:
             vals["barcode"] = bc
+        uni = (ln.get("unidad") or "").strip()
+        if uni:
+            vals["l10n_pe_ne_unit_code"] = uni
         if tax:
             vals["taxes_id"] = [(6, 0, tax.ids)]
         return Product.create(vals)
@@ -2577,6 +2583,7 @@ class AccountMove(models.Model):
             "barcode": p.barcode or "",
             "precio": p.list_price,
             "taxCode": (tax.l10n_pe_edi_tax_code or "1000") if tax else "1000",
+            "unidad": p.l10n_pe_ne_unit_code or "",
         }
 
     def _l10n_pe_ne_partner_dict(self, p):
@@ -2729,6 +2736,7 @@ class AccountMove(models.Model):
                 "productCod": producto.get("codigo"),
                 "barcode": producto.get("barcode"),
                 "precioUnitario": producto.get("precio"),
+                "unidad": producto.get("unidad"),
             },
             tax,
         )
@@ -2749,6 +2757,8 @@ class AccountMove(models.Model):
             vals["default_code"] = (producto.get("codigo") or "").strip() or False
         if "barcode" in producto:
             vals["barcode"] = (producto.get("barcode") or "").strip() or False
+        if "unidad" in producto:
+            vals["l10n_pe_ne_unit_code"] = (producto.get("unidad") or "").strip() or False
         if producto.get("precio") is not None:
             vals["list_price"] = float(producto.get("precio") or 0)
         if producto.get("taxCode"):

@@ -1721,15 +1721,25 @@ class AccountMove(models.Model):
 
     def _l10n_pe_ne_quick_partner(self, c):
         num = (c.get("numDoc") or "").strip()
+        nombre = (c.get("razonSocial") or "").strip()
         dire = (c.get("direccion") or "").strip()
         urb = (c.get("urbanizacion") or "").strip()
         Partner = self.env["res.partner"]
         found = Partner.search([("vat", "=", num)], limit=1) if num else Partner.browse()
+        if not found and not num and not nombre:
+            # Público general SIN documento ni nombre: reusa UN solo 'CONSUMIDOR
+            # FINAL' por tenant en vez de crear un partner desechable por venta.
+            # (La emisión no reescribe el partner, así que reusarlo es seguro.)
+            found = Partner.search([
+                ("company_id", "=", self.env.company.id),
+                ("vat", "=", False),
+                ("name", "=", "CONSUMIDOR FINAL"),
+            ], limit=1)
         if not found:
             # company_id del emisor actual: aísla el cliente por RUC (multi-tenant). Sin
             # esto quedaría company_id=False = visible/editable por TODOS los tenants.
             vals = {
-                "name": c.get("razonSocial") or "CONSUMIDOR FINAL",
+                "name": nombre or "CONSUMIDOR FINAL",
                 "customer_rank": 1,
                 "company_id": self.env.company.id,
             }

@@ -806,6 +806,20 @@ class AccountMove(models.Model):
             cod = "6" if (len(vat) == 11 and vat.isdigit()) else "1"
         return cod, vat
 
+    @api.model
+    def _l10n_pe_ne_today_lima(self):
+        """Fecha de HOY en hora local de Perú (América/Lima, UTC-5).
+
+        Evita el descuadre de zona horaria: `fields.Date.context_today` cae a UTC
+        cuando el usuario no tiene tz configurada, así que de noche (después de las
+        7pm Lima = medianoche UTC) devuelve el día SIGUIENTE. Eso hacía que fecEmision
+        saltara un día respecto a horEmision (que sí fuerza América/Lima)."""
+        return (
+            pytz.utc.localize(fields.Datetime.now())
+            .astimezone(pytz.timezone("America/Lima"))
+            .date()
+        )
+
     def _l10n_pe_cabecera(self):
         fmt = self._l10n_pe_fmt
         partner = self.partner_id
@@ -1496,7 +1510,7 @@ class AccountMove(models.Model):
             "partner_id": partner.id,
             "journal_id": journal.id,
             "invoice_date": payload.get("fechaEmision")
-            or fields.Date.context_today(self),
+            or self._l10n_pe_ne_today_lima(),
             "l10n_pe_serie": payload.get("serie")
             or self._l10n_pe_ne_default_serie(tipo, origin),
             "invoice_line_ids": lines,
@@ -1685,28 +1699,62 @@ class AccountMove(models.Model):
             )
         return out
 
+    def _l10n_pe_ne_fetch_direccion_padron(self, num):
+        """Domicilio fiscal desde el padrón externo (DynamoDB) o, como respaldo, SUNAT.
+
+        Consulta la fuente directamente (no lee el partner ya guardado, que puede tener
+        street vacío). Degrada a "" ante cualquier fallo o si la fuente no está
+        configurada — NUNCA bloquea la emisión."""
+        num = (num or "").strip()
+        if not num:
+            return ""
+        P = self.env["res.partner"].sudo()
+        data = None
+        for fetch in (P._l10n_pe_query_external_db, P._l10n_pe_query_sunat):
+            try:
+                data = fetch(num)
+            except Exception:  # noqa: BLE001 — fuente no configurada / red: seguimos
+                data = None
+            if data:
+                break
+        return (data or {}).get("address") or ""
+
     def _l10n_pe_ne_quick_partner(self, c):
         num = (c.get("numDoc") or "").strip()
+        dire = (c.get("direccion") or "").strip()
+        urb = (c.get("urbanizacion") or "").strip()
         Partner = self.env["res.partner"]
-        if num:
-            found = Partner.search([("vat", "=", num)], limit=1)
-            if found:
-                return found
-        # company_id del emisor actual: aísla el cliente por RUC (multi-tenant). Sin
-        # esto quedaría company_id=False = visible/editable por TODOS los tenants.
-        vals = {
-            "name": c.get("razonSocial") or "CONSUMIDOR FINAL",
-            "customer_rank": 1,
-            "company_id": self.env.company.id,
-        }
-        if num:
-            vals["vat"] = num
-            t = self.env["l10n_latam.identification.type"].search(
-                [("l10n_pe_vat_code", "=", c.get("tipoDoc") or "6")], limit=1
-            )
-            if t:
-                vals["l10n_latam_identification_type_id"] = t.id
-        return Partner.create(vals)
+        found = Partner.search([("vat", "=", num)], limit=1) if num else Partner.browse()
+        if not found:
+            # company_id del emisor actual: aísla el cliente por RUC (multi-tenant). Sin
+            # esto quedaría company_id=False = visible/editable por TODOS los tenants.
+            vals = {
+                "name": c.get("razonSocial") or "CONSUMIDOR FINAL",
+                "customer_rank": 1,
+                "company_id": self.env.company.id,
+            }
+            if num:
+                vals["vat"] = num
+                t = self.env["l10n_latam.identification.type"].search(
+                    [("l10n_pe_vat_code", "=", c.get("tipoDoc") or "6")], limit=1
+                )
+                if t:
+                    vals["l10n_latam_identification_type_id"] = t.id
+            if dire:
+                vals["street"] = dire
+            if urb:
+                vals["street2"] = urb
+            found = Partner.create(vals)
+        # Dirección faltante → la completamos (sin pisar una ya guardada). Primero lo que
+        # mandó el front; si no vino, el domicilio fiscal del padrón. Así la representación
+        # impresa (A4) muestra la dirección de los RUC 20 y de los 10/naturales que la tengan.
+        if not found.street:
+            addr = dire or self._l10n_pe_ne_fetch_direccion_padron(num)
+            if addr:
+                found.street = addr
+        if urb and not found.street2:
+            found.street2 = urb
+        return found
 
     def _l10n_pe_ne_tax_by_code(self, code):
         """account.tax de venta por código cat-05 (l10n_pe_edi_tax_code); default 1000 (IGV gravado)."""
@@ -3203,6 +3251,11 @@ class AccountMove(models.Model):
             # Serie-correlativo AUTORITATIVO desde Odoo (no se depende del xpath /Invoice/ID
             # de la plantilla, que en algún entorno no resolvía y dejaba el número en blanco).
             "numComprobante": "%s-%s" % (serie, (correlativo or "").zfill(8)),
+            # Dirección del adquiriente para la representación impresa (no va al XML SUNAT: el
+            # biller no la incluye en el bloque del cliente). Toma calle + urbanización si hay.
+            "dirCliente": ", ".join(
+                p for p in (self.partner_id.street, self.partner_id.street2) if p
+            ),
         }
         # Logo del emisor (si lo tiene): va en ambos formatos (A4 y ticket).
         logo = self.company_id.logo

@@ -242,7 +242,7 @@ class L10nPeNeLote(models.Model):
         fecha = None
         if first["fecha_raw"] not in (None, ""):
             fecha = self._l10n_pe_ne_fecha(first["fecha_raw"])
-            hoy = fields.Date.context_today(self)
+            hoy = self.env["account.move"]._l10n_pe_ne_today_lima()
             if fecha == "ERROR":
                 local.append((fn, _("La fecha no es válida (usa DD/MM/AAAA)"))); fecha = None
             elif fecha > hoy:

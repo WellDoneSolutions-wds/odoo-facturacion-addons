@@ -806,6 +806,20 @@ class AccountMove(models.Model):
             cod = "6" if (len(vat) == 11 and vat.isdigit()) else "1"
         return cod, vat
 
+    @api.model
+    def _l10n_pe_ne_today_lima(self):
+        """Fecha de HOY en hora local de Perú (América/Lima, UTC-5).
+
+        Evita el descuadre de zona horaria: `fields.Date.context_today` cae a UTC
+        cuando el usuario no tiene tz configurada, así que de noche (después de las
+        7pm Lima = medianoche UTC) devuelve el día SIGUIENTE. Eso hacía que fecEmision
+        saltara un día respecto a horEmision (que sí fuerza América/Lima)."""
+        return (
+            pytz.utc.localize(fields.Datetime.now())
+            .astimezone(pytz.timezone("America/Lima"))
+            .date()
+        )
+
     def _l10n_pe_cabecera(self):
         fmt = self._l10n_pe_fmt
         partner = self.partner_id
@@ -1496,7 +1510,7 @@ class AccountMove(models.Model):
             "partner_id": partner.id,
             "journal_id": journal.id,
             "invoice_date": payload.get("fechaEmision")
-            or fields.Date.context_today(self),
+            or self._l10n_pe_ne_today_lima(),
             "l10n_pe_serie": payload.get("serie")
             or self._l10n_pe_ne_default_serie(tipo, origin),
             "invoice_line_ids": lines,

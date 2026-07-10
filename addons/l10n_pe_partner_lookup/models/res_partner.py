@@ -259,6 +259,38 @@ class ResPartner(models.Model):
         return self.search([('vat', '=', doc_number.strip())], limit=1)
 
     @api.model
+    def _l10n_pe_ruc_check_digit(self, ruc10):
+        """Dígito verificador (módulo 11) del RUC a partir de sus 10 primeros dígitos."""
+        seq = [5, 4, 3, 2, 7, 6, 5, 4, 3, 2]
+        total = sum(int(ruc10[i]) * seq[i] for i in range(10))
+        rest = 11 - (total % 11)
+        return str(0 if rest == 10 else 1 if rest == 11 else rest)
+
+    @api.model
+    def _l10n_pe_counterpart_number(self, doc_number):
+        """La OTRA identidad de una persona natural: DNI(8) ↔ su RUC '10'+DNI+dv.
+
+        Una persona natural tiene dos documentos válidos para SUNAT (DNI en boletas,
+        RUC en facturas), pero Odoo guarda un solo ``vat`` por partner, así que la
+        misma persona puede quedar como dos registros. Esto devuelve el documento
+        equivalente para detectar ese duplicado; None si no aplica (RUC 15/17/20 de
+        extranjería o persona jurídica no embeben un DNI)."""
+        num = (doc_number or '').strip()
+        if not num.isdigit():
+            return None
+        if len(num) == 8:
+            return '10' + num + self._l10n_pe_ruc_check_digit('10' + num)
+        if len(num) == 11 and num.startswith('10'):
+            return num[2:10]
+        return None
+
+    @api.model
+    def _l10n_pe_find_counterpart(self, doc_number):
+        """Partner ya registrado con la OTRA identidad (para avisar de duplicado)."""
+        other = self._l10n_pe_counterpart_number(doc_number)
+        return self._l10n_pe_find_partner(other) if other else self.browse()
+
+    @api.model
     def _l10n_pe_find_or_create_from_external(self, doc_number):
         """Orquesta: si existe lo devuelve; si no, lo busca en la API y lo crea.
 
@@ -366,6 +398,15 @@ class ResPartner(models.Model):
                 'email': partner.email or '',
                 'phone': partner.phone or '',
             }
+        # No existe con ESTE documento; ¿la persona ya está con su otra identidad
+        # (DNI ↔ RUC '10…')? Si es así lo adjuntamos como aviso de posible duplicado.
+        cp = self._l10n_pe_find_counterpart(doc_number)
+        counterpart = {
+            'id': cp.id,
+            'numDoc': cp.vat or '',
+            'tipoDocNombre': cp.l10n_latam_identification_type_id.name or '',
+            'name': cp.name or '',
+        } if cp else None
         try:
             data = self._l10n_pe_query_external_db(doc_number)
             if not data:
@@ -374,11 +415,11 @@ class ResPartner(models.Model):
             _logger.warning(
                 "l10n_pe_partner_lookup: autocompletar falló para %s",
                 doc_number, exc_info=True)
-            return {}
+            data = None
         if not data:
-            return {}
+            return {'counterpart': counterpart} if counterpart else {}
         id_type = self._l10n_pe_map_identification_type(data.get('doc_type'), data['doc_number'])
-        return {
+        res = {
             'exists': False,
             'doc_number': data['doc_number'],
             'doc_type': (id_type.l10n_pe_vat_code if id_type else '') or '',
@@ -387,6 +428,9 @@ class ResPartner(models.Model):
             'email': '',
             'phone': '',
         }
+        if counterpart:
+            res['counterpart'] = counterpart
+        return res
 
     # ------------------------------------------------------------------
     # SUNAT (último recurso): scraping de e-consultaruc

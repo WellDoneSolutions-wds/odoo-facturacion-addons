@@ -53,11 +53,15 @@ class L10nPeNeCotizacion(models.Model):
     @api.depends('line_ids.subtotal', 'line_ids.afecto_igv')
     def _compute_amounts(self):
         for cot in self:
-            gravado = sum(l.subtotal for l in cot.line_ids if l.afecto_igv)
+            # El precio unitario es CON IGV: el subtotal de línea ya es el importe bruto
+            # (lo que paga el cliente). Para el desglose, el gravado se descompone en base
+            # (bruto/1.18) + IGV; lo no gravado ya es base. Así el Total == suma de brutos.
+            bruto_gravado = sum(l.subtotal for l in cot.line_ids if l.afecto_igv)
             no_gravado = sum(l.subtotal for l in cot.line_ids if not l.afecto_igv)
-            cot.amount_untaxed = gravado + no_gravado
-            cot.amount_tax = round(gravado * IGV_RATE, 2)
-            cot.amount_total = cot.amount_untaxed + cot.amount_tax
+            base_gravado = round(bruto_gravado / (1 + IGV_RATE), 2)
+            cot.amount_total = round(bruto_gravado + no_gravado, 2)
+            cot.amount_tax = round(bruto_gravado - base_gravado, 2)
+            cot.amount_untaxed = round(cot.amount_total - cot.amount_tax, 2)
 
     @api.model_create_multi
     def create(self, vals_list):

@@ -3203,6 +3203,11 @@ class AccountMove(models.Model):
             # Serie-correlativo AUTORITATIVO desde Odoo (no se depende del xpath /Invoice/ID
             # de la plantilla, que en algún entorno no resolvía y dejaba el número en blanco).
             "numComprobante": "%s-%s" % (serie, (correlativo or "").zfill(8)),
+            # Dirección del adquiriente para la representación impresa (no va al XML SUNAT: el
+            # biller no la incluye en el bloque del cliente). Toma calle + urbanización si hay.
+            "dirCliente": ", ".join(
+                p for p in (self.partner_id.street, self.partner_id.street2) if p
+            ),
         }
         # Logo del emisor (si lo tiene): va en ambos formatos (A4 y ticket).
         logo = self.company_id.logo

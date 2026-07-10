@@ -2838,26 +2838,56 @@ class AccountMove(models.Model):
         import base64
         import xlsxwriter
 
-        headers = ["CÓDIGO", "NOMBRE", "UNIDAD", "PRECIO VENTA", "COSTO", "AFECTACIÓN"]
+        headers = ["CÓDIGO", "CÓDIGO DE BARRAS", "NOMBRE", "UNIDAD", "PRECIO VENTA", "COSTO", "AFECTACIÓN"]
         ejemplos = [
-            ["PROD0001", "CEMENTO SOL 42.5 KG", "UNIDAD", 33.90, 28.00, "GRAVADO"],
-            ["PROD0002", "FIERRO CORRUGADO 1/2 PULG", "KILOGRAMO", 4.50, 3.20, "GRAVADO"],
-            ["PROD0003", "PINTURA LATEX BLANCO", "GALON", 45.00, 33.00, "GRAVADO"],
+            ["PROD0001", "7751234000018", "CEMENTO SOL 42.5 KG", "UNIDAD", 33.90, 28.00, "GRAVADO"],
+            ["PROD0002", "7751234000025", "FIERRO CORRUGADO 1/2 PULG", "KILOGRAMO", 4.50, 3.20, "GRAVADO"],
+            ["PROD0003", "", "PINTURA LATEX BLANCO", "GALON", 45.00, 33.00, "GRAVADO"],
         ]
         buf = io.BytesIO()
         wb = xlsxwriter.Workbook(buf, {"in_memory": True})
         ws = wb.add_worksheet("Productos")
         head = wb.add_format({"bold": True, "bg_color": "#2563eb", "font_color": "white", "border": 1})
+        # El código de barras se escribe como TEXTO para no perder ceros a la izquierda
+        # ni que Excel lo pase a notación científica (ej. 7.75E+12).
+        txtfmt = wb.add_format({"num_format": "@"})
         for c, h in enumerate(headers):
             ws.write(0, c, h, head)
-            ws.set_column(c, c, max(16, len(h) + 4))
+            ws.set_column(c, c, max(16, len(h) + 4), txtfmt if c == 1 else None)
         for r, row in enumerate(ejemplos, 1):
             ws.write_row(r, 0, row)
-        ws.data_validation(1, 2, 1000, 2, {"validate": "list", "source": [
-            "UNIDAD", "SERVICIO", "KILOGRAMO", "GRAMO", "LITRO", "GALON", "CAJA",
-            "METRO", "METRO CUADRADO", "METRO CUBICO", "MILLAR", "DOCENA"]})
-        ws.data_validation(1, 5, 1000, 5, {"validate": "list", "source": [
-            "GRAVADO", "EXONERADO", "INAFECTO", "EXPORTACION", "GRATUITO"]})
+        # Comentarios de ayuda al pasar el mouse por la cabecera (el triangulito rojo).
+        note = {"x_scale": 2.2, "y_scale": 1.8, "author": "CHASKIFACT"}
+        ws.write_comment(0, 1, (
+            "Opcional. El código de barras (EAN) que trae el producto, para escanearlo "
+            "en el POS. Déjalo vacío si el producto no tiene."), note)
+        ws.write_comment(0, 4, "Precio final CON IGV incluido (lo que paga el cliente).", note)
+        ws.write_comment(0, 5, "Opcional. Precio de compra referencial. NO afecta la facturación.", note)
+        ws.write_comment(0, 6, (
+            "Tipo de afectación de IGV. Elígelo del desplegable.\n"
+            "• GRAVADO = con IGV 18% (lo normal)\n"
+            "• EXONERADO / INAFECTO = sin IGV\n"
+            "• EXPORTACION / GRATUITO = casos especiales\n"
+            "Si lo dejas vacío se asume GRAVADO."), note)
+        # Desplegable (select) para UNIDAD, con ayuda al hacer clic en la celda.
+        ws.data_validation(1, 3, 1000, 3, {
+            "validate": "list", "source": [
+                "UNIDAD", "SERVICIO", "KILOGRAMO", "GRAMO", "LITRO", "GALON", "CAJA",
+                "METRO", "METRO CUADRADO", "METRO CUBICO", "MILLAR", "DOCENA"],
+            "input_title": "Unidad de medida",
+            "input_message": "Elige de la lista o escribe el código SUNAT (NIU, KGM…). Vacío = UNIDAD."})
+        # Desplegable (select) para AFECTACIÓN, con ayuda + alerta suave si no es de la lista.
+        ws.data_validation(1, 6, 1000, 6, {
+            "validate": "list", "source": [
+                "GRAVADO", "EXONERADO", "INAFECTO", "EXPORTACION", "GRATUITO"],
+            "input_title": "Afectación de IGV",
+            "input_message": (
+                "GRAVADO = con IGV 18% (lo normal).\n"
+                "EXONERADO / INAFECTO = sin IGV.\n"
+                "Vacío = GRAVADO."),
+            "error_type": "information",
+            "error_title": "Valor sugerido",
+            "error_message": "Usa: GRAVADO, EXONERADO, INAFECTO, EXPORTACION o GRATUITO."})
         ws.freeze_panes(1, 0)
         wi = wb.add_worksheet("Instrucciones")
         wi.set_column(0, 0, 110)
@@ -2865,11 +2895,14 @@ class AccountMove(models.Model):
             "CHASKIFACT — Plantilla de importación de productos",
             "",
             "1. Una fila = un producto. 'CÓDIGO' es la clave: si ya existe, se ACTUALIZA; si no, se CREA.",
-            "2. 'NOMBRE' es obligatorio. 'PRECIO VENTA' es el precio final CON IGV incluido.",
-            "3. 'UNIDAD': puedes escribir el nombre (UNIDAD, KILOGRAMO, CAJA…) o el código SUNAT (NIU, KGM, BX…). Vacío = UNIDAD (NIU).",
-            "4. 'AFECTACIÓN': GRAVADO / EXONERADO / INAFECTO / EXPORTACION / GRATUITO. Vacío = GRAVADO.",
-            "5. 'COSTO' es opcional (precio de compra, referencial). No afecta la facturación.",
-            "6. Sube el archivo, revisa el resumen (nuevos / actualizados / errores) y recién ahí confirma.",
+            "2. 'CÓDIGO DE BARRAS' es opcional: el EAN del producto para escanearlo en el POS. No puede repetirse entre productos.",
+            "3. 'NOMBRE' es obligatorio. 'PRECIO VENTA' es el precio final CON IGV incluido.",
+            "4. 'UNIDAD': puedes escribir el nombre (UNIDAD, KILOGRAMO, CAJA…) o el código SUNAT (NIU, KGM, BX…). Vacío = UNIDAD (NIU).",
+            "5. 'AFECTACIÓN' (elígela del desplegable de la celda): define el IGV del producto.",
+            "     • GRAVADO = lleva IGV 18% (la mayoría de productos).  • EXONERADO / INAFECTO = sin IGV.",
+            "     • EXPORTACION / GRATUITO = casos especiales.  Si la dejas vacía se asume GRAVADO.",
+            "6. 'COSTO' es opcional (precio de compra, referencial). No afecta la facturación.",
+            "7. Sube el archivo, revisa el resumen (nuevos / actualizados / errores) y recién ahí confirma.",
         ]):
             wi.write(r, 0, line)
         wb.close()
@@ -2965,8 +2998,15 @@ class AccountMove(models.Model):
                 avisos.append({"fila": n, "msg": "Unidad '%s' no reconocida, se usó UNIDAD (NIU)" % txt(cell(row, "unidad"))})
             afe_raw = norm(cell(row, "afectacion"))
             tax_code = AFECT_IMPORT.get(afe_raw, "1000") if afe_raw else "1000"
+            barcode = txt(cell(row, "codigo de barras"))
 
             existing = Product.search([("default_code", "=", cod)], limit=1)
+            # El código de barras no puede pertenecer a OTRO producto (Odoo lo exige único).
+            if barcode:
+                dup = Product.search([("barcode", "=", barcode)], limit=1)
+                if dup and dup.id != existing.id:
+                    errores.append({"fila": n, "msg": "El código de barras '%s' ya pertenece a otro producto" % barcode})
+                    continue
             if not commit:
                 if existing:
                     actualizados += 1
@@ -2978,6 +3018,8 @@ class AccountMove(models.Model):
                 vals["list_price"] = precio
             if costo is not None:
                 vals["standard_price"] = costo
+            if barcode:
+                vals["barcode"] = barcode
             tax = self._l10n_pe_ne_tax_by_code(tax_code)
             vals["taxes_id"] = [(6, 0, tax.ids if tax else [])]
             if existing:

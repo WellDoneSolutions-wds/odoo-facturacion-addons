@@ -878,6 +878,22 @@ class L10nPeNeApi(http.Controller):
             lambda: self._move(uid).l10n_pe_ne_create_producto(self._body())
         )
 
+    @http.route("/ne/api/productos/plantilla", **_GET)
+    def productos_plantilla(self, **kw):
+        """Descarga la plantilla xlsx para importar productos."""
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(lambda: self._move(uid).l10n_pe_ne_plantilla_productos())
+
+    @http.route("/ne/api/productos/importar", **_POST)
+    def productos_importar(self, **kw):
+        """Importa/actualiza productos desde el xlsx. Body {contentB64, commit}."""
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(lambda: self._move(uid).l10n_pe_ne_importar_productos(self._body()))
+
     @http.route("/ne/api/productos/<int:rec_id>", **_PUT)
     def update_producto(self, rec_id, **kw):
         uid = self._identify()

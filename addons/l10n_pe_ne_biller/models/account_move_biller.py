@@ -77,6 +77,43 @@ UOM_CODE_BY_XMLID = {
 }
 DEFAULT_UNIT_CODE = "NIU"
 
+# Importación de productos por Excel: mapeo tolerante de TEXTO en español (o el propio código
+# cat.03) → código SUNAT cat.03. Clave = texto normalizado (minúsculas, sin tildes). Espejo del
+# catálogo del front (lib/unidades.ts) más sinónimos comunes de ferretería/bodega.
+UNIDAD_IMPORT = {
+    "unidad": "NIU", "unidades": "NIU", "und": "NIU", "unid": "NIU", "niu": "NIU", "u": "NIU",
+    "servicio": "ZZ", "servicios": "ZZ", "serv": "ZZ", "zz": "ZZ",
+    "kilogramo": "KGM", "kilogramos": "KGM", "kilo": "KGM", "kilos": "KGM", "kg": "KGM", "kgm": "KGM",
+    "gramo": "GRM", "gramos": "GRM", "gr": "GRM", "grm": "GRM",
+    "libra": "LBR", "libras": "LBR", "lb": "LBR", "lbr": "LBR",
+    "tonelada": "TNE", "toneladas": "TNE", "tonelada metrica": "TNE", "ton": "TNE", "tne": "TNE",
+    "litro": "LTR", "litros": "LTR", "lt": "LTR", "ltr": "LTR",
+    "galon": "GLL", "galones": "GLL", "gln": "GLL", "gll": "GLL",
+    "barril": "BLL", "barriles": "BLL", "bll": "BLL",
+    "lata": "CA", "latas": "CA", "ca": "CA",
+    "caja": "BX", "cajas": "BX", "bx": "BX",
+    "millar": "MLL", "millares": "MLL", "mll": "MLL",
+    "metro": "MTR", "metros": "MTR", "mt": "MTR", "mtr": "MTR", "m": "MTR",
+    "centimetro": "CMT", "centimetros": "CMT", "cm": "CMT", "cmt": "CMT",
+    "metro cuadrado": "MTK", "m2": "MTK", "mtk": "MTK",
+    "metro cubico": "MTQ", "m3": "MTQ", "mtq": "MTQ",
+    "dia": "DAY", "dias": "DAY", "day": "DAY",
+    "hora": "HUR", "horas": "HUR", "hr": "HUR", "hur": "HUR",
+    "juego": "SET", "juegos": "SET", "set": "SET",
+    "docena": "DPC", "docenas": "DPC", "dpc": "DPC",
+    "onza": "ONZ", "onzas": "ONZ", "onz": "ONZ",
+}
+# Afectación IGV: texto (cat.07 humano) → código cat.07 que espera el producto.
+AFECT_IMPORT = {
+    "gravado": "1000", "gravada": "1000",
+    "exonerado": "9997", "exonerada": "9997",
+    "inafecto": "9998", "inafecta": "9998",
+    "exportacion": "9995",
+    "gratuito": "9996", "gratuita": "9996",
+}
+# Códigos cat.03 válidos (para aceptar el código directo en el Excel, ej. "KGM").
+_UNIDAD_CODES = set(UNIDAD_IMPORT.values())
+
 
 class AccountMoveLine(models.Model):
     _inherit = "account.move.line"
@@ -2780,6 +2817,170 @@ class AccountMove(models.Model):
         except Exception:
             p.active = False
             return {"ok": True, "modo": "archivado"}
+
+    # ------------------------------------------------------- importación productos
+    @api.model
+    def l10n_pe_ne_plantilla_productos(self):
+        """Plantilla xlsx para importar/actualizar el catálogo (hoja 'Productos' con las
+        cabeceras + ejemplos + listas de unidad/afectación, y una hoja 'Instrucciones').
+        Devuelve {filename, contentB64}. Mismo estilo visual que la plantilla de la masiva."""
+        import io
+        import base64
+        import xlsxwriter
+
+        headers = ["CÓDIGO", "NOMBRE", "UNIDAD", "PRECIO VENTA", "COSTO", "AFECTACIÓN"]
+        ejemplos = [
+            ["PROD0001", "CEMENTO SOL 42.5 KG", "UNIDAD", 33.90, 28.00, "GRAVADO"],
+            ["PROD0002", "FIERRO CORRUGADO 1/2 PULG", "KILOGRAMO", 4.50, 3.20, "GRAVADO"],
+            ["PROD0003", "PINTURA LATEX BLANCO", "GALON", 45.00, 33.00, "GRAVADO"],
+        ]
+        buf = io.BytesIO()
+        wb = xlsxwriter.Workbook(buf, {"in_memory": True})
+        ws = wb.add_worksheet("Productos")
+        head = wb.add_format({"bold": True, "bg_color": "#2563eb", "font_color": "white", "border": 1})
+        for c, h in enumerate(headers):
+            ws.write(0, c, h, head)
+            ws.set_column(c, c, max(16, len(h) + 4))
+        for r, row in enumerate(ejemplos, 1):
+            ws.write_row(r, 0, row)
+        ws.data_validation(1, 2, 1000, 2, {"validate": "list", "source": [
+            "UNIDAD", "SERVICIO", "KILOGRAMO", "GRAMO", "LITRO", "GALON", "CAJA",
+            "METRO", "METRO CUADRADO", "METRO CUBICO", "MILLAR", "DOCENA"]})
+        ws.data_validation(1, 5, 1000, 5, {"validate": "list", "source": [
+            "GRAVADO", "EXONERADO", "INAFECTO", "EXPORTACION", "GRATUITO"]})
+        ws.freeze_panes(1, 0)
+        wi = wb.add_worksheet("Instrucciones")
+        wi.set_column(0, 0, 110)
+        for r, line in enumerate([
+            "CHASKIFACT — Plantilla de importación de productos",
+            "",
+            "1. Una fila = un producto. 'CÓDIGO' es la clave: si ya existe, se ACTUALIZA; si no, se CREA.",
+            "2. 'NOMBRE' es obligatorio. 'PRECIO VENTA' es el precio final CON IGV incluido.",
+            "3. 'UNIDAD': puedes escribir el nombre (UNIDAD, KILOGRAMO, CAJA…) o el código SUNAT (NIU, KGM, BX…). Vacío = UNIDAD (NIU).",
+            "4. 'AFECTACIÓN': GRAVADO / EXONERADO / INAFECTO / EXPORTACION / GRATUITO. Vacío = GRAVADO.",
+            "5. 'COSTO' es opcional (precio de compra, referencial). No afecta la facturación.",
+            "6. Sube el archivo, revisa el resumen (nuevos / actualizados / errores) y recién ahí confirma.",
+        ]):
+            wi.write(r, 0, line)
+        wb.close()
+        return {"filename": "plantilla-productos-chaskifact.xlsx",
+                "contentB64": base64.b64encode(buf.getvalue()).decode("ascii")}
+
+    @api.model
+    def l10n_pe_ne_importar_productos(self, payload):
+        """Importa/actualiza productos desde el xlsx de la plantilla. payload = {contentB64, commit}.
+        UPSERT por CÓDIGO. commit=False → solo valida y devuelve el reporte (dry-run, no escribe);
+        commit=True → aplica y devuelve creados/actualizados/errores. Aislado por compañía."""
+        import io
+        import base64
+        import unicodedata
+
+        payload = payload or {}
+        commit = bool(payload.get("commit"))
+        try:
+            data = base64.b64decode(payload.get("contentB64") or "")
+        except Exception:
+            raise UserError(_("Archivo inválido."))
+
+        import openpyxl
+        try:
+            wb = openpyxl.load_workbook(io.BytesIO(data), data_only=True, read_only=True)
+        except Exception:
+            raise UserError(_("No se pudo leer el archivo. Sube un .xlsx válido (no un .xls antiguo)."))
+        ws = wb["Productos"] if "Productos" in wb.sheetnames else wb[wb.sheetnames[0]]
+        rows = list(ws.iter_rows(values_only=True))
+        if not rows:
+            raise UserError(_("El archivo está vacío."))
+
+        def norm(h):
+            s = unicodedata.normalize("NFKD", str(h or "")).encode("ascii", "ignore").decode("ascii")
+            return " ".join(s.lower().split())
+
+        header = [norm(h) for h in rows[0]]
+        idx = {h: i for i, h in enumerate(header) if h}
+        faltan = [h for h in ("codigo", "nombre") if h not in idx]
+        if faltan:
+            raise UserError(_("Faltan columnas obligatorias: %s. Usa la plantilla.") % ", ".join(faltan))
+
+        def cell(row, name):
+            i = idx.get(name)
+            return row[i] if i is not None and i < len(row) else None
+
+        def txt(v):
+            if v is None:
+                return ""
+            if isinstance(v, float) and v.is_integer():
+                return str(int(v))
+            return str(v).strip()
+
+        def num(v):
+            if v is None or (isinstance(v, str) and not v.strip()):
+                return None
+            if isinstance(v, (int, float)):
+                return float(v)
+            try:
+                return float(str(v).strip().replace(" ", "").replace(",", "."))
+            except ValueError:
+                return "ERROR"
+
+        Product = self.env["product.product"]
+        creados = actualizados = 0
+        errores = []
+        avisos = []
+        for n, row in enumerate(rows[1:], start=2):
+            if row is None or all(c is None or str(c).strip() == "" for c in row):
+                continue
+            cod = txt(cell(row, "codigo"))
+            nombre = txt(cell(row, "nombre"))
+            if not cod:
+                errores.append({"fila": n, "msg": "Falta el CÓDIGO"})
+                continue
+            if not nombre:
+                errores.append({"fila": n, "msg": "Falta el NOMBRE"})
+                continue
+            precio = num(cell(row, "precio venta"))
+            costo = num(cell(row, "costo"))
+            if precio == "ERROR" or costo == "ERROR":
+                errores.append({"fila": n, "msg": "PRECIO o COSTO no es un número válido"})
+                continue
+            uni_raw = norm(cell(row, "unidad"))
+            if not uni_raw:
+                unidad = "NIU"
+            elif uni_raw in UNIDAD_IMPORT:
+                unidad = UNIDAD_IMPORT[uni_raw]
+            elif uni_raw.upper() in _UNIDAD_CODES:
+                unidad = uni_raw.upper()
+            else:
+                unidad = "NIU"
+                avisos.append({"fila": n, "msg": "Unidad '%s' no reconocida, se usó UNIDAD (NIU)" % txt(cell(row, "unidad"))})
+            afe_raw = norm(cell(row, "afectacion"))
+            tax_code = AFECT_IMPORT.get(afe_raw, "1000") if afe_raw else "1000"
+
+            existing = Product.search([("default_code", "=", cod)], limit=1)
+            if not commit:
+                if existing:
+                    actualizados += 1
+                else:
+                    creados += 1
+                continue
+            vals = {"name": nombre, "l10n_pe_ne_unit_code": unidad}
+            if precio is not None:
+                vals["list_price"] = precio
+            if costo is not None:
+                vals["standard_price"] = costo
+            tax = self._l10n_pe_ne_tax_by_code(tax_code)
+            vals["taxes_id"] = [(6, 0, tax.ids if tax else [])]
+            if existing:
+                existing.write(vals)
+                actualizados += 1
+            else:
+                vals.update({"default_code": cod, "type": "service",
+                             "sale_ok": True, "company_id": self.env.company.id})
+                Product.create(vals)
+                creados += 1
+        return {"commit": commit, "creados": creados, "actualizados": actualizados,
+                "errores": errores, "avisos": avisos,
+                "totalOk": creados + actualizados, "totalError": len(errores)}
 
     # ----------------------------------------------------------------- compras
     # Compra = factura de proveedor (account.move in_invoice). TODA la lógica en

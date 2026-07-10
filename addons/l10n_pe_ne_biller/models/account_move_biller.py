@@ -3123,6 +3123,7 @@ class AccountMove(models.Model):
                     "precio": ln.price_unit or 0.0,
                     "descuento": ln.discount or 0.0,
                     "afectacion": afect,
+                    "unidad": self._l10n_pe_unit_code(ln),
                     "subtotal": ln.price_subtotal or 0.0,
                 }
             )

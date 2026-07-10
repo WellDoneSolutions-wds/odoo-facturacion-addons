@@ -119,6 +119,9 @@ class L10nPeNeCotizacion(models.Model):
                 'precio': l.precio_unitario,
                 'subtotal': l.subtotal,
                 'afectoIgv': l.afecto_igv,
+                # Unidad SUNAT derivada del producto (la cotización no la almacena; se usa
+                # para mostrar en la vista/PDF y da paridad con el comprobante que se emita).
+                'unidad': l.product_id.l10n_pe_ne_unit_code or 'NIU',
             } for l in self.line_ids],
         }
 

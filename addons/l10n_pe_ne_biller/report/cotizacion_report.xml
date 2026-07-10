@@ -40,7 +40,8 @@
                             <thead>
                                 <tr style="border-bottom:2px solid #5046E4;">
                                     <th style="text-align:left;">Descripción</th>
-                                    <th style="text-align:right; width:70px;">Cant.</th>
+                                    <th style="text-align:right; width:60px;">Cant.</th>
+                                    <th style="text-align:right; width:55px;">Und.</th>
                                     <th style="text-align:right; width:100px;">P. Unit. c/IGV</th>
                                     <th style="text-align:right; width:110px;">Subtotal</th>
                                 </tr>
@@ -52,6 +53,7 @@
                                         <t t-if="not l.afecto_igv"><span style="font-size:10px; color:#888;"> (no gravado)</span></t>
                                     </td>
                                     <td style="text-align:right;" t-esc="'%.2f' % l.cantidad"/>
+                                    <td style="text-align:right;" t-esc="l.product_id.l10n_pe_ne_unit_code or 'NIU'"/>
                                     <td style="text-align:right;" t-esc="'%.2f' % l.precio_unitario"/>
                                     <td style="text-align:right;" t-esc="'%.2f' % l.subtotal"/>
                                 </tr>

@@ -2622,7 +2622,11 @@ class AccountMove(models.Model):
         return Product.create(vals)
 
     def _l10n_pe_ne_product_dict(self, p):
-        tax = p.taxes_id.filtered(lambda t: t.type_tax_use == "sale")[:1]
+        sale_taxes = p.taxes_id.filtered(lambda t: t.type_tax_use == "sale")
+        # El ICBPER (7152) NO es la afectación: es un tributo aparte (bolsa plástica). Se
+        # deriva como flag propio y se excluye al elegir la afectación (IGV) del producto.
+        icbper = bool(sale_taxes.filtered(lambda t: t.l10n_pe_edi_tax_code == "7152"))
+        tax = sale_taxes.filtered(lambda t: t.l10n_pe_edi_tax_code != "7152")[:1]
         return {
             "id": p.id,
             "descripcion": p.name or "",
@@ -2631,6 +2635,7 @@ class AccountMove(models.Model):
             "precio": p.list_price,
             "taxCode": (tax.l10n_pe_edi_tax_code or "1000") if tax else "1000",
             "unidad": p.l10n_pe_ne_unit_code or "",
+            "icbper": icbper,
         }
 
     def _l10n_pe_ne_partner_dict(self, p):
@@ -2838,11 +2843,11 @@ class AccountMove(models.Model):
         import base64
         import xlsxwriter
 
-        headers = ["CÓDIGO", "CÓDIGO DE BARRAS", "NOMBRE", "UNIDAD", "PRECIO VENTA", "COSTO", "AFECTACIÓN"]
+        headers = ["CÓDIGO", "CÓDIGO DE BARRAS", "NOMBRE", "UNIDAD", "PRECIO VENTA", "COSTO", "AFECTACIÓN", "BOLSA"]
         ejemplos = [
-            ["PROD0001", "7751234000018", "CEMENTO SOL 42.5 KG", "UNIDAD", 33.90, 28.00, "GRAVADO"],
-            ["PROD0002", "7751234000025", "FIERRO CORRUGADO 1/2 PULG", "KILOGRAMO", 4.50, 3.20, "GRAVADO"],
-            ["PROD0003", "", "PINTURA LATEX BLANCO", "GALON", 45.00, 33.00, "GRAVADO"],
+            ["PROD0001", "7751234000018", "CEMENTO SOL 42.5 KG", "UNIDAD", 33.90, 28.00, "GRAVADO", "NO"],
+            ["PROD0002", "7751234000025", "FIERRO CORRUGADO 1/2 PULG", "KILOGRAMO", 4.50, 3.20, "GRAVADO", "NO"],
+            ["PROD0004", "", "BOLSA PLÁSTICA", "UNIDAD", 0.50, 0.10, "GRAVADO", "SI"],
         ]
         buf = io.BytesIO()
         wb = xlsxwriter.Workbook(buf, {"in_memory": True})
@@ -2869,6 +2874,9 @@ class AccountMove(models.Model):
             "• EXONERADO / INAFECTO = sin IGV\n"
             "• EXPORTACION / GRATUITO = casos especiales\n"
             "Si lo dejas vacío se asume GRAVADO."), note)
+        ws.write_comment(0, 7, (
+            "SI / NO. Márcalo SI solo si el producto es una BOLSA PLÁSTICA: "
+            "cobra el ICBPER (monto fijo por unidad) al venderlo. Vacío = NO."), note)
         # Desplegable (select) para UNIDAD, con ayuda al hacer clic en la celda.
         ws.data_validation(1, 3, 1000, 3, {
             "validate": "list", "source": [
@@ -2888,6 +2896,13 @@ class AccountMove(models.Model):
             "error_type": "information",
             "error_title": "Valor sugerido",
             "error_message": "Usa: GRAVADO, EXONERADO, INAFECTO, EXPORTACION o GRATUITO."})
+        # Desplegable (select) SI/NO para BOLSA (ICBPER).
+        ws.data_validation(1, 7, 1000, 7, {
+            "validate": "list", "source": ["SI", "NO"],
+            "input_title": "Bolsa plástica (ICBPER)",
+            "input_message": (
+                "SI solo si es una bolsa plástica: cobra ICBPER por unidad.\n"
+                "Para todo lo demás: NO (o déjalo vacío).")})
         ws.freeze_panes(1, 0)
         wi = wb.add_worksheet("Instrucciones")
         wi.set_column(0, 0, 110)
@@ -2902,7 +2917,8 @@ class AccountMove(models.Model):
             "     • GRAVADO = lleva IGV 18% (la mayoría de productos).  • EXONERADO / INAFECTO = sin IGV.",
             "     • EXPORTACION / GRATUITO = casos especiales.  Si la dejas vacía se asume GRAVADO.",
             "6. 'COSTO' es opcional (precio de compra, referencial). No afecta la facturación.",
-            "7. Sube el archivo, revisa el resumen (nuevos / actualizados / errores) y recién ahí confirma.",
+            "7. 'BOLSA' = SI solo para bolsas plásticas (cobran ICBPER por unidad al venderlas). Para el resto: NO o vacío.",
+            "8. Sube el archivo, revisa el resumen (nuevos / actualizados / errores) y recién ahí confirma.",
         ]):
             wi.write(r, 0, line)
         wb.close()
@@ -2999,6 +3015,7 @@ class AccountMove(models.Model):
             afe_raw = norm(cell(row, "afectacion"))
             tax_code = AFECT_IMPORT.get(afe_raw, "1000") if afe_raw else "1000"
             barcode = txt(cell(row, "codigo de barras"))
+            bolsa = norm(cell(row, "bolsa")) in ("si", "s")  # ICBPER: SI/NO (vacío = NO)
 
             existing = Product.search([("default_code", "=", cod)], limit=1)
             # El código de barras no puede pertenecer a OTRO producto (Odoo lo exige único).
@@ -3021,7 +3038,10 @@ class AccountMove(models.Model):
             if barcode:
                 vals["barcode"] = barcode
             tax = self._l10n_pe_ne_tax_by_code(tax_code)
-            vals["taxes_id"] = [(6, 0, tax.ids if tax else [])]
+            tax_ids = list(tax.ids) if tax else []
+            if bolsa:  # bolsa plástica → suma la tax ICBPER (monto fijo por unidad)
+                tax_ids += self._l10n_pe_ne_ensure_icbper_tax().ids
+            vals["taxes_id"] = [(6, 0, tax_ids)]
             if existing:
                 existing.write(vals)
                 actualizados += 1

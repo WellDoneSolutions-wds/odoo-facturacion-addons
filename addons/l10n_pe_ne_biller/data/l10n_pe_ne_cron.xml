@@ -38,4 +38,17 @@
     <field name="interval_type">minutes</field>
     <field name="active" eval="True"/>
   </record>
+
+  <!-- Modo instantáneo + boletas por Resumen Diario (l10n_pe_ne_biller.boletas_resumen):
+       agrupa las boletas firmadas (en_proceso) del día en un RC (tipEstado 1) y lo envía a
+       SUNAT; el CDR aceptado marca todas las boletas del grupo. No hace nada si está apagado. -->
+  <record id="ir_cron_l10n_pe_ne_resumen_boletas" model="ir.cron">
+    <field name="name">Facturador PE: resumen diario de boletas (emisión)</field>
+    <field name="model_id" ref="account.model_account_move"/>
+    <field name="state">code</field>
+    <field name="code">model._l10n_pe_cron_resumen_boletas()</field>
+    <field name="interval_number">5</field>
+    <field name="interval_type">minutes</field>
+    <field name="active" eval="True"/>
+  </record>
 </odoo>

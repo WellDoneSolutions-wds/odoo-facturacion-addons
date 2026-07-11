@@ -1263,10 +1263,11 @@ class AccountMove(models.Model):
         base = icp.get_param("l10n_pe_ne_biller.url", "http://localhost:8090").rstrip("/")
         timeout = int(icp.get_param("l10n_pe_ne_biller.timeout", "240"))
         max_intentos = int(icp.get_param("l10n_pe_ne_biller.max_intentos_envio", "30"))
-        pend = self.search(
-            [("l10n_pe_biller_state", "=", "en_proceso"), ("l10n_pe_ne_envi_zip", "!=", False)],
-            limit=50,
-        )
+        domain = [("l10n_pe_biller_state", "=", "en_proceso"), ("l10n_pe_ne_envi_zip", "!=", False)]
+        # Si las boletas van por Resumen Diario, se excluyen del envío individual (las manda el RC).
+        if icp.get_param("l10n_pe_ne_biller.boletas_resumen", "").strip().lower() in ("1", "true"):
+            domain.append(("l10n_pe_ne_tipo_doc", "!=", "03"))
+        pend = self.search(domain, limit=50)
         for move in pend:
             headers = {"X-Api-Key": move.company_id.sudo().l10n_pe_ne_api_key or ""}
             signed_xml = (move.l10n_pe_biller_xml.raw or b"").decode("utf-8") if move.l10n_pe_biller_xml else ""
@@ -4134,6 +4135,122 @@ class AccountMove(models.Model):
                 }
             ],
         }
+
+    def _l10n_pe_rc_emision_item(self, id_linea):
+        """Un ítem del Resumen Diario para EMISIÓN (tipEstado 1 = registrar la boleta ante SUNAT).
+        Misma estructura que el de anulación pero con la identidad EMITIDA y estado 1."""
+        self.ensure_one()
+        fmt = self._l10n_pe_fmt
+        serie = self.l10n_pe_ne_serie_emit or self._l10n_pe_serie_correlativo()[0]
+        correlativo = self.l10n_pe_ne_corr_emit or self._l10n_pe_serie_correlativo()[1]
+        partner = self.partner_id
+        cats = self._l10n_pe_rc_totales()
+        idl = str(id_linea)
+        tributos = [
+            {
+                "idLineaRd": idl, "ideTributoRd": t["ideTributo"], "nomTributoRd": t["nomTributo"],
+                "codTipTributoRd": t["codTipTributo"], "mtoBaseImponibleRd": t["mtoBaseImponible"],
+                "mtoTributoRd": t["mtoTributo"],
+            }
+            for t in self._l10n_pe_tributos()
+        ]
+        icbper = self._l10n_pe_total_icbper()
+        if icbper:
+            tributos.append({"idLineaRd": idl, "ideTributoRd": "7152", "nomTributoRd": "ICBPER",
+                             "codTipTributoRd": "OTH", "mtoBaseImponibleRd": "0.00", "mtoTributoRd": fmt(icbper)})
+        if not any(t["ideTributoRd"] == "1000" for t in tributos):
+            tributos.append({"idLineaRd": idl, "ideTributoRd": "1000", "nomTributoRd": "IGV",
+                             "codTipTributoRd": "VAT", "mtoBaseImponibleRd": "0.00", "mtoTributoRd": "0.00"})
+        vat = (partner.vat or "").strip()
+        cod_doc = partner.l10n_latam_identification_type_id.l10n_pe_vat_code or ""
+        if not vat:
+            cod_doc, vat = "0", "00000000"
+        elif not cod_doc:
+            cod_doc = "6" if (len(vat) == 11 and vat.isdigit()) else "1"
+        return {
+            "fecEmision": self.invoice_date.strftime("%Y-%m-%d"),
+            "fecResumen": fields.Date.context_today(self).strftime("%Y-%m-%d"),
+            "tipDocResumen": "03",
+            "idDocResumen": "%s-%s" % (serie, (correlativo or "").zfill(8)),
+            "tipDocUsuario": cod_doc, "numDocUsuario": vat,
+            "tipMoneda": self.currency_id.name or "PEN",
+            "totValGrabado": fmt(cats["gravado"]), "totValExoneado": fmt(cats["exonerado"]),
+            "totValInafecto": fmt(cats["inafecto"]), "totValExportado": fmt(cats["exportado"]),
+            "totValGratuito": fmt(cats["gratuito"]), "totOtroCargo": "0.00",
+            "totImpCpe": fmt(self.amount_total),
+            "tipDocModifico": "", "serDocModifico": "", "numDocModifico": "",
+            "tipRegPercepcion": "", "porPercepcion": "", "monBasePercepcion": "",
+            "monPercepcion": "", "monTotIncPercepcion": "",
+            "tipEstado": "1",  # 1 = adicionar/registrar la boleta
+            "tributosDocResumen": tributos,
+        }
+
+    def _l10n_pe_build_rc_emision(self, fecha_gen, correlativo):
+        """RC de EMISIÓN para un CONJUNTO de boletas (self = recordset; misma compañía y fecha)."""
+        first = self[0]
+        return {
+            "id": {
+                "ruc": first.company_id.vat or "",
+                "fechaGeneracion": fecha_gen.strftime("%Y%m%d"),
+                "correlativo": str(correlativo),
+            },
+            "emisor": first._l10n_pe_emisor(),
+            "resumenDiario": [b._l10n_pe_rc_emision_item(i + 1) for i, b in enumerate(self)],
+        }
+
+    @api.model
+    def _l10n_pe_cron_resumen_boletas(self):
+        """Envía las boletas FIRMADAS (en_proceso) por Resumen Diario (RC, tipEstado 1), agrupadas
+        por compañía + fecha de emisión (un RC por grupo). Su CDR aceptado marca todas las boletas
+        del grupo como aceptadas. Requiere instant_enabled + boletas_resumen."""
+        icp = self.env["ir.config_parameter"].sudo()
+        if icp.get_param("l10n_pe_ne_biller.boletas_resumen", "").strip().lower() not in ("1", "true"):
+            return
+        base = icp.get_param("l10n_pe_ne_biller.url", "http://localhost:8090").rstrip("/")
+        timeout = int(icp.get_param("l10n_pe_ne_biller.resumen_timeout", "80"))
+        pend = self.search(
+            [("l10n_pe_biller_state", "=", "en_proceso"), ("l10n_pe_ne_tipo_doc", "=", "03"),
+             ("l10n_pe_ne_serie_emit", "!=", False)],
+            limit=200,
+        )
+        grupos = {}
+        for m in pend:
+            grupos.setdefault((m.company_id.id, m.invoice_date), self.browse())
+            grupos[(m.company_id.id, m.invoice_date)] |= m
+        for (cid, fecha), boletas in grupos.items():
+            company = boletas[0].company_id
+            correlativo = self.env["ir.sequence"].next_by_code("l10n_pe.ne.rc") or "1"
+            fecha_gen = fields.Date.context_today(boletas[0])
+            payload = boletas._l10n_pe_build_rc_emision(fecha_gen, correlativo)
+            headers = {"X-Api-Key": company.sudo().l10n_pe_ne_api_key or ""}
+            try:
+                resp = requests.post(base + "/generator/resumenBoleta", json=payload, headers=headers, timeout=(5, timeout))
+            except Exception as e:  # noqa: BLE001 — red/SUNAT: reintenta el grupo entero
+                _logger.warning("resumen boletas %s/%s: %s (reintenta)", cid, fecha, e)
+                continue
+            cdr_b64 = resp.headers.get("X-Sunat-Cdr") if resp.status_code == 200 else None
+            code, desc = ("", "")
+            if cdr_b64:
+                try:
+                    code, desc = boletas[0]._l10n_pe_parse_cdr_codes(base64.b64decode(cdr_b64))
+                except Exception:  # noqa: BLE001
+                    pass
+            if resp.status_code == 200 and "<SummaryDocuments" in resp.text and code == "0":
+                for b in boletas:
+                    b.l10n_pe_biller_state = "enviado"
+                    b.l10n_pe_biller_message = _("Aceptado por SUNAT vía Resumen Diario (RC correlativo %s).") % correlativo
+                    b.l10n_pe_ne_envi_zip = False
+                    if cdr_b64:
+                        b._l10n_pe_store_cdr(cdr_b64)
+            else:
+                msg = (_("Resumen Diario RC (corr %s): ResponseCode %s. %s") % (correlativo, code or "-", desc or resp.text[:300]))[:2000]
+                for b in boletas:
+                    b.l10n_pe_biller_message = msg
+            self.env["bus.bus"]._sendone(
+                "l10n_pe_biller_updates", "l10n_pe_biller_update",
+                {"move_id": boletas[0].id, "state": boletas[0].l10n_pe_biller_state},
+            )
+            self.env.cr.commit()
 
     def _l10n_pe_store_baja_cdr(self, cdr_b64):
         """Guarda el CDR de la baja en un adjunto propio (no pisa el CDR original) y devuelve (code, desc)."""

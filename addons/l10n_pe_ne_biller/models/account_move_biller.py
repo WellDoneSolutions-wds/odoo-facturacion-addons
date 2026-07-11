@@ -2384,9 +2384,18 @@ class AccountMove(models.Model):
                 key = (
                     ln.product_id.display_name if ln.product_id else (ln.name or "ITEM")
                 )
-                a = prod.setdefault(key, {"cantidad": 0.0, "total": 0.0})
+                a = prod.setdefault(
+                    key, {"cantidad": 0.0, "total": 0.0, "base": 0.0, "costo": 0.0}
+                )
                 a["cantidad"] += ln.quantity or 0.0
                 a["total"] += ln.price_total or 0.0
+                # Rentabilidad: valor de venta SIN IGV (price_subtotal) vs costo del
+                # producto (standard_price × cantidad). El costo es 0 si el producto no
+                # lo tiene registrado → la utilidad de esa línea queda sobrestimada.
+                a["base"] += ln.price_subtotal or 0.0
+                a["costo"] += (ln.quantity or 0.0) * (
+                    ln.product_id.standard_price or 0.0
+                )
             kc = (m.partner_id.name or "—", m.partner_id.vat or "")
             c = cli.setdefault(kc, {"count": 0, "total": 0.0})
             c["count"] += 1
@@ -2400,11 +2409,34 @@ class AccountMove(models.Model):
                     "producto": k,
                     "cantidad": round(v["cantidad"], 2),
                     "total": round(v["total"], 2),
+                    "venta": round(v["base"], 2),
+                    "costo": round(v["costo"], 2),
+                    "utilidad": round(v["base"] - v["costo"], 2),
+                    # Margen % sobre el valor de venta. None si el producto no tiene costo
+                    # registrado (no se puede calcular una utilidad real).
+                    "margen": round((v["base"] - v["costo"]) / v["base"] * 100, 1)
+                    if v["base"] and v["costo"]
+                    else None,
                 }
                 for k, v in prod.items()
             ),
             key=lambda x: -x["total"],
         )[:50]
+        # Resumen de rentabilidad del periodo. Se calcula SOLO sobre productos con costo
+        # registrado (los de costo 0 inflarían la utilidad como si todo fuera ganancia).
+        # `conCosto`/`totalProductos` le dice al front qué tan completa es la estimación.
+        rent_venta = sum(v["base"] for v in prod.values() if v["costo"])
+        rent_costo = sum(v["costo"] for v in prod.values() if v["costo"])
+        rentabilidad = {
+            "venta": round(rent_venta, 2),
+            "costo": round(rent_costo, 2),
+            "utilidad": round(rent_venta - rent_costo, 2),
+            "margen": round((rent_venta - rent_costo) / rent_venta * 100, 1)
+            if rent_venta and rent_costo
+            else None,
+            "conCosto": sum(1 for v in prod.values() if v["costo"]),
+            "totalProductos": len(prod),
+        }
         por_cliente = sorted(
             (
                 {
@@ -2424,6 +2456,7 @@ class AccountMove(models.Model):
                 "total": round(sum(moves.mapped("amount_total")), 2),
             },
             "hoy": {"count": hoy_count, "total": round(hoy_total, 2)},
+            "rentabilidad": rentabilidad,
             "porProducto": por_producto,
             "porCliente": por_cliente,
         }

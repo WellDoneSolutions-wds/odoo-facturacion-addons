@@ -1571,7 +1571,13 @@ class AccountMove(models.Model):
         doc_type = doc_xmlid and self.env.ref(doc_xmlid, raise_if_not_found=False)
         if doc_type:
             vals["l10n_latam_document_type_id"] = doc_type.id
-        moneda = self._l10n_pe_ne_quick_currency(payload.get("moneda"))
+        if origin is not None and not payload.get("moneda"):
+            # NC/ND heredan la moneda del comprobante afectado: SUNAT exige que la
+            # nota vaya en la misma moneda que el documento original (sin esto una
+            # NC de una factura en USD salía forzada a PEN).
+            moneda = origin.currency_id
+        else:
+            moneda = self._l10n_pe_ne_quick_currency(payload.get("moneda"))
         if moneda:
             vals["currency_id"] = moneda.id
             # Comprobante en dólares: asegura el TC oficial del día en

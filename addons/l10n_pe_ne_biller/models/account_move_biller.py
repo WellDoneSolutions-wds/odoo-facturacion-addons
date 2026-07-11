@@ -1637,6 +1637,23 @@ class AccountMove(models.Model):
         move = self.env["account.move"].create(vals)
         self._l10n_pe_ne_quick_flags(move, payload)
         move.action_post()
+        # Nota de Crédito: no puede acreditar más de lo facturado. Se valida el tope
+        # contra el total del comprobante afectado antes de enviar a SUNAT (respaldo del
+        # front). La NC de importe 0 (motivo 03) pasa; una parcial no puede exceder al
+        # original. (La ND suma a la deuda, así que no lleva tope.)
+        if tipo == "07" and origin is not None and (
+            move.amount_total > (origin.amount_total or 0) + 0.05
+        ):
+            raise UserError(
+                _(
+                    "La nota de crédito (%(nc)s) no puede superar el total del comprobante "
+                    "afectado (%(orig)s)."
+                )
+                % {
+                    "nc": "%.2f" % move.amount_total,
+                    "orig": "%.2f" % (origin.amount_total or 0),
+                }
+            )
         # Si la emisión vino de "Convertir a comprobante", vincula el comprobante
         # recién posteado a la cotización de origen y la marca como 'convertida'.
         cotid = payload.get("cotizacionId")

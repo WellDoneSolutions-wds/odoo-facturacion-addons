@@ -500,6 +500,11 @@ class AccountMove(models.Model):
     l10n_pe_ne_biller_filename = fields.Char(string="Nombre de archivo del facturador", copy=False)
     l10n_pe_ne_biller_canal = fields.Char(string="Canal SUNAT (GEM/OTROS_CPE)", copy=False)
     l10n_pe_ne_envio_intentos = fields.Integer(string="Intentos de envío a SUNAT", default=0, copy=False)
+    # Resumen Diario de boletas (RC) idempotente: al enviar se guarda el TICKET; el poll usa el
+    # ticket (no re-envía → no duplica). Correlativo/fecha del RC al que pertenece la boleta.
+    l10n_pe_ne_rc_ticket = fields.Char(string="Ticket del Resumen Diario", copy=False)
+    l10n_pe_ne_rc_correlativo = fields.Char(string="Correlativo del Resumen Diario", copy=False)
+    l10n_pe_ne_rc_fecha = fields.Date(string="Fecha del Resumen Diario", copy=False)
     l10n_pe_biller_pdf = fields.Many2one(
         "ir.attachment", string="PDF (representación impresa)", copy=False
     )
@@ -4200,21 +4205,78 @@ class AccountMove(models.Model):
 
     @api.model
     def _l10n_pe_cron_resumen_boletas(self):
-        """Envía las boletas FIRMADAS (en_proceso) por Resumen Diario (RC, tipEstado 1), agrupadas
-        por compañía + fecha de emisión (un RC por grupo). Su CDR aceptado marca todas las boletas
-        del grupo como aceptadas. Requiere instant_enabled + boletas_resumen."""
+        """Boletas por Resumen Diario (RC, tipEstado 1) IDEMPOTENTE, en dos fases:
+        A) ENVIAR: agrupa las boletas firmadas SIN ticket (por compañía+fecha), manda el RC vía
+           /resumenBoleta/enviar (firma + sendSummary) y GUARDA el ticket en cada boleta. No las
+           re-envía en la próxima corrida (ya tienen ticket) → no duplica el resumen en SUNAT.
+        B) CONSULTAR: pollea los grupos que ya tienen ticket vía /ticket/estado; al llegar el CDR
+           marca las boletas aceptado/rechazado y libera el ticket. Requiere instant + boletas_resumen."""
         icp = self.env["ir.config_parameter"].sudo()
         if icp.get_param("l10n_pe_ne_biller.boletas_resumen", "").strip().lower() not in ("1", "true"):
             return
         base = icp.get_param("l10n_pe_ne_biller.url", "http://localhost:8090").rstrip("/")
         timeout = int(icp.get_param("l10n_pe_ne_biller.resumen_timeout", "80"))
-        pend = self.search(
+        STATUS_EN_PROCESO = 98
+
+        def _bus(b):
+            self.env["bus.bus"]._sendone(
+                "l10n_pe_biller_updates", "l10n_pe_biller_update",
+                {"move_id": b.id, "state": b.l10n_pe_biller_state})
+
+        # ── FASE B — consultar los grupos que YA tienen ticket (idempotente: no re-envía) ──
+        con_ticket = self.search(
+            [("l10n_pe_biller_state", "=", "en_proceso"), ("l10n_pe_ne_rc_ticket", "!=", False)],
+            limit=200,
+        )
+        por_ticket = {}
+        for m in con_ticket:
+            por_ticket.setdefault(m.l10n_pe_ne_rc_ticket, self.browse())
+            por_ticket[m.l10n_pe_ne_rc_ticket] |= m
+        for ticket, boletas in por_ticket.items():
+            company = boletas[0].company_id
+            headers = {"X-Api-Key": company.sudo().l10n_pe_ne_api_key or ""}
+            body = {"ruc": company.vat or "", "ticket": ticket, "canal": "GEM"}
+            try:
+                resp = requests.post(base + "/generator/ticket/estado", json=body, headers=headers, timeout=(5, timeout))
+            except Exception as e:  # noqa: BLE001 — red: reintenta con el MISMO ticket
+                _logger.warning("ticket %s: %s (reintenta)", ticket, e)
+                continue
+            if resp.status_code != 200:
+                continue  # transitorio: reintenta con el mismo ticket
+            data = resp.json() or {}
+            status = int(data.get("statusCode") or -1)
+            cdr = data.get("cdr") or ""
+            if status == STATUS_EN_PROCESO:
+                continue  # SUNAT aún procesa el resumen: reintenta luego (mismo ticket)
+            if cdr:
+                code, desc = boletas[0]._l10n_pe_parse_cdr_codes(base64.b64decode(cdr))
+                estado = "enviado" if code == "0" else "rechazado"
+                for b in boletas:
+                    b.l10n_pe_biller_state = estado
+                    b.l10n_pe_biller_message = (
+                        _("Aceptado por SUNAT vía Resumen Diario (RC corr %s). %s") % (b.l10n_pe_ne_rc_correlativo or "", desc or "")
+                        if code == "0" else
+                        _("Rechazado en el Resumen Diario (RC corr %s): ResponseCode %s. %s") % (b.l10n_pe_ne_rc_correlativo or "", code, desc or ""))[:2000]
+                    b.l10n_pe_ne_rc_ticket = False
+                    b.l10n_pe_ne_envi_zip = False
+                    b._l10n_pe_store_cdr(cdr)
+                    _bus(b)
+            else:
+                for b in boletas:
+                    b.l10n_pe_biller_state = "rechazado"
+                    b.l10n_pe_biller_message = _("Resumen Diario RC: SUNAT terminó con statusCode %s sin CDR.") % status
+                    b.l10n_pe_ne_rc_ticket = False
+                    _bus(b)
+            self.env.cr.commit()
+
+        # ── FASE A — enviar las boletas firmadas SIN ticket todavía (una llamada = un ticket) ──
+        sin_ticket = self.search(
             [("l10n_pe_biller_state", "=", "en_proceso"), ("l10n_pe_ne_tipo_doc", "=", "03"),
-             ("l10n_pe_ne_serie_emit", "!=", False)],
+             ("l10n_pe_ne_serie_emit", "!=", False), ("l10n_pe_ne_rc_ticket", "=", False)],
             limit=200,
         )
         grupos = {}
-        for m in pend:
+        for m in sin_ticket:
             grupos.setdefault((m.company_id.id, m.invoice_date), self.browse())
             grupos[(m.company_id.id, m.invoice_date)] |= m
         for (cid, fecha), boletas in grupos.items():
@@ -4224,32 +4286,21 @@ class AccountMove(models.Model):
             payload = boletas._l10n_pe_build_rc_emision(fecha_gen, correlativo)
             headers = {"X-Api-Key": company.sudo().l10n_pe_ne_api_key or ""}
             try:
-                resp = requests.post(base + "/generator/resumenBoleta", json=payload, headers=headers, timeout=(5, timeout))
-            except Exception as e:  # noqa: BLE001 — red/SUNAT: reintenta el grupo entero
+                resp = requests.post(base + "/generator/resumenBoleta/enviar", json=payload, headers=headers, timeout=(5, timeout))
+            except Exception as e:  # noqa: BLE001 — no se envió: reintenta con un correlativo fresco
                 _logger.warning("resumen boletas %s/%s: %s (reintenta)", cid, fecha, e)
                 continue
-            cdr_b64 = resp.headers.get("X-Sunat-Cdr") if resp.status_code == 200 else None
-            code, desc = ("", "")
-            if cdr_b64:
-                try:
-                    code, desc = boletas[0]._l10n_pe_parse_cdr_codes(base64.b64decode(cdr_b64))
-                except Exception:  # noqa: BLE001
-                    pass
-            if resp.status_code == 200 and "<SummaryDocuments" in resp.text and code == "0":
+            if resp.status_code == 200 and (resp.json() or {}).get("ticket"):
+                ticket = resp.json()["ticket"]
                 for b in boletas:
-                    b.l10n_pe_biller_state = "enviado"
-                    b.l10n_pe_biller_message = _("Aceptado por SUNAT vía Resumen Diario (RC correlativo %s).") % correlativo
-                    b.l10n_pe_ne_envi_zip = False
-                    if cdr_b64:
-                        b._l10n_pe_store_cdr(cdr_b64)
+                    b.l10n_pe_ne_rc_ticket = ticket
+                    b.l10n_pe_ne_rc_correlativo = str(correlativo)
+                    b.l10n_pe_ne_rc_fecha = fecha_gen
+                    b.l10n_pe_biller_message = _("Resumen Diario enviado (RC corr %s), ticket %s — esperando SUNAT.") % (correlativo, ticket)
             else:
-                msg = (_("Resumen Diario RC (corr %s): ResponseCode %s. %s") % (correlativo, code or "-", desc or resp.text[:300]))[:2000]
+                msg = ("Resumen RC HTTP %s: %s" % (resp.status_code, resp.text))[:1500]
                 for b in boletas:
                     b.l10n_pe_biller_message = msg
-            self.env["bus.bus"]._sendone(
-                "l10n_pe_biller_updates", "l10n_pe_biller_update",
-                {"move_id": boletas[0].id, "state": boletas[0].l10n_pe_biller_state},
-            )
             self.env.cr.commit()
 
     def _l10n_pe_store_baja_cdr(self, cdr_b64):

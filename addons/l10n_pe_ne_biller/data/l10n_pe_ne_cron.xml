@@ -25,4 +25,17 @@
     <field name="interval_type">days</field>
     <field name="active" eval="True"/>
   </record>
+
+  <!-- Modo instantáneo (l10n_pe_ne_biller.instant_enabled): envía a SUNAT en 2º plano
+       los comprobantes ya FIRMADOS (estado 'en_proceso' con ZIP pendiente). Al recibir
+       el CDR pasan a aceptado/rechazado. No hace nada si el modo instant está apagado. -->
+  <record id="ir_cron_l10n_pe_ne_enviar_pendientes" model="ir.cron">
+    <field name="name">Facturador PE: enviar a SUNAT los firmados pendientes</field>
+    <field name="model_id" ref="account.model_account_move"/>
+    <field name="state">code</field>
+    <field name="code">model._l10n_pe_cron_enviar_pendientes()</field>
+    <field name="interval_number">1</field>
+    <field name="interval_type">minutes</field>
+    <field name="active" eval="True"/>
+  </record>
 </odoo>

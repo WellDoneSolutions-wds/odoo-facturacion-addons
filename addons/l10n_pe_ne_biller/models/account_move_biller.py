@@ -492,6 +492,14 @@ class AccountMove(models.Model):
     l10n_pe_biller_cdr = fields.Many2one(
         "ir.attachment", string="CDR SUNAT", copy=False
     )
+    # Modo instantáneo: tras FIRMAR se guarda el ZIP de ENVI + el filename/canal para que el
+    # cron envíe a SUNAT en 2º plano. Se limpian al recibir el CDR (ya no hay nada pendiente).
+    l10n_pe_ne_envi_zip = fields.Text(
+        string="ZIP ENVI pendiente (base64)", copy=False,
+        help="ZIP de ENVI firmado, aún no enviado a SUNAT. El cron lo envía y lo limpia al aceptarse.")
+    l10n_pe_ne_biller_filename = fields.Char(string="Nombre de archivo del facturador", copy=False)
+    l10n_pe_ne_biller_canal = fields.Char(string="Canal SUNAT (GEM/OTROS_CPE)", copy=False)
+    l10n_pe_ne_envio_intentos = fields.Integer(string="Intentos de envío a SUNAT", default=0, copy=False)
     l10n_pe_biller_pdf = fields.Many2one(
         "ir.attachment", string="PDF (representación impresa)", copy=False
     )
@@ -1210,6 +1218,89 @@ class AccountMove(models.Model):
         else:
             self.l10n_pe_biller_message = _("Aceptado por el facturador (HTTP 200).")
 
+    def _l10n_pe_apply_signed(self, firma):
+        """Modo instantáneo: aplica el resultado de la FIRMA (sin enviar a SUNAT). Adjunta el
+        XML firmado (con eso el ticket/PDF ya funcionan), congela la identidad, guarda el ZIP
+        de ENVI + filename/canal para el envío en 2º plano y deja el estado en 'en_proceso'."""
+        self.ensure_one()
+        firma = firma or {}
+        xml = firma.get("xmlFirmado") or ""
+        if not any(tag in xml for tag in ("<Invoice", "<CreditNote", "<DebitNote")):
+            self.l10n_pe_biller_state = "error"
+            self.l10n_pe_biller_message = _("La firma no devolvió un XML válido.")
+            return False
+        serie, correlativo = self._l10n_pe_serie_correlativo()
+        att = self.env["ir.attachment"].create(
+            {
+                "name": "%s-%s-%s.xml" % (self.company_id.vat, serie, correlativo.zfill(8)),
+                "res_model": "account.move",
+                "res_id": self.id,
+                "mimetype": "application/xml",
+                "raw": xml.encode("utf-8"),
+            }
+        )
+        self.l10n_pe_biller_xml = att.id
+        self.l10n_pe_ne_tipo_doc = self._l10n_pe_document_type()
+        self.l10n_pe_ne_serie_emit = serie
+        self.l10n_pe_ne_corr_emit = correlativo.zfill(8)
+        self.l10n_pe_ne_envi_zip = firma.get("enviZip") or ""
+        self.l10n_pe_ne_biller_filename = firma.get("filename") or ""
+        self.l10n_pe_ne_biller_canal = firma.get("canal") or "GEM"
+        self.l10n_pe_ne_envio_intentos = 0
+        self.l10n_pe_biller_state = "en_proceso"
+        self.l10n_pe_biller_message = _("Firmado — ticket listo. Pendiente de envío a SUNAT.")
+        return True
+
+    @api.model
+    def _l10n_pe_cron_enviar_pendientes(self):
+        """Modo instantáneo: envía a SUNAT (2º plano) los comprobantes ya FIRMADOS que quedaron
+        en 'en_proceso' con ZIP pendiente. Al recibir el CDR pasa a aceptado/rechazado y limpia
+        el ZIP. Reintentable: un fallo de red deja el move en en_proceso para la próxima corrida
+        (con tope de intentos para no reintentar por siempre un rechazo)."""
+        icp = self.env["ir.config_parameter"].sudo()
+        if icp.get_param("l10n_pe_ne_biller.instant_enabled", "").strip().lower() not in ("1", "true"):
+            return
+        base = icp.get_param("l10n_pe_ne_biller.url", "http://localhost:8090").rstrip("/")
+        timeout = int(icp.get_param("l10n_pe_ne_biller.timeout", "240"))
+        max_intentos = int(icp.get_param("l10n_pe_ne_biller.max_intentos_envio", "30"))
+        pend = self.search(
+            [("l10n_pe_biller_state", "=", "en_proceso"), ("l10n_pe_ne_envi_zip", "!=", False)],
+            limit=50,
+        )
+        for move in pend:
+            headers = {"X-Api-Key": move.company_id.sudo().l10n_pe_ne_api_key or ""}
+            signed_xml = (move.l10n_pe_biller_xml.raw or b"").decode("utf-8") if move.l10n_pe_biller_xml else ""
+            body = {
+                "ruc": move.company_id.vat or "",
+                "filename": move.l10n_pe_ne_biller_filename or "",
+                "canal": move.l10n_pe_ne_biller_canal or "GEM",
+                "enviZip": move.l10n_pe_ne_envi_zip or "",
+                "signedXml": signed_xml,
+            }
+            ok = False
+            try:
+                resp = requests.post(base + "/generator/enviar", json=body, headers=headers, timeout=(5, timeout))
+                if resp.status_code == 200:
+                    cdr = (resp.json() or {}).get("cdr") or ""
+                    move._l10n_pe_apply_emission_response(True, signed_xml, cdr)
+                    move.l10n_pe_ne_envi_zip = False  # enviado; nada pendiente
+                    ok = True
+                else:
+                    move.l10n_pe_biller_message = ("Envío HTTP %s: %s" % (resp.status_code, resp.text))[:2000]
+            except Exception as e:  # noqa: BLE001 — red/SUNAT: reintentar
+                _logger.warning("enviar pendiente %s: %s (reintenta)", move.name, e)
+                move.l10n_pe_biller_message = ("Reintentando envío: %s" % e)[:2000]
+            if not ok:
+                move.l10n_pe_ne_envio_intentos = (move.l10n_pe_ne_envio_intentos or 0) + 1
+                if move.l10n_pe_ne_envio_intentos >= max_intentos:
+                    move.l10n_pe_biller_state = "error"
+            self.env["bus.bus"]._sendone(
+                "l10n_pe_biller_updates",
+                "l10n_pe_biller_update",
+                {"move_id": move.id, "state": move.l10n_pe_biller_state},
+            )
+            self.env.cr.commit()
+
     # -------------------------------------------------------- emisión asíncrona
     # Toggle: ir.config_parameter `l10n_pe_ne_biller.async_enabled` = "1".
     # Odoo encola en SQS (rol IAM del EC2, patrón del sibling partner_lookup) y
@@ -1449,6 +1540,9 @@ class AccountMove(models.Model):
         use_async = icp.get_param(
             "l10n_pe_ne_biller.async_enabled", ""
         ).strip().lower() in ("1", "true")
+        use_instant = icp.get_param(
+            "l10n_pe_ne_biller.instant_enabled", ""
+        ).strip().lower() in ("1", "true")
         for move in self:
             _logger.info(
                 "Procesando factura: %s (%s)", move.name, move.l10n_pe_biller_state
@@ -1458,6 +1552,29 @@ class AccountMove(models.Model):
                 continue
             if use_async:
                 move._l10n_pe_enqueue_emission(icp)
+                continue
+            if use_instant:
+                # Modo instantáneo: FIRMAR (rápido, sin SUNAT) → ticket/PDF ya disponibles y
+                # estado 'en_proceso'. El cron _l10n_pe_cron_enviar_pendientes envía a SUNAT.
+                endpoint, payload = move._l10n_pe_target()
+                headers = {"X-Api-Key": move.company_id.sudo().l10n_pe_ne_api_key or ""}
+                try:
+                    resp = requests.post(
+                        base + "/generator/" + endpoint + "/firmar",
+                        json=payload, headers=headers, timeout=(5, 30),
+                    )
+                    if resp.status_code == 200:
+                        move._l10n_pe_apply_signed(resp.json())
+                    else:
+                        move.l10n_pe_biller_state = "error"
+                        move.l10n_pe_biller_message = (
+                            "Firma HTTP %s: %s" % (resp.status_code, resp.text)
+                        )[:2000]
+                except requests.RequestException as exc:
+                    move.l10n_pe_biller_state = "error"
+                    move.l10n_pe_biller_message = (
+                        _("Error de conexión con el facturador (firma): %s") % exc
+                    )
                 continue
             endpoint, payload = move._l10n_pe_target()
             _logger.info("AAAEnviando %s: %s", endpoint, payload)

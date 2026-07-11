@@ -1487,6 +1487,10 @@ class AccountMove(models.Model):
         if not journal:
             raise UserError(_("No hay diario de ventas configurado para la compañía."))
         tipo = payload.get("tipoDoc") or "01"
+        # NC motivo 03 = "Corrección por error en la descripción": SOLO corrige el texto,
+        # NO cambia importes. La nota va con importe 0.00 (la factura original conserva su
+        # valor). Se fuerza aquí para que la correctitud fiscal no dependa del front.
+        es_correccion = tipo == "07" and str(payload.get("motivo") or "") == "03"
         # NC (07) / ND (08): resuelven el documento afectado (mismo cliente, serie derivada del original).
         origin = None
         if tipo in ("07", "08"):
@@ -1518,8 +1522,9 @@ class AccountMove(models.Model):
             lvals = {
                 "name": ln.get("descripcion") or (prod.name if prod else "ITEM"),
                 "quantity": float(ln.get("cantidad") or 1),
-                "price_unit": float(ln.get("precioUnitario") or 0),
-                "discount": disc,
+                # Motivo 03: importe 0 (solo se corrige la descripción, no el monto).
+                "price_unit": 0.0 if es_correccion else float(ln.get("precioUnitario") or 0),
+                "discount": 0.0 if es_correccion else disc,
                 "tax_ids": [(6, 0, taxes.ids if taxes else [])],
             }
             if prod:

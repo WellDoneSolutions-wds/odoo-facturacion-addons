@@ -1074,22 +1074,44 @@ class AccountMove(models.Model):
         # y omitirlo rebota (3245). El único patrón que valida en el SFS es "Credito"
         # con una cuota = total (campos válidos del contrato SFS, no se toca el biller).
         # La ND (08) valida sin datoPago, así que no se le agrega.
+        # EXCEPCIÓN: una NC de importe 0 (motivo 03, corrección de descripción) NO puede
+        # llevar el Amount de la cuota Crédito (SUNAT rechaza cac:PaymentTerms/cbc:Amount
+        # "0.00"), y omitir la FormaPago rebota con errorCode 3245. El patrón válido es
+        # "Contado" SIN <cbc:Amount>. El mapper del biller (GenericBillingMapper) defaultea
+        # el monto a "0.00" y la moneda a "" salvo que se le mande el sentinel "-", que le
+        # dice que NO setee esos campos → el FTL entonces omite el <cbc:Amount>.
         if dt == "07":
-            total = self._l10n_pe_fmt(self.amount_total)
-            fecha = self.invoice_date.strftime("%Y-%m-%d") if self.invoice_date else ""
-            moneda = self.currency_id.name or "PEN"
-            req["datoPago"] = {
-                "formaPago": "Credito",
-                "mtoNetoPendientePago": total,
-                "tipMonedaMtoNetoPendientePago": moneda,
-            }
-            req["detallePago"] = [
-                {
-                    "mtoCuotaPago": total,
-                    "fecCuotaPago": fecha,
-                    "tipMonedaCuotaPago": moneda,
+            if self.amount_total:
+                total = self._l10n_pe_fmt(self.amount_total)
+                fecha = self.invoice_date.strftime("%Y-%m-%d") if self.invoice_date else ""
+                moneda = self.currency_id.name or "PEN"
+                req["datoPago"] = {
+                    "formaPago": "Credito",
+                    "mtoNetoPendientePago": total,
+                    "tipMonedaMtoNetoPendientePago": moneda,
                 }
-            ]
+                req["detallePago"] = [
+                    {
+                        "mtoCuotaPago": total,
+                        "fecCuotaPago": fecha,
+                        "tipMonedaCuotaPago": moneda,
+                    }
+                ]
+            else:
+                # NC de importe 0 (motivo 03): SUNAT exige FormaPago=Credito con Amount>0
+                # (Contado→3246, omitir→3245, Amount 0.00→2071). Se referencia el total del
+                # comprobante afectado como monto de la cuota (el documento en sí va en 0).
+                ref = self._l10n_pe_fmt((origin.amount_total if origin else 0) or 0)
+                fecha = self.invoice_date.strftime("%Y-%m-%d") if self.invoice_date else ""
+                moneda = self.currency_id.name or "PEN"
+                req["datoPago"] = {
+                    "formaPago": "Credito",
+                    "mtoNetoPendientePago": ref,
+                    "tipMonedaMtoNetoPendientePago": moneda,
+                }
+                req["detallePago"] = [
+                    {"mtoCuotaPago": ref, "fecCuotaPago": fecha, "tipMonedaCuotaPago": moneda}
+                ]
         return req
 
     def _l10n_pe_target(self):

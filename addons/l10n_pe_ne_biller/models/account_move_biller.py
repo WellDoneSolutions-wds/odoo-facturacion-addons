@@ -1281,9 +1281,15 @@ class AccountMove(models.Model):
             try:
                 resp = requests.post(base + "/generator/enviar", json=body, headers=headers, timeout=(5, timeout))
                 if resp.status_code == 200:
-                    cdr = (resp.json() or {}).get("cdr") or ""
-                    move._l10n_pe_apply_emission_response(True, signed_xml, cdr)
-                    move.l10n_pe_ne_envi_zip = False  # enviado; nada pendiente
+                    data = resp.json() or {}
+                    if data.get("rechazado"):
+                        # SUNAT rechazó (regla de negocio) → estado final, NO reintentar.
+                        move.l10n_pe_biller_state = "rechazado"
+                        move.l10n_pe_biller_message = (_("Rechazado por SUNAT: %s") % (data.get("motivo") or ""))[:2000]
+                        move.l10n_pe_ne_envi_zip = False
+                    else:
+                        move._l10n_pe_apply_emission_response(True, signed_xml, data.get("cdr") or "")
+                        move.l10n_pe_ne_envi_zip = False  # enviado; nada pendiente
                     ok = True
                 else:
                     move.l10n_pe_biller_message = ("Envío HTTP %s: %s" % (resp.status_code, resp.text))[:2000]

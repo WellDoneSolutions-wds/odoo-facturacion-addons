@@ -1574,6 +1574,15 @@ class AccountMove(models.Model):
         moneda = self._l10n_pe_ne_quick_currency(payload.get("moneda"))
         if moneda:
             vals["currency_id"] = moneda.id
+            # Comprobante en dólares: asegura el TC oficial del día en
+            # res.currency.rate para que el PLE y la conversión a soles salgan
+            # bien. Best-effort: si la red falla, no bloquea la emisión.
+            if moneda.name and moneda.name != "PEN":
+                try:
+                    fecha_tc = vals.get("invoice_date") or fields.Date.context_today(self)
+                    self.env.company._l10n_pe_ne_ensure_tc(fecha_tc)
+                except Exception as e:  # noqa: BLE001
+                    _logger.warning("TC SUNAT: no se pudo asegurar en emisión (%s)", e)
         if origin is not None:
             vals["l10n_pe_motivo_code"] = str(
                 payload.get("motivo") or ("01" if tipo == "07" else "02")

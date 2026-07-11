@@ -153,6 +153,10 @@ class L10nPeNeApi(http.Controller):
         u = self._user(uid)
         return request.env["l10n_pe_ne.lote"].with_user(uid).with_company(u.company_id)
 
+    def _company(self, uid):
+        u = self._user(uid)
+        return u.company_id.with_user(uid).with_company(u.company_id)
+
     def _body(self):
         raw = request.httprequest.get_data() or b""
         return json.loads(raw) if raw else {}
@@ -460,6 +464,25 @@ class L10nPeNeApi(http.Controller):
             return self._json(self._move(uid).l10n_pe_ne_config())
         except Exception as e:  # noqa: BLE001
             return self._fail(e)
+
+    @http.route("/ne/api/tipo-cambio", **_GET)
+    def tipo_cambio(self, fecha=None, **kw):
+        """TC SUNAT (venta) para la fecha dada o la de hoy. {tc, fecha, fuente}."""
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        try:
+            return self._json(self._company(uid).l10n_pe_ne_tipo_cambio(fecha))
+        except Exception as e:  # noqa: BLE001
+            return self._fail(e)
+
+    @http.route("/ne/api/tipo-cambio", **_POST)
+    def set_tipo_cambio(self, **kw):
+        """Carga manual del TC (fallback sin internet). Body {fecha?, tc}."""
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(lambda: self._company(uid).l10n_pe_ne_set_tipo_cambio(self._body()))
 
     @http.route("/ne/api/series", **_GET)
     def series(self, **kw):

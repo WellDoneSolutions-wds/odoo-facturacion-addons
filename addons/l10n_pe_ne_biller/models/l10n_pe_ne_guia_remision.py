@@ -261,6 +261,150 @@ class L10nPeNeGuiaRemision(models.Model):
             'mensaje': self.l10n_pe_biller_message or '',
         }
 
+    def l10n_pe_ne_guia_detalle(self):
+        """Detalle completo para el formulario/PDF: cabecera + bienes."""
+        self.ensure_one()
+        c = self
+        return {
+            **self._l10n_pe_ne_guia_dict(),
+            'serie': c.serie, 'correlativo': c.correlativo or '',
+            'destinatarioId': c.partner_id.id,
+            'horaEmision': c.hora_emision or '',
+            'obsGuia': c.obs_guia or '',
+            'motivoTraslado': c.motivo_traslado, 'desMotivoTraslado': c.des_motivo_traslado or '',
+            'modalidadTraslado': c.modalidad_traslado,
+            'pesoBruto': c.peso_bruto, 'uniMedidaPeso': c.uni_medida_peso, 'numBultos': c.num_bultos,
+            'fechaInicioTraslado': c.fecha_inicio_traslado.strftime('%Y-%m-%d') if c.fecha_inicio_traslado else '',
+            'ubigeoPartida': c.ubigeo_partida or '', 'dirPartida': c.dir_partida or '',
+            'ubigeoLlegada': c.ubigeo_llegada or '', 'dirLlegada': c.dir_llegada or '',
+            'numPlaca': c.num_placa or '',
+            'conductorTipoDoc': c.conductor_tipo_doc or '1', 'conductorNumDoc': c.conductor_num_doc or '',
+            'conductorNombres': c.conductor_nombres or '', 'conductorApellidos': c.conductor_apellidos or '',
+            'conductorLicencia': c.conductor_licencia or '',
+            'transportistaId': c.transportista_id.id if c.transportista_id else None,
+            'transportista': c.transportista_id.name if c.transportista_id else '',
+            'numRegMtc': c.num_reg_mtc or '',
+            'comprobanteId': c.comprobante_id.id if c.comprobante_id else None,
+            'bienes': [{
+                'descripcion': l.descripcion, 'cantidad': l.cantidad, 'unidad': l.unidad or 'NIU',
+                'productId': l.product_id.id or None, 'codigo': l.product_id.default_code or '',
+            } for l in c.line_ids],
+        }
+
+    # ------------------------------------------------------------- API React
+    @api.model
+    def l10n_pe_ne_list_guias(self, query=None, limit=100, offset=None):
+        """Lista de guías (para la UI). Paginación opt-in: con `offset` devuelve {items,total}."""
+        domain = []
+        if query:
+            q = query.strip()
+            domain = ['|', ('name', 'ilike', q), ('partner_id.name', 'ilike', q)]
+        recs = self.search(domain, limit=limit, offset=offset or 0)
+        items = [g._l10n_pe_ne_guia_dict() for g in recs]
+        if offset is None:
+            return items
+        return {'items': items, 'total': self.search_count(domain)}
+
+    def _l10n_pe_ne_resolve_destinatario(self, payload):
+        partner = False
+        if payload.get('destinatarioId'):
+            partner = self.env['res.partner'].browse(int(payload['destinatarioId'])).exists()
+        if not partner and payload.get('destinatario'):
+            partner = self.env['account.move']._l10n_pe_ne_quick_partner(payload['destinatario'])
+        if not partner:
+            raise UserError(_('Indica el destinatario de la guía.'))
+        return partner
+
+    def _l10n_pe_ne_build_guia_lines(self, items):
+        vals = []
+        for it in (items or []):
+            desc = (it.get('descripcion') or '').strip()
+            prod = False
+            if it.get('productId'):
+                prod = self.env['product.product'].browse(int(it['productId'])).exists()
+                if prod and not desc:
+                    desc = prod.display_name
+            if not desc:
+                raise UserError(_('Cada bien necesita una descripción (o un producto).'))
+            vals.append((0, 0, {
+                'product_id': prod.id if prod else False,
+                'descripcion': desc,
+                'cantidad': float(it.get('cantidad') or 1),
+                'unidad': it.get('unidad') or (prod.l10n_pe_ne_unit_code if prod else '') or 'NIU',
+            }))
+        return vals
+
+    def _l10n_pe_ne_guia_header_vals(self, payload):
+        """Traduce la cabecera del payload de React a vals de escritura (sin partner ni líneas)."""
+        vals = {}
+        strmap = {
+            'serie': 'serie', 'obsGuia': 'obs_guia', 'horaEmision': 'hora_emision',
+            'motivoTraslado': 'motivo_traslado', 'desMotivoTraslado': 'des_motivo_traslado',
+            'modalidadTraslado': 'modalidad_traslado', 'uniMedidaPeso': 'uni_medida_peso',
+            'numPlaca': 'num_placa', 'conductorTipoDoc': 'conductor_tipo_doc',
+            'conductorNumDoc': 'conductor_num_doc', 'conductorNombres': 'conductor_nombres',
+            'conductorApellidos': 'conductor_apellidos', 'conductorLicencia': 'conductor_licencia',
+            'numRegMtc': 'num_reg_mtc',
+            'ubigeoPartida': 'ubigeo_partida', 'dirPartida': 'dir_partida',
+            'ubigeoLlegada': 'ubigeo_llegada', 'dirLlegada': 'dir_llegada',
+        }
+        for k, f in strmap.items():
+            if k in payload:
+                vals[f] = payload.get(k) or False
+        if payload.get('pesoBruto') is not None:
+            vals['peso_bruto'] = float(payload['pesoBruto'] or 0)
+        if payload.get('numBultos') is not None:
+            vals['num_bultos'] = int(payload['numBultos'] or 1)
+        if payload.get('fecha'):
+            vals['fecha_emision'] = payload['fecha']
+        if payload.get('fechaInicioTraslado'):
+            vals['fecha_inicio_traslado'] = payload['fechaInicioTraslado']
+        if 'transportistaId' in payload:
+            vals['transportista_id'] = int(payload['transportistaId']) if payload.get('transportistaId') else False
+        if 'comprobanteId' in payload:
+            vals['comprobante_id'] = int(payload['comprobanteId']) if payload.get('comprobanteId') else False
+        return vals
+
+    @api.model
+    def l10n_pe_ne_quick_guia(self, payload):
+        """Crea una guía (borrador) desde el payload de React."""
+        payload = payload or {}
+        partner = self._l10n_pe_ne_resolve_destinatario(payload)
+        lines = self._l10n_pe_ne_build_guia_lines(payload.get('items') or payload.get('bienes'))
+        if not lines:
+            raise UserError(_('La guía necesita al menos un bien.'))
+        vals = self._l10n_pe_ne_guia_header_vals(payload)
+        vals.update({'company_id': self.env.company.id, 'partner_id': partner.id, 'line_ids': lines})
+        g = self.create(vals)
+        return g._l10n_pe_ne_guia_dict()
+
+    @api.model
+    def l10n_pe_ne_update_guia(self, payload):
+        """Reemplaza cabecera + bienes de una guía en borrador."""
+        payload = payload or {}
+        g = self.browse(int(payload.get('id') or 0)).exists()
+        if not g:
+            raise UserError(_('Guía no encontrada.'))
+        if g.estado not in ('borrador', 'error', 'rechazado'):
+            raise UserError(_('Solo se puede editar una guía en borrador.'))
+        vals = g._l10n_pe_ne_guia_header_vals(payload)
+        if payload.get('destinatarioId') or payload.get('destinatario'):
+            vals['partner_id'] = g._l10n_pe_ne_resolve_destinatario(payload).id
+        if payload.get('items') is not None or payload.get('bienes') is not None:
+            vals['line_ids'] = [(5, 0, 0)] + g._l10n_pe_ne_build_guia_lines(
+                payload.get('items') or payload.get('bienes'))
+        g.write(vals)
+        return g._l10n_pe_ne_guia_dict()
+
+    @api.model
+    def l10n_pe_ne_delete_guia(self, rec_id):
+        g = self.browse(int(rec_id or 0)).exists()
+        if g:
+            if g.estado == 'enviado':
+                raise UserError(_('No se puede eliminar una guía ya aceptada por SUNAT.'))
+            g.unlink()
+        return {'ok': True, 'modo': 'eliminado'}
+
 
 class L10nPeNeGuiaRemisionLine(models.Model):
     _name = 'l10n_pe_ne.guia_remision.line'

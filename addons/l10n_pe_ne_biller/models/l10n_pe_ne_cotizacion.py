@@ -122,6 +122,11 @@ class L10nPeNeCotizacion(models.Model):
                 # Unidad SUNAT derivada del producto (la cotización no la almacena; se usa
                 # para mostrar en la vista/PDF y da paridad con el comprobante que se emita).
                 'unidad': l.product_id.l10n_pe_ne_unit_code or 'NIU',
+                # productId/codigo: para que "Convertir a comprobante" reuse el producto del
+                # catálogo. Sin esto la línea llegaba a Emitir sin productId y la emisión se
+                # bloqueaba ("Elige el producto del catálogo o créalo con Crear producto").
+                'productId': l.product_id.id or None,
+                'codigo': l.product_id.default_code or '',
             } for l in self.line_ids],
         }
 

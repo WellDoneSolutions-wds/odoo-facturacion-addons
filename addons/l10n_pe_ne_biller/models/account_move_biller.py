@@ -2190,6 +2190,7 @@ class AccountMove(models.Model):
             "ubigeo": d.code if d else "",
             "provincia": (d.city_id.name if d and d.city_id else (p.city or "")),
             "departamento": p.state_id.name or "",
+            "datosPago": company.l10n_pe_ne_datos_pago or "",
             "hasLogo": bool(company.logo),
         }
 
@@ -2278,6 +2279,8 @@ class AccountMove(models.Model):
                         pvals["country_id"] = d.city_id.country_id.id
         if pvals:
             p.write(pvals)
+        if "datosPago" in vals:
+            company.l10n_pe_ne_datos_pago = (vals.get("datosPago") or "").strip() or False
         if "logo" in vals:
             self._l10n_pe_ne_set_logo(company, vals.get("logo"))
         return self.l10n_pe_ne_negocio()

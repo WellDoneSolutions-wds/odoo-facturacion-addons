@@ -474,6 +474,33 @@ class L10nPeNeGuiaRemision(models.Model):
         return g._l10n_pe_ne_guia_dict()
 
     @api.model
+    def l10n_pe_ne_guia_prefill(self, move_id):
+        """Datos para precargar una guía desde un comprobante (factura/boleta): destinatario +
+        bienes (líneas del comprobante) + el comprobante como documento relacionado. NO crea nada;
+        el front abre el formulario de guía con esto y el usuario completa el traslado/transporte."""
+        move = self.env['account.move'].browse(int(move_id or 0)).exists()
+        if not move:
+            raise UserError(_('Comprobante no encontrado.'))
+        p = move.partner_id
+        bienes = [{
+            'descripcion': ln.name or (ln.product_id.display_name or ''),
+            'cantidad': ln.quantity or 1.0,
+            'unidad': move._l10n_pe_unit_code(ln),
+            'productId': ln.product_id.id or None,
+            'codigo': ln.product_id.default_code or '',
+        } for ln in move._l10n_pe_product_lines()]
+        part = move.company_id.partner_id
+        return {
+            'comprobanteId': move.id,
+            'comprobanteNumero': '%s-%s' % (move.l10n_pe_ne_serie_emit or '', move.l10n_pe_ne_corr_emit or ''),
+            'destinatario': {'id': p.id, 'razonSocial': p.name or '', 'numDoc': p.vat or ''},
+            'bienes': bienes,
+            'ubigeoPartida': (part.l10n_pe_district.code or '') if part.l10n_pe_district else '',
+            'dirPartida': part.street or '',
+            'dirLlegada': p.street or '',
+        }
+
+    @api.model
     def l10n_pe_ne_delete_guia(self, rec_id):
         g = self.browse(int(rec_id or 0)).exists()
         if g:

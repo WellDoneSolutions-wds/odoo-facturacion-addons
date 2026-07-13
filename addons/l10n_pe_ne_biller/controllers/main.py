@@ -1141,6 +1141,16 @@ class L10nPeNeApi(http.Controller):
             return self._unauth()
         return self._run(lambda: self._guia(uid).browse(int(rec_id)).l10n_pe_ne_emitir_guia())
 
+    @http.route("/ne/api/comprobantes/<int:rec_id>/guia-prefill", **_GET)
+    def guia_prefill(self, rec_id, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        try:
+            return self._json(self._guia(uid).l10n_pe_ne_guia_prefill(int(rec_id)))
+        except Exception as e:  # noqa: BLE001
+            return self._fail(e)
+
     @http.route("/ne/api/guias/<int:rec_id>/<string:kind>", **_GET)
     def guia_file(self, rec_id, kind, **kw):
         uid = self._identify()

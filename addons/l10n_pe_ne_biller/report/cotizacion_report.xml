@@ -21,6 +21,7 @@
             <t t-foreach="docs" t-as="o">
                 <t t-call="web.basic_layout">
                     <div class="page" style="font-family: Arial, Helvetica, sans-serif; color:#1f2937; font-size:12px;">
+                        <t t-set="sym" t-value="o.currency_id.symbol or o.currency_id.name"/>
 
                         <!-- Cabecera: emisor (logo + datos) · panel COTIZACIÓN -->
                         <table style="width:100%; border-collapse:collapse;">
@@ -49,6 +50,7 @@
                                             <tr><td style="text-align:left; color:#8b90a0;">Fecha</td><td style="text-align:right;"><span t-field="o.fecha"/></td></tr>
                                             <tr><td style="text-align:left; color:#8b90a0;">Validez</td><td style="text-align:right;"><span t-esc="o.validez_dias"/> día(s)</td></tr>
                                             <tr><td style="text-align:left; color:#8b90a0;">Moneda</td><td style="text-align:right;"><span t-esc="o.currency_id.name"/></td></tr>
+                                            <tr t-if="o.create_uid"><td style="text-align:left; color:#8b90a0;">Atendido por</td><td style="text-align:right;"><span t-esc="o.create_uid.name"/></td></tr>
                                         </table>
                                     </div>
                                 </td>
@@ -66,24 +68,27 @@
                         <table style="width:100%; border-collapse:collapse; margin-top:18px; font-size:12px;">
                             <thead>
                                 <tr style="background:#5046E4; color:#ffffff;">
-                                    <th style="text-align:left; padding:8px 10px; border-radius:6px 0 0 0;">Descripción</th>
-                                    <th style="text-align:right; padding:8px 10px; width:62px;">Cant.</th>
-                                    <th style="text-align:center; padding:8px 10px; width:56px;">Und.</th>
-                                    <th style="text-align:right; padding:8px 10px; width:100px;">P. Unit.</th>
-                                    <th style="text-align:right; padding:8px 10px; width:112px; border-radius:0 6px 0 0;">Subtotal</th>
+                                    <th style="text-align:center; padding:8px 8px; width:32px; border-radius:6px 0 0 0;">N°</th>
+                                    <th style="text-align:left; padding:8px 10px;">Descripción</th>
+                                    <th style="text-align:right; padding:8px 10px; width:60px;">Cant.</th>
+                                    <th style="text-align:center; padding:8px 10px; width:54px;">Und.</th>
+                                    <th style="text-align:right; padding:8px 10px; width:104px;">P. Unit.</th>
+                                    <th style="text-align:right; padding:8px 10px; width:116px; border-radius:0 6px 0 0;">Subtotal</th>
                                 </tr>
                             </thead>
                             <tbody>
                                 <tr t-foreach="o.line_ids" t-as="l"
                                     t-att-style="'border-bottom:1px solid #eef0f6;' + ('background:#fafbfe;' if l_index % 2 else '')">
+                                    <td style="text-align:center; padding:7px 8px; color:#9aa0b0;" t-esc="l_index + 1"/>
                                     <td style="padding:7px 10px;">
                                         <span t-esc="l.descripcion"/>
                                         <t t-if="not l.afecto_igv"><span style="font-size:10px; color:#9aa0b0;"> (no gravado)</span></t>
+                                        <div t-if="l.product_id.default_code" style="font-size:10px; color:#9aa0b0;">Cód.: <span t-esc="l.product_id.default_code"/></div>
                                     </td>
                                     <td style="text-align:right; padding:7px 10px;" t-esc="'%.2f' % l.cantidad"/>
                                     <td style="text-align:center; padding:7px 10px; color:#6b7280;" t-esc="l.product_id.l10n_pe_ne_unit_code or 'NIU'"/>
-                                    <td style="text-align:right; padding:7px 10px;" t-esc="'%.2f' % l.precio_unitario"/>
-                                    <td style="text-align:right; padding:7px 10px; font-weight:600;" t-esc="'%.2f' % l.subtotal"/>
+                                    <td style="text-align:right; padding:7px 10px;"><span t-esc="sym"/> <span t-esc="'%.2f' % l.precio_unitario"/></td>
+                                    <td style="text-align:right; padding:7px 10px; font-weight:600;"><span t-esc="sym"/> <span t-esc="'%.2f' % l.subtotal"/></td>
                                 </tr>
                             </tbody>
                         </table>
@@ -99,16 +104,29 @@
                                 </td>
                                 <td style="vertical-align:top; width:42%;">
                                     <table style="width:100%; font-size:12px;">
-                                        <tr><td style="padding:3px 0; color:#6b7280;">Valor venta</td><td style="text-align:right;" t-esc="'%.2f' % o.amount_untaxed"/></tr>
-                                        <tr><td style="padding:3px 0; color:#6b7280;">IGV (18%)</td><td style="text-align:right;" t-esc="'%.2f' % o.amount_tax"/></tr>
+                                        <tr><td style="padding:3px 0; color:#6b7280;">Valor venta</td><td style="text-align:right;"><span t-esc="sym"/> <span t-esc="'%.2f' % o.amount_untaxed"/></td></tr>
+                                        <tr><td style="padding:3px 0; color:#6b7280;">IGV (18%)</td><td style="text-align:right;"><span t-esc="sym"/> <span t-esc="'%.2f' % o.amount_tax"/></td></tr>
                                         <tr style="border-top:2px solid #5046E4;">
                                             <td style="padding:7px 0; font-weight:bold; font-size:14px;">Total <span t-esc="o.currency_id.name"/></td>
-                                            <td style="text-align:right; padding:7px 0; font-weight:bold; font-size:14px; color:#5046E4;" t-esc="'%.2f' % o.amount_total"/>
+                                            <td style="text-align:right; padding:7px 0; font-weight:bold; font-size:14px; color:#5046E4;"><span t-esc="sym"/> <span t-esc="'%.2f' % o.amount_total"/></td>
                                         </tr>
                                     </table>
                                 </td>
                             </tr>
                         </table>
+
+                        <!-- Importe en letras -->
+                        <div style="margin-top:12px; background:#f5f6fb; border:1px solid #e6e8f2; border-radius:8px; padding:8px 14px; font-size:11px;">
+                            <span style="color:#8b90a0; text-transform:uppercase; letter-spacing:.06em;">Son:</span>
+                            <span style="font-weight:600;" t-esc="o.l10n_pe_ne_importe_en_letras()"/>
+                        </div>
+
+                        <!-- Datos de pago (cuentas bancarias del emisor) -->
+                        <div t-if="o.company_id.l10n_pe_ne_datos_pago"
+                             style="margin-top:14px; border:1px solid #e6e8f2; border-left:3px solid #5046E4; border-radius:8px; padding:10px 15px;">
+                            <div style="font-size:10px; text-transform:uppercase; letter-spacing:.08em; color:#5046E4; font-weight:600; margin-bottom:4px;">Datos de pago</div>
+                            <div style="font-size:11px; color:#374151; white-space:pre-line;" t-esc="o.company_id.l10n_pe_ne_datos_pago"/>
+                        </div>
 
                         <!-- Pie -->
                         <div style="margin-top:30px; border-top:1px solid #eef0f6; padding-top:10px; font-size:10px; color:#9aa0b0; text-align:center;">

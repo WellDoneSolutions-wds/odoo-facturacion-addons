@@ -249,6 +249,22 @@ class L10nPeNeCotizacion(models.Model):
             cot.unlink()
         return {'ok': True, 'modo': 'eliminado'}
 
+    def l10n_pe_ne_importe_en_letras(self):
+        """Importe total en letras, formato peruano estándar: 'OCHO CON 50/100 SOLES'.
+        Se usa en la representación impresa (el 'SON:'). Degradación segura: si num2words
+        falla, cae al amount_to_text nativo de la moneda."""
+        self.ensure_one()
+        entero = int(self.amount_total)
+        centimos = int(round((self.amount_total - entero) * 100))
+        moneda = {'PEN': 'SOLES', 'USD': 'DÓLARES AMERICANOS'}.get(
+            self.currency_id.name, self.currency_id.name or '')
+        try:
+            from num2words import num2words  # Odoo ya depende de num2words
+            letras = num2words(entero, lang='es').upper()
+        except Exception:  # noqa: BLE001
+            return self.currency_id.amount_to_text(self.amount_total)
+        return "%s CON %02d/100 %s" % (letras, centimos, moneda)
+
     def l10n_pe_ne_get_pdf_b64(self):
         """Renderiza el PDF (reporte QWeb) y lo devuelve en base64."""
         self.ensure_one()

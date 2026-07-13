@@ -11,6 +11,7 @@ Fase 1 (modelo + orquestación): modelo + emisión al biller. La pantalla React 
 import base64
 import json
 import logging
+import re
 
 import requests
 
@@ -320,7 +321,8 @@ class L10nPeNeGuiaRemision(models.Model):
         }
 
     def l10n_pe_ne_get_files(self, kind=None):
-        """Devuelve {xml, cdr} en base64 del documento, para que el controller los sirva."""
+        """Devuelve {xml, cdr, pdf} en base64, para que el controller los sirva. El PDF (QWeb) se
+        renderiza a demanda; xml/cdr salen de los adjuntos guardados al emitir."""
         self.ensure_one()
         def b64(att):
             v = att.datas
@@ -330,7 +332,41 @@ class L10nPeNeGuiaRemision(models.Model):
             out['xml'] = b64(self.l10n_pe_biller_xml)
         if self.l10n_pe_biller_cdr:
             out['cdr'] = b64(self.l10n_pe_biller_cdr)
+        if kind in (None, 'pdf'):
+            try:
+                pdf, _ct = self.env['ir.actions.report']._render_qweb_pdf(
+                    'l10n_pe_ne_biller.action_report_guia', res_ids=self.ids)
+                out['pdf'] = base64.b64encode(pdf).decode()
+            except Exception:  # noqa: BLE001
+                if kind == 'pdf':
+                    raise
         return out
+
+    # --------------------------------------------------- representación impresa
+    def l10n_pe_ne_qr_data(self):
+        """Cadena del QR (formato SUNAT): RUC|tipoDoc|serie|correlativo|fecEmision|tipDocDest|numDocDest|hash."""
+        self.ensure_one()
+        hash_ = ''
+        if self.l10n_pe_biller_xml:
+            m = re.search(rb'<ds:DigestValue>([^<]*)</ds:DigestValue>', self.l10n_pe_biller_xml.raw or b'')
+            if m:
+                hash_ = m.group(1).decode()
+        d = self.partner_id
+        tipdoc = '6' if len(d.vat or '') == 11 else '1' if len(d.vat or '') == 8 else '6'
+        return '|'.join([
+            self.company_id.vat or '', '09', self.serie or '', self.correlativo or '',
+            self.fecha_emision.strftime('%Y-%m-%d') if self.fecha_emision else '',
+            tipdoc, d.vat or '', hash_,
+        ])
+
+    def l10n_pe_ne_qr_datauri(self):
+        """QR como data-URI PNG para la representación impresa. '' si no se puede generar."""
+        self.ensure_one()
+        try:
+            png = self.env['ir.actions.report'].barcode('QR', self.l10n_pe_ne_qr_data(), width=220, height=220)
+            return 'data:image/png;base64,' + base64.b64encode(png).decode()
+        except Exception:  # noqa: BLE001
+            return ''
 
     # ------------------------------------------------------------- API React
     @api.model

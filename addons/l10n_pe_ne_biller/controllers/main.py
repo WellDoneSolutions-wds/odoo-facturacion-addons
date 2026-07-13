@@ -1141,6 +1141,18 @@ class L10nPeNeApi(http.Controller):
             return self._unauth()
         return self._run(lambda: self._guia(uid).browse(int(rec_id)).l10n_pe_ne_emitir_guia())
 
+    @http.route("/ne/api/guias/<int:rec_id>/<string:kind>", **_GET)
+    def guia_file(self, rec_id, kind, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        try:
+            return self._serve_file(
+                uid, "l10n_pe_ne.guia_remision", rec_id, kind, "l10n_pe_ne_get_files", "guia"
+            )
+        except Exception as e:  # noqa: BLE001
+            return self._fail(e)
+
     # ------------------------------------------------------------------- caja
     @http.route("/ne/api/caja", **_GET)
     def caja_actual(self, **kw):

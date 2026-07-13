@@ -8,6 +8,7 @@ espera el biller (mismas claves que `GreCabeceraRequest`) y guarda el resultado.
 Fase 1 (modelo + orquestación): modelo + emisión al biller. La pantalla React (controller
 `/ne/api/guias`) y el PDF llegan en fases siguientes.
 """
+import base64
 import json
 import logging
 
@@ -207,13 +208,29 @@ class L10nPeNeGuiaRemision(models.Model):
         if self.modalidad_traslado == '01' and not self.transportista_id:
             raise UserError(_('Transporte público: indica el transportista.'))
 
-    def l10n_pe_ne_emitir_guia(self):
-        """Emite la GRE al biller (`POST /generator/guia`). El biller firma, envía a SUNAT y
-        recoge el CDR. Guarda el XML firmado y marca el estado.
+    def _l10n_pe_ne_store_cdr(self, cdr_b64):
+        """Guarda el CDR (zip base64 del header X-Sunat-Cdr) como adjunto en l10n_pe_biller_cdr
+        y devuelve (responseCode, description). Reusa el parser del CDR de account.move."""
+        self.ensure_one()
+        try:
+            cdr_bytes = base64.b64decode(cdr_b64)
+        except Exception:  # noqa: BLE001
+            return '', ''
+        att = self.env['ir.attachment'].create({
+            'name': 'R%s-09-%s.zip' % (self.company_id.vat or '', self.name),
+            'res_model': 'l10n_pe_ne.guia_remision',
+            'res_id': self.id,
+            'mimetype': 'application/zip',
+            'raw': cdr_bytes,
+        })
+        self.l10n_pe_biller_cdr = att.id
+        return self.env['account.move']._l10n_pe_parse_cdr_codes(cdr_bytes)
 
-        NOTA (Fase 1): el endpoint del biller responde el XML firmado; el CDR se publica en S3
-        (no viene en la respuesta HTTP). La lectura del CDR para confirmar aceptación queda como
-        seguimiento (exponerlo en el biller o leerlo de S3)."""
+    def l10n_pe_ne_emitir_guia(self):
+        """Emite la GRE al biller (`POST /generator/guia`): firma, envía a SUNAT y recoge el CDR.
+        El biller devuelve el XML firmado en el body y el CDR (zip base64) en el header
+        `X-Sunat-Cdr` (igual que la factura). Guarda ambos y fija el estado según el ResponseCode
+        del CDR (0 = aceptado)."""
         self.ensure_one()
         self._l10n_pe_ne_validar()
         icp = self.env['ir.config_parameter'].sudo()
@@ -227,7 +244,7 @@ class L10nPeNeGuiaRemision(models.Model):
         except requests.RequestException as exc:
             self.estado = 'error'
             self.l10n_pe_biller_message = _('Error de conexión con el facturador: %s') % exc
-            return
+            return self._l10n_pe_ne_guia_dict()
         body = resp.text or ''
         if resp.status_code == 200 and any(t in body for t in ('<DespatchAdvice', '<ext:UBLExtensions')):
             att = self.env['ir.attachment'].create({
@@ -238,8 +255,19 @@ class L10nPeNeGuiaRemision(models.Model):
                 'raw': body.encode('utf-8'),
             })
             self.l10n_pe_biller_xml = att.id
-            self.estado = 'enviado'
-            self.l10n_pe_biller_message = _('Guía firmada y enviada a SUNAT.')
+            cdr_b64 = resp.headers.get('X-Sunat-Cdr')
+            if cdr_b64:
+                code, desc = self._l10n_pe_ne_store_cdr(cdr_b64)
+                if code == '0':
+                    self.estado = 'enviado'
+                    self.l10n_pe_biller_message = _('Aceptada por SUNAT — CDR ResponseCode 0. %s') % (desc or '')
+                else:
+                    self.estado = 'rechazado'
+                    self.l10n_pe_biller_message = _('Rechazada por SUNAT (ResponseCode %s). %s') % (code or '—', desc or '')
+            else:
+                # Firmada y enviada, pero SUNAT aún no devolvió el CDR (ticket en proceso).
+                self.estado = 'en_proceso'
+                self.l10n_pe_biller_message = _('Firmada y enviada; SUNAT aún no devolvió el CDR.')
         else:
             self.estado = 'rechazado' if resp.status_code == 400 else 'error'
             self.l10n_pe_biller_message = ('HTTP %s: %s' % (resp.status_code, body))[:2000]
@@ -290,6 +318,19 @@ class L10nPeNeGuiaRemision(models.Model):
                 'productId': l.product_id.id or None, 'codigo': l.product_id.default_code or '',
             } for l in c.line_ids],
         }
+
+    def l10n_pe_ne_get_files(self, kind=None):
+        """Devuelve {xml, cdr} en base64 del documento, para que el controller los sirva."""
+        self.ensure_one()
+        def b64(att):
+            v = att.datas
+            return v.decode('ascii') if isinstance(v, (bytes, bytearray)) else (v or '')
+        out = {}
+        if self.l10n_pe_biller_xml:
+            out['xml'] = b64(self.l10n_pe_biller_xml)
+        if self.l10n_pe_biller_cdr:
+            out['cdr'] = b64(self.l10n_pe_biller_cdr)
+        return out
 
     # ------------------------------------------------------------- API React
     @api.model

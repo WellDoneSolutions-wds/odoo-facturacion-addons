@@ -37,6 +37,9 @@ class L10nPeNeCotizacion(models.Model):
                                      copy=False, index=True,
                                      help='Comprobante generado al convertir esta cotización.')
     notas = fields.Text(string='Notas / condiciones')
+    forma_pago = fields.Char(string='Forma de pago', help='p.ej. Contado, Crédito 30 días.')
+    tiempo_entrega = fields.Char(string='Tiempo de entrega', help='p.ej. 5 días hábiles.')
+    garantia = fields.Char(string='Garantía')
     currency_id = fields.Many2one('res.currency', required=True,
                                   default=lambda s: s.env.company.currency_id)
     company_id = fields.Many2one('res.company', required=True, index=True,
@@ -49,6 +52,12 @@ class L10nPeNeCotizacion(models.Model):
                                  currency_field='currency_id')
     amount_total = fields.Monetary(string='Total', compute='_compute_amounts', store=True,
                                    currency_field='currency_id')
+    # Desglose para la representación impresa (op. gravada base vs op. exonerada/inafecta).
+    amount_op_gravada = fields.Monetary(string='Op. gravada', compute='_compute_amounts',
+                                        store=True, currency_field='currency_id')
+    amount_op_no_gravada = fields.Monetary(string='Op. exonerada/inafecta',
+                                           compute='_compute_amounts', store=True,
+                                           currency_field='currency_id')
 
     @api.depends('line_ids.subtotal', 'line_ids.afecto_igv')
     def _compute_amounts(self):
@@ -62,6 +71,8 @@ class L10nPeNeCotizacion(models.Model):
             cot.amount_total = round(bruto_gravado + no_gravado, 2)
             cot.amount_tax = round(bruto_gravado - base_gravado, 2)
             cot.amount_untaxed = round(cot.amount_total - cot.amount_tax, 2)
+            cot.amount_op_gravada = base_gravado
+            cot.amount_op_no_gravada = round(no_gravado, 2)
 
     @api.model_create_multi
     def create(self, vals_list):
@@ -111,12 +122,18 @@ class L10nPeNeCotizacion(models.Model):
         return {
             **self._l10n_pe_ne_cotizacion_dict(),
             'notas': self.notas or '',
+            'formaPago': self.forma_pago or '',
+            'tiempoEntrega': self.tiempo_entrega or '',
+            'garantia': self.garantia or '',
             'valorVenta': self.amount_untaxed,
             'igv': self.amount_tax,
+            'opGravada': self.amount_op_gravada,
+            'opNoGravada': self.amount_op_no_gravada,
             'lineas': [{
                 'descripcion': l.descripcion or (l.product_id.display_name or ''),
                 'cantidad': l.cantidad,
                 'precio': l.precio_unitario,
+                'descuento': l.descuento,
                 'subtotal': l.subtotal,
                 'afectoIgv': l.afecto_igv,
                 # Unidad SUNAT derivada del producto (la cotización no la almacena; se usa
@@ -165,8 +182,21 @@ class L10nPeNeCotizacion(models.Model):
                 'descripcion': desc,
                 'cantidad': float(it.get('cantidad') or 1),
                 'precio_unitario': float(it.get('precio') or 0),
+                'descuento': float(it.get('descuento') or 0),
                 'afecto_igv': bool(it.get('afectoIgv', True)),
             }))
+        return vals
+
+    @staticmethod
+    def _l10n_pe_ne_condiciones_vals(payload):
+        """Extrae las condiciones comerciales del payload (formaPago/tiempoEntrega/garantia)
+        como vals de escritura; solo incluye las claves presentes."""
+        vals = {}
+        for key, field in (('formaPago', 'forma_pago'),
+                           ('tiempoEntrega', 'tiempo_entrega'),
+                           ('garantia', 'garantia')):
+            if key in payload:
+                vals[field] = (payload.get(key) or '').strip() or False
         return vals
 
     def _l10n_pe_ne_resolve_partner(self, payload):
@@ -206,6 +236,7 @@ class L10nPeNeCotizacion(models.Model):
             'validez_dias': int(payload.get('validezDias') or 15),
             'notas': payload.get('notas') or False,
             'line_ids': lines,
+            **self._l10n_pe_ne_condiciones_vals(payload),
         })
         return cot._l10n_pe_ne_cotizacion_dict()
 
@@ -225,6 +256,7 @@ class L10nPeNeCotizacion(models.Model):
             vals['validez_dias'] = int(payload['validezDias'])
         if 'notas' in payload:
             vals['notas'] = payload.get('notas') or False
+        vals.update(self._l10n_pe_ne_condiciones_vals(payload))
         if payload.get('estado'):
             vals['estado'] = payload['estado']
         if payload.get('items') is not None or payload.get('lineas') is not None:
@@ -284,13 +316,17 @@ class L10nPeNeCotizacionLine(models.Model):
     descripcion = fields.Char(string='Descripción', required=True)
     cantidad = fields.Float(string='Cantidad', default=1.0)
     precio_unitario = fields.Monetary(string='P. unitario', currency_field='currency_id')
+    descuento = fields.Float(string='Descuento %', default=0.0,
+                             help='Descuento porcentual aplicado a la línea (0–100).')
     afecto_igv = fields.Boolean(string='Afecto a IGV', default=True)
     subtotal = fields.Monetary(string='Subtotal', compute='_compute_subtotal', store=True,
                                currency_field='currency_id')
     currency_id = fields.Many2one(related='cotizacion_id.currency_id', store=True)
     company_id = fields.Many2one(related='cotizacion_id.company_id', store=True, index=True)
 
-    @api.depends('cantidad', 'precio_unitario')
+    @api.depends('cantidad', 'precio_unitario', 'descuento')
     def _compute_subtotal(self):
         for line in self:
-            line.subtotal = round((line.cantidad or 0.0) * (line.precio_unitario or 0.0), 2)
+            bruto = (line.cantidad or 0.0) * (line.precio_unitario or 0.0)
+            factor = 1.0 - min(max(line.descuento or 0.0, 0.0), 100.0) / 100.0
+            line.subtotal = round(bruto * factor, 2)

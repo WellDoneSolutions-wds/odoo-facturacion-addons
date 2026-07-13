@@ -68,26 +68,28 @@
                         <table style="width:100%; border-collapse:collapse; margin-top:18px; font-size:12px;">
                             <thead>
                                 <tr style="background:#5046E4; color:#ffffff;">
-                                    <th style="text-align:center; padding:8px 8px; width:32px; border-radius:6px 0 0 0;">N°</th>
+                                    <th style="text-align:center; padding:8px 6px; width:28px; border-radius:6px 0 0 0;">N°</th>
                                     <th style="text-align:left; padding:8px 10px;">Descripción</th>
-                                    <th style="text-align:right; padding:8px 10px; width:60px;">Cant.</th>
-                                    <th style="text-align:center; padding:8px 10px; width:54px;">Und.</th>
-                                    <th style="text-align:right; padding:8px 10px; width:104px;">P. Unit.</th>
-                                    <th style="text-align:right; padding:8px 10px; width:116px; border-radius:0 6px 0 0;">Subtotal</th>
+                                    <th style="text-align:right; padding:8px 8px; width:54px;">Cant.</th>
+                                    <th style="text-align:center; padding:8px 8px; width:50px;">Und.</th>
+                                    <th style="text-align:right; padding:8px 8px; width:92px;">P. Unit.</th>
+                                    <th style="text-align:right; padding:8px 8px; width:52px;">Desc.</th>
+                                    <th style="text-align:right; padding:8px 10px; width:104px; border-radius:0 6px 0 0;">Subtotal</th>
                                 </tr>
                             </thead>
                             <tbody>
                                 <tr t-foreach="o.line_ids" t-as="l"
                                     t-att-style="'border-bottom:1px solid #eef0f6;' + ('background:#fafbfe;' if l_index % 2 else '')">
-                                    <td style="text-align:center; padding:7px 8px; color:#9aa0b0;" t-esc="l_index + 1"/>
+                                    <td style="text-align:center; padding:7px 6px; color:#9aa0b0;" t-esc="l_index + 1"/>
                                     <td style="padding:7px 10px;">
                                         <span t-esc="l.descripcion"/>
                                         <t t-if="not l.afecto_igv"><span style="font-size:10px; color:#9aa0b0;"> (no gravado)</span></t>
                                         <div t-if="l.product_id.default_code" style="font-size:10px; color:#9aa0b0;">Cód.: <span t-esc="l.product_id.default_code"/></div>
                                     </td>
-                                    <td style="text-align:right; padding:7px 10px;" t-esc="'%.2f' % l.cantidad"/>
-                                    <td style="text-align:center; padding:7px 10px; color:#6b7280;" t-esc="l.product_id.l10n_pe_ne_unit_code or 'NIU'"/>
-                                    <td style="text-align:right; padding:7px 10px;"><span t-esc="sym"/> <span t-esc="'%.2f' % l.precio_unitario"/></td>
+                                    <td style="text-align:right; padding:7px 8px;" t-esc="'%.2f' % l.cantidad"/>
+                                    <td style="text-align:center; padding:7px 8px; color:#6b7280;" t-esc="l.product_id.l10n_pe_ne_unit_code or 'NIU'"/>
+                                    <td style="text-align:right; padding:7px 8px;"><span t-esc="sym"/> <span t-esc="'%.2f' % l.precio_unitario"/></td>
+                                    <td style="text-align:right; padding:7px 8px; color:#6b7280;" t-esc="(str(int(round(l.descuento))) + '%') if l.descuento else '—'"/>
                                     <td style="text-align:right; padding:7px 10px; font-weight:600;"><span t-esc="sym"/> <span t-esc="'%.2f' % l.subtotal"/></td>
                                 </tr>
                             </tbody>
@@ -96,14 +98,25 @@
                         <!-- Notas + totales -->
                         <table style="width:100%; margin-top:18px; border-collapse:collapse;">
                             <tr>
-                                <td style="vertical-align:top; width:58%; padding-right:20px;">
+                                <td style="vertical-align:top; width:56%; padding-right:20px;">
+                                    <!-- Condiciones comerciales -->
+                                    <t t-if="o.forma_pago or o.tiempo_entrega or o.garantia">
+                                        <div style="font-size:10px; text-transform:uppercase; letter-spacing:.08em; color:#8b90a0; margin-bottom:3px;">Condiciones</div>
+                                        <table style="font-size:11px; color:#4b5563; margin-bottom:8px;">
+                                            <tr t-if="o.forma_pago"><td style="color:#8b90a0; padding-right:8px;">Forma de pago</td><td style="font-weight:600;" t-esc="o.forma_pago"/></tr>
+                                            <tr t-if="o.tiempo_entrega"><td style="color:#8b90a0; padding-right:8px;">Tiempo de entrega</td><td style="font-weight:600;" t-esc="o.tiempo_entrega"/></tr>
+                                            <tr t-if="o.garantia"><td style="color:#8b90a0; padding-right:8px;">Garantía</td><td style="font-weight:600;" t-esc="o.garantia"/></tr>
+                                        </table>
+                                    </t>
                                     <t t-if="o.notas">
-                                        <div style="font-size:10px; text-transform:uppercase; letter-spacing:.08em; color:#8b90a0; margin-bottom:3px;">Notas / condiciones</div>
+                                        <div style="font-size:10px; text-transform:uppercase; letter-spacing:.08em; color:#8b90a0; margin-bottom:3px;">Notas</div>
                                         <div style="font-size:11px; color:#4b5563; white-space:pre-line;" t-esc="o.notas"/>
                                     </t>
                                 </td>
-                                <td style="vertical-align:top; width:42%;">
+                                <td style="vertical-align:top; width:44%;">
                                     <table style="width:100%; font-size:12px;">
+                                        <tr t-if="o.amount_op_gravada"><td style="padding:3px 0; color:#6b7280;">Op. gravada</td><td style="text-align:right;"><span t-esc="sym"/> <span t-esc="'%.2f' % o.amount_op_gravada"/></td></tr>
+                                        <tr t-if="o.amount_op_no_gravada"><td style="padding:3px 0; color:#6b7280;">Op. exonerada / inafecta</td><td style="text-align:right;"><span t-esc="sym"/> <span t-esc="'%.2f' % o.amount_op_no_gravada"/></td></tr>
                                         <tr><td style="padding:3px 0; color:#6b7280;">Valor venta</td><td style="text-align:right;"><span t-esc="sym"/> <span t-esc="'%.2f' % o.amount_untaxed"/></td></tr>
                                         <tr><td style="padding:3px 0; color:#6b7280;">IGV (18%)</td><td style="text-align:right;"><span t-esc="sym"/> <span t-esc="'%.2f' % o.amount_tax"/></td></tr>
                                         <tr style="border-top:2px solid #5046E4;">

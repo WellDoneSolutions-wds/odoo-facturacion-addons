@@ -1254,6 +1254,20 @@ class AccountMove(models.Model):
         self.l10n_pe_ne_envio_intentos = 0
         self.l10n_pe_biller_state = "en_proceso"
         self.l10n_pe_biller_message = _("Firmado — ticket listo. Pendiente de envío a SUNAT.")
+        # Pre-generar la representación impresa YA (con el XML firmado) para que la
+        # descarga sea instantánea: así el adjunto existe cuando el usuario da clic y
+        # no depende de un cold-start del micro en ese momento (que llegaba a expirar y
+        # dejaba la sensación de "no se puede descargar mientras procesa"). No es fatal:
+        # si el micro falla aquí, queda como fallback la generación on-demand.
+        try:
+            self._l10n_pe_get_pdf_attachment()  # A4
+            if self.l10n_pe_ne_tipo_doc in ("01", "03"):
+                self._l10n_pe_get_pdf_attachment(formato="TICKET")  # 80mm
+        except Exception as exc:  # noqa: BLE001
+            _logger.warning(
+                "No se pudo pre-generar el PDF tras firmar %s: %s",
+                self.name or self.id, exc,
+            )
         return True
 
     @api.model
@@ -3663,21 +3677,27 @@ class AccountMove(models.Model):
             out["xml"] = b64(self.l10n_pe_biller_xml)
         if self.l10n_pe_biller_cdr:
             out["cdr"] = b64(self.l10n_pe_biller_cdr)
-        try:
-            pdf_att = (
-                self._l10n_pe_get_pdf_attachment() if self.l10n_pe_biller_xml else False
-            )
-            if pdf_att:
-                out["pdf"] = b64(pdf_att)
-        except Exception:
-            pass
-        if kind == "ticket":
+        # El PDF/ticket se renderiza contra el micro a partir del XML firmado (no del
+        # CDR): está disponible apenas FIRMADO (en_proceso), sin esperar a SUNAT. Se
+        # genera SOLO el formato pedido (un pedido de xml/cdr no debe disparar el micro).
+        # Antes se generaba el PDF SIEMPRE y se tragaba cualquier fallo → el controller
+        # devolvía un 404 opaco ("no tiene pdf") aunque el problema real fuera el micro
+        # caído o un timeout. Ahora, si falla justo el formato pedido, se propaga el
+        # motivo real (el controller lo traduce a un mensaje legible).
+        want_pdf = kind in (None, "pdf", "ticket")
+        if want_pdf and self.l10n_pe_biller_xml:
+            es_ticket = kind == "ticket"
             try:
-                t = self._l10n_pe_get_pdf_attachment(formato="TICKET") if self.l10n_pe_biller_xml else False
-                if t:
-                    out["ticket"] = b64(t)
+                att = self._l10n_pe_get_pdf_attachment(
+                    formato="TICKET" if es_ticket else "A4"
+                )
+                if att:
+                    out["ticket" if es_ticket else "pdf"] = b64(att)
             except Exception:
-                pass
+                # Solo se propaga cuando el cliente pedía EXACTAMENTE ese archivo; si el
+                # kind era None (uso interno/tests) se degrada en silencio como antes.
+                if kind in ("pdf", "ticket"):
+                    raise
         return out
 
     # ------------------------------------------------- descargas / PDF (SFS 2.4)

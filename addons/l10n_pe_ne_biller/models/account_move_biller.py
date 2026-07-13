@@ -1195,6 +1195,11 @@ class AccountMove(models.Model):
             self.l10n_pe_biller_message = (body_text or "")[:2000]
             return
         serie, correlativo = self._l10n_pe_serie_correlativo()
+        # Si el XML ya se adjuntó estando en_proceso (firma del modo instant o
+        # item "firmado" del worker async), reemplazarlo: sin esto quedaban DOS
+        # adjuntos idénticos colgados del move (el viejo huérfano en el panel).
+        if self.l10n_pe_biller_xml:
+            self.l10n_pe_biller_xml.unlink()
         att = self.env["ir.attachment"].create(
             {
                 "name": "%s-%s-%s.xml"
@@ -1435,6 +1440,63 @@ class AccountMove(models.Model):
                 "async biller: PDF no adjuntado en %s: %s", self.name, exc
             )
 
+    def _l10n_pe_async_attach_firmado(self, s3c, bucket, item):
+        """Modo async: cuando el worker publica un item intermedio (status no
+        terminal, p.ej. "firmado") con `xml_s3_key`, adjunta el XML firmado a
+        `l10n_pe_biller_xml` y toma el PDF del worker si ya está (`pdf_s3_key`).
+        Con el XML adjunto, la descarga funciona estando en_proceso aunque el PDF
+        aún no llegue (el botón cae al camino on-demand de siempre). NO cambia el
+        estado (sigue en_proceso) y NO genera el PDF localmente — el worker es el
+        único generador; ver nota al final del cuerpo. Best-effort e idempotente:
+        sin `xml_s3_key` no hace nada; con el XML ya adjunto solo intenta traer
+        el PDF del worker."""
+        self.ensure_one()
+        if self.l10n_pe_biller_xml:
+            # Ya adjuntado en una corrida previa: solo traer el PDF del worker si aún no está.
+            self._l10n_pe_attach_async_pdf(s3c, bucket, item)
+            return
+        xml_key = (item.get("xml_s3_key") or {}).get("S", "")
+        if not xml_key:
+            return
+        try:
+            body = (
+                s3c.get_object(Bucket=bucket, Key=xml_key)["Body"]
+                .read()
+                .decode("iso-8859-1")
+            )
+        except Exception as exc:  # noqa: BLE001 — aún no está en S3: se reintenta al próximo poll
+            _logger.warning(
+                "async biller: XML firmado aún no disponible en %s: %s", self.name, exc
+            )
+            return
+        if not any(tag in body for tag in ("<Invoice", "<CreditNote", "<DebitNote")):
+            return
+        serie, correlativo = self._l10n_pe_serie_correlativo()
+        att = self.env["ir.attachment"].create(
+            {
+                "name": "%s-%s-%s.xml"
+                % (self.company_id.vat, serie, correlativo.zfill(8)),
+                "res_model": "account.move",
+                "res_id": self.id,
+                "mimetype": "application/xml",
+                # Normalizado a utf-8 igual que _l10n_pe_apply_emission_response, para que
+                # el render del PDF (que decodifica utf-8) no rompa con tildes/ñ.
+                "raw": body.encode("utf-8"),
+            }
+        )
+        self.l10n_pe_biller_xml = att.id
+        self.l10n_pe_ne_tipo_doc = self._l10n_pe_document_type()
+        self.l10n_pe_ne_serie_emit = serie
+        self.l10n_pe_ne_corr_emit = correlativo.zfill(8)
+        # PDF: SOLO el pre-generado por el worker (pdf_s3_key). NO generarlo acá:
+        # en la ventana "firmado" el worker ya está invocando biller-pdf con este
+        # mismo XML — hacerlo también desde el cron duplicaba renders (A4+ticket
+        # síncronos de hasta ~60s c/u DENTRO del loop del poll: un import masivo
+        # bloqueaba el cron varios minutos) y el PDF del worker terminaba
+        # descartado. Si el usuario descarga antes de que llegue, el botón usa el
+        # camino on-demand de siempre — posible porque el XML ya quedó adjunto.
+        self._l10n_pe_attach_async_pdf(s3c, bucket, item)
+
     @api.model
     def _l10n_pe_cron_poll_async(self):
         """Recoge resultados de emisiones asíncronas: lee el item del worker en
@@ -1487,6 +1549,14 @@ class AccountMove(models.Model):
                     move.l10n_pe_biller_message = (
                         (item.get("message") or {}).get("S") or ""
                     )[:2000]
+                else:
+                    # Item intermedio (p.ej. "firmado"): el worker ya firmó pero SUNAT aún
+                    # no responde. Adjunta el XML firmado + PDF para que ticket/PDF estén
+                    # disponibles AL TOQUE en en_proceso, sin esperar el CDR. Sigue en
+                    # en_proceso: sin transición de estado no se postea al chatter ni se
+                    # notifica (evita spam en cada corrida mientras el item no es final).
+                    move._l10n_pe_async_attach_firmado(s3c, bucket, item)
+                    continue
                 # El form no refresca solo cuando escribe un cron: el chatter sí.
                 move.message_post(
                     body=_("Facturador (async): %s — %s")

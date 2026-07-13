@@ -1,0 +1,276 @@
+"""Guía de Remisión Electrónica (GRE) — Remitente (tipo 09).
+
+A diferencia de los comprobantes (factura/boleta/NC/ND), la GRE NO es un account.move:
+es un documento de traslado propio, con su serie (T###) y su canal en el biller
+(`POST /generator/guia`, REST/OAuth2 — ver ms-ne-biller). Este modelo arma el payload que
+espera el biller (mismas claves que `GreCabeceraRequest`) y guarda el resultado.
+
+Fase 1 (modelo + orquestación): modelo + emisión al biller. La pantalla React (controller
+`/ne/api/guias`) y el PDF llegan en fases siguientes.
+"""
+import json
+import logging
+
+import requests
+
+from odoo import _, api, fields, models
+from odoo.exceptions import UserError
+
+_logger = logging.getLogger(__name__)
+
+# Catálogo 20 SUNAT — motivo de traslado (los más comunes).
+MOTIVOS_TRASLADO = [
+    ('01', 'Venta'),
+    ('02', 'Compra'),
+    ('04', 'Traslado entre establecimientos de la misma empresa'),
+    ('08', 'Importación'),
+    ('09', 'Exportación'),
+    ('13', 'Otros'),
+    ('14', 'Venta sujeta a confirmación del comprador'),
+    ('18', 'Traslado emisor itinerante de comprobantes de pago'),
+    ('19', 'Traslado a zona primaria'),
+]
+# Catálogo 18 SUNAT — modalidad de traslado.
+MODALIDADES_TRASLADO = [
+    ('01', 'Transporte público'),
+    ('02', 'Transporte privado'),
+]
+UNIDADES_PESO = [('KGM', 'Kilogramos'), ('TNE', 'Toneladas')]
+
+
+class L10nPeNeGuiaRemision(models.Model):
+    _name = 'l10n_pe_ne.guia_remision'
+    _description = 'Guía de Remisión Electrónica (Remitente)'
+    _order = 'fecha_emision desc, id desc'
+
+    name = fields.Char(string='Número', required=True, copy=False, readonly=True,
+                       default=lambda s: _('Nueva'), index=True)
+    serie = fields.Char(string='Serie', default='T001', required=True)
+    correlativo = fields.Char(string='Correlativo', copy=False, readonly=True)
+    company_id = fields.Many2one('res.company', required=True, index=True,
+                                 default=lambda s: s.env.company)
+    # Estado espeja al del comprobante (para reusar la UI de estados en el front).
+    estado = fields.Selection([
+        ('borrador', 'Borrador'),
+        ('en_proceso', 'En proceso'),
+        ('enviado', 'Aceptado'),
+        ('rechazado', 'Rechazado'),
+        ('error', 'Error'),
+        ('anulado', 'Anulado'),
+    ], string='Estado', default='borrador', required=True, copy=False)
+
+    # -------------------------------------------------------------- cabecera
+    fecha_emision = fields.Date(string='Fecha de emisión', required=True,
+                               default=fields.Date.context_today)
+    hora_emision = fields.Char(string='Hora de emisión', default='08:00:00')
+    obs_guia = fields.Char(string='Observación')
+
+    # Destinatario (a quién se le entrega). El tipo/num doc se derivan del partner.
+    partner_id = fields.Many2one('res.partner', string='Destinatario', required=True, index=True)
+
+    # Datos del traslado.
+    motivo_traslado = fields.Selection(MOTIVOS_TRASLADO, string='Motivo de traslado',
+                                       default='01', required=True)
+    des_motivo_traslado = fields.Char(string='Descripción del motivo')
+    peso_bruto = fields.Float(string='Peso bruto total', required=True, default=1.0)
+    uni_medida_peso = fields.Selection(UNIDADES_PESO, string='Unidad de peso',
+                                       default='KGM', required=True)
+    num_bultos = fields.Integer(string='N° de bultos', default=1)
+    modalidad_traslado = fields.Selection(MODALIDADES_TRASLADO, string='Modalidad',
+                                          default='02', required=True)
+    fecha_inicio_traslado = fields.Date(string='Fecha de inicio del traslado', required=True,
+                                        default=fields.Date.context_today)
+
+    # Transporte público (modalidad 01): datos del transportista.
+    transportista_id = fields.Many2one('res.partner', string='Transportista')
+    num_reg_mtc = fields.Char(string='Registro MTC')
+
+    # Transporte privado (modalidad 02): vehículo + conductor.
+    num_placa = fields.Char(string='Placa del vehículo')
+    conductor_tipo_doc = fields.Selection([('1', 'DNI'), ('4', 'Carné ext.'), ('7', 'Pasaporte')],
+                                          string='Tipo doc. conductor', default='1')
+    conductor_num_doc = fields.Char(string='N° doc. conductor')
+    conductor_nombres = fields.Char(string='Nombres del conductor')
+    conductor_apellidos = fields.Char(string='Apellidos del conductor')
+    conductor_licencia = fields.Char(string='Licencia de conducir')
+
+    # Puntos de partida y llegada (ubigeo cat. 13 + dirección).
+    ubigeo_partida = fields.Char(string='Ubigeo de partida', required=True)
+    dir_partida = fields.Char(string='Dirección de partida', required=True)
+    ubigeo_llegada = fields.Char(string='Ubigeo de llegada', required=True)
+    dir_llegada = fields.Char(string='Dirección de llegada', required=True)
+
+    # Comprobante relacionado (docRelacionado): la factura/boleta que origina el traslado.
+    comprobante_id = fields.Many2one('account.move', string='Comprobante relacionado',
+                                     copy=False, index=True)
+
+    line_ids = fields.One2many('l10n_pe_ne.guia_remision.line', 'guia_id',
+                               string='Bienes', copy=True)
+
+    # Resultado del biller.
+    l10n_pe_biller_xml = fields.Many2one('ir.attachment', string='XML firmado', copy=False)
+    l10n_pe_biller_cdr = fields.Many2one('ir.attachment', string='CDR', copy=False)
+    l10n_pe_biller_message = fields.Char(string='Mensaje del facturador', copy=False)
+    num_ticket = fields.Char(string='N° de ticket SUNAT', copy=False)
+
+    @api.model_create_multi
+    def create(self, vals_list):
+        for vals in vals_list:
+            if not vals.get('name') or vals.get('name') == _('Nueva'):
+                serie = vals.get('serie') or 'T001'
+                corr = self.env['ir.sequence'].next_by_code('l10n_pe.ne.guia_remision') or '1'
+                vals['correlativo'] = corr
+                vals['name'] = '%s-%s' % (serie, corr)
+        return super().create(vals_list)
+
+    # -------------------------------------------------------- payload biller
+    def _l10n_pe_ne_doc_tipo(self, partner):
+        """Tipo de documento SUNAT (cat. 6) del partner: 6=RUC, 1=DNI, según longitud del vat."""
+        vat = (partner.vat or '').strip()
+        return '6' if len(vat) == 11 else '1' if len(vat) == 8 else '6'
+
+    def _l10n_pe_ne_build_gre_payload(self):
+        """Arma el JSON que espera el biller (`GreRequest`). Claves = campos de GreCabeceraRequest."""
+        self.ensure_one()
+        dest = self.partner_id
+        cab = {
+            'ublVersionId': '2.1',
+            'customizationId': '2.0',
+            'fecEmision': self.fecha_emision.strftime('%Y-%m-%d') if self.fecha_emision else '',
+            'horEmision': self.hora_emision or '08:00:00',
+            'obsGuia': self.obs_guia or '',
+            'tipDocDestinatario': self._l10n_pe_ne_doc_tipo(dest),
+            'numDocDestinatario': dest.vat or '',
+            'rznSocialDestinatario': dest.name or '',
+            'motTrasladoDatosEnvio': self.motivo_traslado,
+            'desMotivoTrasladoDatosEnvio': self.des_motivo_traslado
+                or dict(MOTIVOS_TRASLADO).get(self.motivo_traslado, ''),
+            'psoBrutoTotalBienesDatosEnvio': '%.3f' % (self.peso_bruto or 0.0),
+            'uniMedidaPesoBrutoDatosEnvio': self.uni_medida_peso or 'KGM',
+            'numBultosDatosEnvio': str(self.num_bultos or 1),
+            'modTrasladoDatosEnvio': self.modalidad_traslado,
+            'fecInicioTrasladoDatosEnvio': self.fecha_inicio_traslado.strftime('%Y-%m-%d')
+                if self.fecha_inicio_traslado else '',
+            'ubiPartida': self.ubigeo_partida or '',
+            'dirPartida': self.dir_partida or '',
+            'ubiLlegada': self.ubigeo_llegada or '',
+            'dirLlegada': self.dir_llegada or '',
+        }
+        if self.modalidad_traslado == '01':  # transporte público
+            t = self.transportista_id
+            cab.update({
+                'tipDocTransportista': self._l10n_pe_ne_doc_tipo(t) if t else '6',
+                'numDocTransportista': (t.vat or '') if t else '',
+                'nomTransportista': (t.name or '') if t else '',
+                'numRegMtcTransportista': self.num_reg_mtc or '',
+            })
+        else:  # transporte privado
+            cab.update({
+                'numPlacaTransPrivado': self.num_placa or '',
+                'tipDocIdeConductorTransPrivado': self.conductor_tipo_doc or '1',
+                'numDocIdeConductorTransPrivado': self.conductor_num_doc or '',
+                'nomConductorTransPrivado': self.conductor_nombres or '',
+                'apeConductorTransPrivado': self.conductor_apellidos or '',
+                'licConductorTransPrivado': self.conductor_licencia or '',
+            })
+        detalle = [{
+            'canItem': '%.2f' % (l.cantidad or 0.0),
+            'uniMedidaItem': l.unidad or 'NIU',
+            'desItem': l.descripcion or (l.product_id.display_name or ''),
+            'codItem': (l.product_id.default_code or '') if l.product_id else '',
+        } for l in self.line_ids]
+        doc_rel = []
+        if self.comprobante_id and self.comprobante_id.l10n_pe_ne_serie_emit:
+            doc_rel.append({
+                'codTipDocRel': self.comprobante_id.l10n_pe_ne_tipo_doc or '01',
+                'numDocRel': '%s-%s' % (self.comprobante_id.l10n_pe_ne_serie_emit,
+                                        self.comprobante_id.l10n_pe_ne_corr_emit or ''),
+            })
+        return {
+            'id': {
+                'ruc': self.company_id.vat or '',
+                'serie': self.serie or 'T001',
+                'correlativo': self.correlativo or '1',
+            },
+            'cabecera': cab,
+            'detalle': detalle,
+            'docRelacionado': doc_rel,
+        }
+
+    # ------------------------------------------------------------- emisión
+    def _l10n_pe_ne_validar(self):
+        self.ensure_one()
+        if not self.line_ids:
+            raise UserError(_('La guía necesita al menos un bien.'))
+        if self.modalidad_traslado == '02' and not (self.num_placa and self.conductor_num_doc):
+            raise UserError(_('Transporte privado: indica la placa y el documento del conductor.'))
+        if self.modalidad_traslado == '01' and not self.transportista_id:
+            raise UserError(_('Transporte público: indica el transportista.'))
+
+    def l10n_pe_ne_emitir_guia(self):
+        """Emite la GRE al biller (`POST /generator/guia`). El biller firma, envía a SUNAT y
+        recoge el CDR. Guarda el XML firmado y marca el estado.
+
+        NOTA (Fase 1): el endpoint del biller responde el XML firmado; el CDR se publica en S3
+        (no viene en la respuesta HTTP). La lectura del CDR para confirmar aceptación queda como
+        seguimiento (exponerlo en el biller o leerlo de S3)."""
+        self.ensure_one()
+        self._l10n_pe_ne_validar()
+        icp = self.env['ir.config_parameter'].sudo()
+        base = icp.get_param('l10n_pe_ne_biller.url', 'http://localhost:8090').rstrip('/')
+        timeout = int(icp.get_param('l10n_pe_ne_biller.timeout', '240'))
+        headers = {'X-Api-Key': self.company_id.sudo().l10n_pe_ne_api_key or ''}
+        payload = self._l10n_pe_ne_build_gre_payload()
+        try:
+            resp = requests.post(base + '/generator/guia', json=payload, headers=headers,
+                                 timeout=(5, timeout))
+        except requests.RequestException as exc:
+            self.estado = 'error'
+            self.l10n_pe_biller_message = _('Error de conexión con el facturador: %s') % exc
+            return
+        body = resp.text or ''
+        if resp.status_code == 200 and any(t in body for t in ('<DespatchAdvice', '<ext:UBLExtensions')):
+            att = self.env['ir.attachment'].create({
+                'name': '%s-09-%s.xml' % (self.company_id.vat, self.name),
+                'res_model': 'l10n_pe_ne.guia_remision',
+                'res_id': self.id,
+                'mimetype': 'application/xml',
+                'raw': body.encode('utf-8'),
+            })
+            self.l10n_pe_biller_xml = att.id
+            self.estado = 'enviado'
+            self.l10n_pe_biller_message = _('Guía firmada y enviada a SUNAT.')
+        else:
+            self.estado = 'rechazado' if resp.status_code == 400 else 'error'
+            self.l10n_pe_biller_message = ('HTTP %s: %s' % (resp.status_code, body))[:2000]
+        return self._l10n_pe_ne_guia_dict()
+
+    # ------------------------------------------------------- serialización
+    def _l10n_pe_ne_guia_dict(self):
+        self.ensure_one()
+        return {
+            'id': self.id,
+            'numero': self.name,
+            'destinatario': self.partner_id.name or '',
+            'destinatarioDoc': self.partner_id.vat or '',
+            'fecha': self.fecha_emision.strftime('%Y-%m-%d') if self.fecha_emision else '',
+            'estado': self.estado,
+            'motivo': dict(MOTIVOS_TRASLADO).get(self.motivo_traslado, self.motivo_traslado),
+            'modalidad': dict(MODALIDADES_TRASLADO).get(self.modalidad_traslado, ''),
+            'items': len(self.line_ids),
+            'mensaje': self.l10n_pe_biller_message or '',
+        }
+
+
+class L10nPeNeGuiaRemisionLine(models.Model):
+    _name = 'l10n_pe_ne.guia_remision.line'
+    _description = 'Bien de la guía de remisión'
+    _order = 'id'
+
+    guia_id = fields.Many2one('l10n_pe_ne.guia_remision', string='Guía',
+                              required=True, ondelete='cascade', index=True)
+    product_id = fields.Many2one('product.product', string='Producto')
+    descripcion = fields.Char(string='Descripción', required=True)
+    cantidad = fields.Float(string='Cantidad', default=1.0)
+    unidad = fields.Char(string='Unidad (cat. 03)', default='NIU')
+    company_id = fields.Many2one(related='guia_id.company_id', store=True, index=True)

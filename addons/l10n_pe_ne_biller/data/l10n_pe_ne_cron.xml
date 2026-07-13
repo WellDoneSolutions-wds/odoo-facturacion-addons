@@ -12,4 +12,43 @@
     <field name="interval_type">minutes</field>
     <field name="active" eval="True"/>
   </record>
+
+  <!-- Cachea el tipo de cambio SUNAT del día en res.currency.rate (para PLE,
+       contabilidad y comprobantes en USD). Tolerante: si la API falla, no hace
+       nada y la próxima emisión usa el último TC conocido / la carga manual. -->
+  <record id="ir_cron_l10n_pe_ne_tipo_cambio" model="ir.cron">
+    <field name="name">Facturador PE: tipo de cambio SUNAT del día</field>
+    <field name="model_id" ref="base.model_res_company"/>
+    <field name="state">code</field>
+    <field name="code">model._l10n_pe_ne_cron_tc()</field>
+    <field name="interval_number">1</field>
+    <field name="interval_type">days</field>
+    <field name="active" eval="True"/>
+  </record>
+
+  <!-- Modo instantáneo (l10n_pe_ne_biller.instant_enabled): envía a SUNAT en 2º plano
+       los comprobantes ya FIRMADOS (estado 'en_proceso' con ZIP pendiente). Al recibir
+       el CDR pasan a aceptado/rechazado. No hace nada si el modo instant está apagado. -->
+  <record id="ir_cron_l10n_pe_ne_enviar_pendientes" model="ir.cron">
+    <field name="name">Facturador PE: enviar a SUNAT los firmados pendientes</field>
+    <field name="model_id" ref="account.model_account_move"/>
+    <field name="state">code</field>
+    <field name="code">model._l10n_pe_cron_enviar_pendientes()</field>
+    <field name="interval_number">1</field>
+    <field name="interval_type">minutes</field>
+    <field name="active" eval="True"/>
+  </record>
+
+  <!-- Modo instantáneo + boletas por Resumen Diario (l10n_pe_ne_biller.boletas_resumen):
+       agrupa las boletas firmadas (en_proceso) del día en un RC (tipEstado 1) y lo envía a
+       SUNAT; el CDR aceptado marca todas las boletas del grupo. No hace nada si está apagado. -->
+  <record id="ir_cron_l10n_pe_ne_resumen_boletas" model="ir.cron">
+    <field name="name">Facturador PE: resumen diario de boletas (emisión)</field>
+    <field name="model_id" ref="account.model_account_move"/>
+    <field name="state">code</field>
+    <field name="code">model._l10n_pe_cron_resumen_boletas()</field>
+    <field name="interval_number">5</field>
+    <field name="interval_type">minutes</field>
+    <field name="active" eval="True"/>
+  </record>
 </odoo>

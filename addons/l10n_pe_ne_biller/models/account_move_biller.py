@@ -77,6 +77,43 @@ UOM_CODE_BY_XMLID = {
 }
 DEFAULT_UNIT_CODE = "NIU"
 
+# Importación de productos por Excel: mapeo tolerante de TEXTO en español (o el propio código
+# cat.03) → código SUNAT cat.03. Clave = texto normalizado (minúsculas, sin tildes). Espejo del
+# catálogo del front (lib/unidades.ts) más sinónimos comunes de ferretería/bodega.
+UNIDAD_IMPORT = {
+    "unidad": "NIU", "unidades": "NIU", "und": "NIU", "unid": "NIU", "niu": "NIU", "u": "NIU",
+    "servicio": "ZZ", "servicios": "ZZ", "serv": "ZZ", "zz": "ZZ",
+    "kilogramo": "KGM", "kilogramos": "KGM", "kilo": "KGM", "kilos": "KGM", "kg": "KGM", "kgm": "KGM",
+    "gramo": "GRM", "gramos": "GRM", "gr": "GRM", "grm": "GRM",
+    "libra": "LBR", "libras": "LBR", "lb": "LBR", "lbr": "LBR",
+    "tonelada": "TNE", "toneladas": "TNE", "tonelada metrica": "TNE", "ton": "TNE", "tne": "TNE",
+    "litro": "LTR", "litros": "LTR", "lt": "LTR", "ltr": "LTR",
+    "galon": "GLL", "galones": "GLL", "gln": "GLL", "gll": "GLL",
+    "barril": "BLL", "barriles": "BLL", "bll": "BLL",
+    "lata": "CA", "latas": "CA", "ca": "CA",
+    "caja": "BX", "cajas": "BX", "bx": "BX",
+    "millar": "MLL", "millares": "MLL", "mll": "MLL",
+    "metro": "MTR", "metros": "MTR", "mt": "MTR", "mtr": "MTR", "m": "MTR",
+    "centimetro": "CMT", "centimetros": "CMT", "cm": "CMT", "cmt": "CMT",
+    "metro cuadrado": "MTK", "m2": "MTK", "mtk": "MTK",
+    "metro cubico": "MTQ", "m3": "MTQ", "mtq": "MTQ",
+    "dia": "DAY", "dias": "DAY", "day": "DAY",
+    "hora": "HUR", "horas": "HUR", "hr": "HUR", "hur": "HUR",
+    "juego": "SET", "juegos": "SET", "set": "SET",
+    "docena": "DPC", "docenas": "DPC", "dpc": "DPC",
+    "onza": "ONZ", "onzas": "ONZ", "onz": "ONZ",
+}
+# Afectación IGV: texto (cat.07 humano) → código cat.07 que espera el producto.
+AFECT_IMPORT = {
+    "gravado": "1000", "gravada": "1000",
+    "exonerado": "9997", "exonerada": "9997",
+    "inafecto": "9998", "inafecta": "9998",
+    "exportacion": "9995",
+    "gratuito": "9996", "gratuita": "9996",
+}
+# Códigos cat.03 válidos (para aceptar el código directo en el Excel, ej. "KGM").
+_UNIDAD_CODES = set(UNIDAD_IMPORT.values())
+
 
 class AccountMoveLine(models.Model):
     _inherit = "account.move.line"
@@ -455,6 +492,19 @@ class AccountMove(models.Model):
     l10n_pe_biller_cdr = fields.Many2one(
         "ir.attachment", string="CDR SUNAT", copy=False
     )
+    # Modo instantáneo: tras FIRMAR se guarda el ZIP de ENVI + el filename/canal para que el
+    # cron envíe a SUNAT en 2º plano. Se limpian al recibir el CDR (ya no hay nada pendiente).
+    l10n_pe_ne_envi_zip = fields.Text(
+        string="ZIP ENVI pendiente (base64)", copy=False,
+        help="ZIP de ENVI firmado, aún no enviado a SUNAT. El cron lo envía y lo limpia al aceptarse.")
+    l10n_pe_ne_biller_filename = fields.Char(string="Nombre de archivo del facturador", copy=False)
+    l10n_pe_ne_biller_canal = fields.Char(string="Canal SUNAT (GEM/OTROS_CPE)", copy=False)
+    l10n_pe_ne_envio_intentos = fields.Integer(string="Intentos de envío a SUNAT", default=0, copy=False)
+    # Resumen Diario de boletas (RC) idempotente: al enviar se guarda el TICKET; el poll usa el
+    # ticket (no re-envía → no duplica). Correlativo/fecha del RC al que pertenece la boleta.
+    l10n_pe_ne_rc_ticket = fields.Char(string="Ticket del Resumen Diario", copy=False)
+    l10n_pe_ne_rc_correlativo = fields.Char(string="Correlativo del Resumen Diario", copy=False)
+    l10n_pe_ne_rc_fecha = fields.Date(string="Fecha del Resumen Diario", copy=False)
     l10n_pe_biller_pdf = fields.Many2one(
         "ir.attachment", string="PDF (representación impresa)", copy=False
     )
@@ -583,10 +633,13 @@ class AccountMove(models.Model):
         )
 
     def _l10n_pe_unit_code(self, line):
-        """Código de unidad SUNAT (cat. 03) de la línea: override por línea, luego override manual en
-        la UoM, si no el mapeo por XMLID de la unidad estándar de Odoo, si no 'NIU'."""
+        """Código de unidad SUNAT (cat. 03) de la línea: override por línea, luego el guardado en el
+        producto (POS/masiva no mandan unidad por línea), luego override manual en la UoM, si no el
+        mapeo por XMLID de la unidad estándar de Odoo, si no 'NIU'."""
         if line.l10n_pe_ne_unit_code:
             return line.l10n_pe_ne_unit_code
+        if line.product_id.l10n_pe_ne_unit_code:
+            return line.product_id.l10n_pe_ne_unit_code
         uom = line.product_uom_id
         if not uom:
             return DEFAULT_UNIT_CODE
@@ -1034,22 +1087,44 @@ class AccountMove(models.Model):
         # y omitirlo rebota (3245). El único patrón que valida en el SFS es "Credito"
         # con una cuota = total (campos válidos del contrato SFS, no se toca el biller).
         # La ND (08) valida sin datoPago, así que no se le agrega.
+        # EXCEPCIÓN: una NC de importe 0 (motivo 03, corrección de descripción) NO puede
+        # llevar el Amount de la cuota Crédito (SUNAT rechaza cac:PaymentTerms/cbc:Amount
+        # "0.00"), y omitir la FormaPago rebota con errorCode 3245. El patrón válido es
+        # "Contado" SIN <cbc:Amount>. El mapper del biller (GenericBillingMapper) defaultea
+        # el monto a "0.00" y la moneda a "" salvo que se le mande el sentinel "-", que le
+        # dice que NO setee esos campos → el FTL entonces omite el <cbc:Amount>.
         if dt == "07":
-            total = self._l10n_pe_fmt(self.amount_total)
-            fecha = self.invoice_date.strftime("%Y-%m-%d") if self.invoice_date else ""
-            moneda = self.currency_id.name or "PEN"
-            req["datoPago"] = {
-                "formaPago": "Credito",
-                "mtoNetoPendientePago": total,
-                "tipMonedaMtoNetoPendientePago": moneda,
-            }
-            req["detallePago"] = [
-                {
-                    "mtoCuotaPago": total,
-                    "fecCuotaPago": fecha,
-                    "tipMonedaCuotaPago": moneda,
+            if self.amount_total:
+                total = self._l10n_pe_fmt(self.amount_total)
+                fecha = self.invoice_date.strftime("%Y-%m-%d") if self.invoice_date else ""
+                moneda = self.currency_id.name or "PEN"
+                req["datoPago"] = {
+                    "formaPago": "Credito",
+                    "mtoNetoPendientePago": total,
+                    "tipMonedaMtoNetoPendientePago": moneda,
                 }
-            ]
+                req["detallePago"] = [
+                    {
+                        "mtoCuotaPago": total,
+                        "fecCuotaPago": fecha,
+                        "tipMonedaCuotaPago": moneda,
+                    }
+                ]
+            else:
+                # NC de importe 0 (motivo 03): SUNAT exige FormaPago=Credito con Amount>0
+                # (Contado→3246, omitir→3245, Amount 0.00→2071). Se referencia el total del
+                # comprobante afectado como monto de la cuota (el documento en sí va en 0).
+                ref = self._l10n_pe_fmt((origin.amount_total if origin else 0) or 0)
+                fecha = self.invoice_date.strftime("%Y-%m-%d") if self.invoice_date else ""
+                moneda = self.currency_id.name or "PEN"
+                req["datoPago"] = {
+                    "formaPago": "Credito",
+                    "mtoNetoPendientePago": ref,
+                    "tipMonedaMtoNetoPendientePago": moneda,
+                }
+                req["detallePago"] = [
+                    {"mtoCuotaPago": ref, "fecCuotaPago": fecha, "tipMonedaCuotaPago": moneda}
+                ]
         return req
 
     def _l10n_pe_target(self):
@@ -1147,6 +1222,110 @@ class AccountMove(models.Model):
             ) % (code, desc or "")
         else:
             self.l10n_pe_biller_message = _("Aceptado por el facturador (HTTP 200).")
+
+    def _l10n_pe_apply_signed(self, firma):
+        """Modo instantáneo: aplica el resultado de la FIRMA (sin enviar a SUNAT). Adjunta el
+        XML firmado (con eso el ticket/PDF ya funcionan), congela la identidad, guarda el ZIP
+        de ENVI + filename/canal para el envío en 2º plano y deja el estado en 'en_proceso'."""
+        self.ensure_one()
+        firma = firma or {}
+        xml = firma.get("xmlFirmado") or ""
+        if not any(tag in xml for tag in ("<Invoice", "<CreditNote", "<DebitNote")):
+            self.l10n_pe_biller_state = "error"
+            self.l10n_pe_biller_message = _("La firma no devolvió un XML válido.")
+            return False
+        serie, correlativo = self._l10n_pe_serie_correlativo()
+        att = self.env["ir.attachment"].create(
+            {
+                "name": "%s-%s-%s.xml" % (self.company_id.vat, serie, correlativo.zfill(8)),
+                "res_model": "account.move",
+                "res_id": self.id,
+                "mimetype": "application/xml",
+                "raw": xml.encode("utf-8"),
+            }
+        )
+        self.l10n_pe_biller_xml = att.id
+        self.l10n_pe_ne_tipo_doc = self._l10n_pe_document_type()
+        self.l10n_pe_ne_serie_emit = serie
+        self.l10n_pe_ne_corr_emit = correlativo.zfill(8)
+        self.l10n_pe_ne_envi_zip = firma.get("enviZip") or ""
+        self.l10n_pe_ne_biller_filename = firma.get("filename") or ""
+        self.l10n_pe_ne_biller_canal = firma.get("canal") or "GEM"
+        self.l10n_pe_ne_envio_intentos = 0
+        self.l10n_pe_biller_state = "en_proceso"
+        self.l10n_pe_biller_message = _("Firmado — ticket listo. Pendiente de envío a SUNAT.")
+        # Pre-generar la representación impresa YA (con el XML firmado) para que la
+        # descarga sea instantánea: así el adjunto existe cuando el usuario da clic y
+        # no depende de un cold-start del micro en ese momento (que llegaba a expirar y
+        # dejaba la sensación de "no se puede descargar mientras procesa"). No es fatal:
+        # si el micro falla aquí, queda como fallback la generación on-demand.
+        try:
+            self._l10n_pe_get_pdf_attachment()  # A4
+            if self.l10n_pe_ne_tipo_doc in ("01", "03"):
+                self._l10n_pe_get_pdf_attachment(formato="TICKET")  # 80mm
+        except Exception as exc:  # noqa: BLE001
+            _logger.warning(
+                "No se pudo pre-generar el PDF tras firmar %s: %s",
+                self.name or self.id, exc,
+            )
+        return True
+
+    @api.model
+    def _l10n_pe_cron_enviar_pendientes(self):
+        """Modo instantáneo: envía a SUNAT (2º plano) los comprobantes ya FIRMADOS que quedaron
+        en 'en_proceso' con ZIP pendiente. Al recibir el CDR pasa a aceptado/rechazado y limpia
+        el ZIP. Reintentable: un fallo de red deja el move en en_proceso para la próxima corrida
+        (con tope de intentos para no reintentar por siempre un rechazo)."""
+        icp = self.env["ir.config_parameter"].sudo()
+        if icp.get_param("l10n_pe_ne_biller.instant_enabled", "").strip().lower() not in ("1", "true"):
+            return
+        base = icp.get_param("l10n_pe_ne_biller.url", "http://localhost:8090").rstrip("/")
+        timeout = int(icp.get_param("l10n_pe_ne_biller.timeout", "240"))
+        max_intentos = int(icp.get_param("l10n_pe_ne_biller.max_intentos_envio", "30"))
+        domain = [("l10n_pe_biller_state", "=", "en_proceso"), ("l10n_pe_ne_envi_zip", "!=", False)]
+        # Si las boletas van por Resumen Diario, se excluyen del envío individual (las manda el RC).
+        if icp.get_param("l10n_pe_ne_biller.boletas_resumen", "").strip().lower() in ("1", "true"):
+            domain.append(("l10n_pe_ne_tipo_doc", "!=", "03"))
+        pend = self.search(domain, limit=50)
+        for move in pend:
+            headers = {"X-Api-Key": move.company_id.sudo().l10n_pe_ne_api_key or ""}
+            signed_xml = (move.l10n_pe_biller_xml.raw or b"").decode("utf-8") if move.l10n_pe_biller_xml else ""
+            body = {
+                "ruc": move.company_id.vat or "",
+                "filename": move.l10n_pe_ne_biller_filename or "",
+                "canal": move.l10n_pe_ne_biller_canal or "GEM",
+                "enviZip": move.l10n_pe_ne_envi_zip or "",
+                "signedXml": signed_xml,
+            }
+            ok = False
+            try:
+                resp = requests.post(base + "/generator/enviar", json=body, headers=headers, timeout=(5, timeout))
+                if resp.status_code == 200:
+                    data = resp.json() or {}
+                    if data.get("rechazado"):
+                        # SUNAT rechazó (regla de negocio) → estado final, NO reintentar.
+                        move.l10n_pe_biller_state = "rechazado"
+                        move.l10n_pe_biller_message = (_("Rechazado por SUNAT: %s") % (data.get("motivo") or ""))[:2000]
+                        move.l10n_pe_ne_envi_zip = False
+                    else:
+                        move._l10n_pe_apply_emission_response(True, signed_xml, data.get("cdr") or "")
+                        move.l10n_pe_ne_envi_zip = False  # enviado; nada pendiente
+                    ok = True
+                else:
+                    move.l10n_pe_biller_message = ("Envío HTTP %s: %s" % (resp.status_code, resp.text))[:2000]
+            except Exception as e:  # noqa: BLE001 — red/SUNAT: reintentar
+                _logger.warning("enviar pendiente %s: %s (reintenta)", move.name, e)
+                move.l10n_pe_biller_message = ("Reintentando envío: %s" % e)[:2000]
+            if not ok:
+                move.l10n_pe_ne_envio_intentos = (move.l10n_pe_ne_envio_intentos or 0) + 1
+                if move.l10n_pe_ne_envio_intentos >= max_intentos:
+                    move.l10n_pe_biller_state = "error"
+            self.env["bus.bus"]._sendone(
+                "l10n_pe_biller_updates",
+                "l10n_pe_biller_update",
+                {"move_id": move.id, "state": move.l10n_pe_biller_state},
+            )
+            self.env.cr.commit()
 
     # -------------------------------------------------------- emisión asíncrona
     # Toggle: ir.config_parameter `l10n_pe_ne_biller.async_enabled` = "1".
@@ -1387,6 +1566,9 @@ class AccountMove(models.Model):
         use_async = icp.get_param(
             "l10n_pe_ne_biller.async_enabled", ""
         ).strip().lower() in ("1", "true")
+        use_instant = icp.get_param(
+            "l10n_pe_ne_biller.instant_enabled", ""
+        ).strip().lower() in ("1", "true")
         for move in self:
             _logger.info(
                 "Procesando factura: %s (%s)", move.name, move.l10n_pe_biller_state
@@ -1396,6 +1578,29 @@ class AccountMove(models.Model):
                 continue
             if use_async:
                 move._l10n_pe_enqueue_emission(icp)
+                continue
+            if use_instant:
+                # Modo instantáneo: FIRMAR (rápido, sin SUNAT) → ticket/PDF ya disponibles y
+                # estado 'en_proceso'. El cron _l10n_pe_cron_enviar_pendientes envía a SUNAT.
+                endpoint, payload = move._l10n_pe_target()
+                headers = {"X-Api-Key": move.company_id.sudo().l10n_pe_ne_api_key or ""}
+                try:
+                    resp = requests.post(
+                        base + "/generator/" + endpoint + "/firmar",
+                        json=payload, headers=headers, timeout=(5, 30),
+                    )
+                    if resp.status_code == 200:
+                        move._l10n_pe_apply_signed(resp.json())
+                    else:
+                        move.l10n_pe_biller_state = "error"
+                        move.l10n_pe_biller_message = (
+                            "Firma HTTP %s: %s" % (resp.status_code, resp.text)
+                        )[:2000]
+                except requests.RequestException as exc:
+                    move.l10n_pe_biller_state = "error"
+                    move.l10n_pe_biller_message = (
+                        _("Error de conexión con el facturador (firma): %s") % exc
+                    )
                 continue
             endpoint, payload = move._l10n_pe_target()
             _logger.info("AAAEnviando %s: %s", endpoint, payload)
@@ -1447,6 +1652,10 @@ class AccountMove(models.Model):
         if not journal:
             raise UserError(_("No hay diario de ventas configurado para la compañía."))
         tipo = payload.get("tipoDoc") or "01"
+        # NC motivo 03 = "Corrección por error en la descripción": SOLO corrige el texto,
+        # NO cambia importes. La nota va con importe 0.00 (la factura original conserva su
+        # valor). Se fuerza aquí para que la correctitud fiscal no dependa del front.
+        es_correccion = tipo == "07" and str(payload.get("motivo") or "") == "03"
         # NC (07) / ND (08): resuelven el documento afectado (mismo cliente, serie derivada del original).
         origin = None
         if tipo in ("07", "08"):
@@ -1478,8 +1687,9 @@ class AccountMove(models.Model):
             lvals = {
                 "name": ln.get("descripcion") or (prod.name if prod else "ITEM"),
                 "quantity": float(ln.get("cantidad") or 1),
-                "price_unit": float(ln.get("precioUnitario") or 0),
-                "discount": disc,
+                # Motivo 03: importe 0 (solo se corrige la descripción, no el monto).
+                "price_unit": 0.0 if es_correccion else float(ln.get("precioUnitario") or 0),
+                "discount": 0.0 if es_correccion else disc,
                 "tax_ids": [(6, 0, taxes.ids if taxes else [])],
             }
             if prod:
@@ -1531,9 +1741,24 @@ class AccountMove(models.Model):
         doc_type = doc_xmlid and self.env.ref(doc_xmlid, raise_if_not_found=False)
         if doc_type:
             vals["l10n_latam_document_type_id"] = doc_type.id
-        moneda = self._l10n_pe_ne_quick_currency(payload.get("moneda"))
+        if origin is not None and not payload.get("moneda"):
+            # NC/ND heredan la moneda del comprobante afectado: SUNAT exige que la
+            # nota vaya en la misma moneda que el documento original (sin esto una
+            # NC de una factura en USD salía forzada a PEN).
+            moneda = origin.currency_id
+        else:
+            moneda = self._l10n_pe_ne_quick_currency(payload.get("moneda"))
         if moneda:
             vals["currency_id"] = moneda.id
+            # Comprobante en dólares: asegura el TC oficial del día en
+            # res.currency.rate para que el PLE y la conversión a soles salgan
+            # bien. Best-effort: si la red falla, no bloquea la emisión.
+            if moneda.name and moneda.name != "PEN":
+                try:
+                    fecha_tc = vals.get("invoice_date") or fields.Date.context_today(self)
+                    self.env.company._l10n_pe_ne_ensure_tc(fecha_tc)
+                except Exception as e:  # noqa: BLE001
+                    _logger.warning("TC SUNAT: no se pudo asegurar en emisión (%s)", e)
         if origin is not None:
             vals["l10n_pe_motivo_code"] = str(
                 payload.get("motivo") or ("01" if tipo == "07" else "02")
@@ -1555,6 +1780,23 @@ class AccountMove(models.Model):
         move = self.env["account.move"].create(vals)
         self._l10n_pe_ne_quick_flags(move, payload)
         move.action_post()
+        # Nota de Crédito: no puede acreditar más de lo facturado. Se valida el tope
+        # contra el total del comprobante afectado antes de enviar a SUNAT (respaldo del
+        # front). La NC de importe 0 (motivo 03) pasa; una parcial no puede exceder al
+        # original. (La ND suma a la deuda, así que no lleva tope.)
+        if tipo == "07" and origin is not None and (
+            move.amount_total > (origin.amount_total or 0) + 0.05
+        ):
+            raise UserError(
+                _(
+                    "La nota de crédito (%(nc)s) no puede superar el total del comprobante "
+                    "afectado (%(orig)s)."
+                )
+                % {
+                    "nc": "%.2f" % move.amount_total,
+                    "orig": "%.2f" % (origin.amount_total or 0),
+                }
+            )
         # Si la emisión vino de "Convertir a comprobante", vincula el comprobante
         # recién posteado a la cotización de origen y la marca como 'convertida'.
         cotid = payload.get("cotizacionId")
@@ -2344,9 +2586,18 @@ class AccountMove(models.Model):
                 key = (
                     ln.product_id.display_name if ln.product_id else (ln.name or "ITEM")
                 )
-                a = prod.setdefault(key, {"cantidad": 0.0, "total": 0.0})
+                a = prod.setdefault(
+                    key, {"cantidad": 0.0, "total": 0.0, "base": 0.0, "costo": 0.0}
+                )
                 a["cantidad"] += ln.quantity or 0.0
                 a["total"] += ln.price_total or 0.0
+                # Rentabilidad: valor de venta SIN IGV (price_subtotal) vs costo del
+                # producto (standard_price × cantidad). El costo es 0 si el producto no
+                # lo tiene registrado → la utilidad de esa línea queda sobrestimada.
+                a["base"] += ln.price_subtotal or 0.0
+                a["costo"] += (ln.quantity or 0.0) * (
+                    ln.product_id.standard_price or 0.0
+                )
             kc = (m.partner_id.name or "—", m.partner_id.vat or "")
             c = cli.setdefault(kc, {"count": 0, "total": 0.0})
             c["count"] += 1
@@ -2360,11 +2611,34 @@ class AccountMove(models.Model):
                     "producto": k,
                     "cantidad": round(v["cantidad"], 2),
                     "total": round(v["total"], 2),
+                    "venta": round(v["base"], 2),
+                    "costo": round(v["costo"], 2),
+                    "utilidad": round(v["base"] - v["costo"], 2),
+                    # Margen % sobre el valor de venta. None si el producto no tiene costo
+                    # registrado (no se puede calcular una utilidad real).
+                    "margen": round((v["base"] - v["costo"]) / v["base"] * 100, 1)
+                    if v["base"] and v["costo"]
+                    else None,
                 }
                 for k, v in prod.items()
             ),
             key=lambda x: -x["total"],
         )[:50]
+        # Resumen de rentabilidad del periodo. Se calcula SOLO sobre productos con costo
+        # registrado (los de costo 0 inflarían la utilidad como si todo fuera ganancia).
+        # `conCosto`/`totalProductos` le dice al front qué tan completa es la estimación.
+        rent_venta = sum(v["base"] for v in prod.values() if v["costo"])
+        rent_costo = sum(v["costo"] for v in prod.values() if v["costo"])
+        rentabilidad = {
+            "venta": round(rent_venta, 2),
+            "costo": round(rent_costo, 2),
+            "utilidad": round(rent_venta - rent_costo, 2),
+            "margen": round((rent_venta - rent_costo) / rent_venta * 100, 1)
+            if rent_venta and rent_costo
+            else None,
+            "conCosto": sum(1 for v in prod.values() if v["costo"]),
+            "totalProductos": len(prod),
+        }
         por_cliente = sorted(
             (
                 {
@@ -2384,6 +2658,7 @@ class AccountMove(models.Model):
                 "total": round(sum(moves.mapped("amount_total")), 2),
             },
             "hoy": {"count": hoy_count, "total": round(hoy_total, 2)},
+            "rentabilidad": rentabilidad,
             "porProducto": por_producto,
             "porCliente": por_cliente,
         }
@@ -2574,12 +2849,19 @@ class AccountMove(models.Model):
         bc = (ln.get("barcode") or "").strip()
         if bc:
             vals["barcode"] = bc
+        uni = (ln.get("unidad") or "").strip()
+        if uni:
+            vals["l10n_pe_ne_unit_code"] = uni
         if tax:
             vals["taxes_id"] = [(6, 0, tax.ids)]
         return Product.create(vals)
 
     def _l10n_pe_ne_product_dict(self, p):
-        tax = p.taxes_id.filtered(lambda t: t.type_tax_use == "sale")[:1]
+        sale_taxes = p.taxes_id.filtered(lambda t: t.type_tax_use == "sale")
+        # El ICBPER (7152) NO es la afectación: es un tributo aparte (bolsa plástica). Se
+        # deriva como flag propio y se excluye al elegir la afectación (IGV) del producto.
+        icbper = bool(sale_taxes.filtered(lambda t: t.l10n_pe_edi_tax_code == "7152"))
+        tax = sale_taxes.filtered(lambda t: t.l10n_pe_edi_tax_code != "7152")[:1]
         return {
             "id": p.id,
             "descripcion": p.name or "",
@@ -2587,6 +2869,8 @@ class AccountMove(models.Model):
             "barcode": p.barcode or "",
             "precio": p.list_price,
             "taxCode": (tax.l10n_pe_edi_tax_code or "1000") if tax else "1000",
+            "unidad": p.l10n_pe_ne_unit_code or "",
+            "icbper": icbper,
         }
 
     def _l10n_pe_ne_partner_dict(self, p):
@@ -2739,6 +3023,7 @@ class AccountMove(models.Model):
                 "productCod": producto.get("codigo"),
                 "barcode": producto.get("barcode"),
                 "precioUnitario": producto.get("precio"),
+                "unidad": producto.get("unidad"),
             },
             tax,
         )
@@ -2759,6 +3044,8 @@ class AccountMove(models.Model):
             vals["default_code"] = (producto.get("codigo") or "").strip() or False
         if "barcode" in producto:
             vals["barcode"] = (producto.get("barcode") or "").strip() or False
+        if "unidad" in producto:
+            vals["l10n_pe_ne_unit_code"] = (producto.get("unidad") or "").strip() or False
         if producto.get("precio") is not None:
             vals["list_price"] = float(producto.get("precio") or 0)
         if producto.get("taxCode"):
@@ -2780,6 +3067,227 @@ class AccountMove(models.Model):
         except Exception:
             p.active = False
             return {"ok": True, "modo": "archivado"}
+
+    # ------------------------------------------------------- importación productos
+    @api.model
+    def l10n_pe_ne_plantilla_productos(self):
+        """Plantilla xlsx para importar/actualizar el catálogo (hoja 'Productos' con las
+        cabeceras + ejemplos + listas de unidad/afectación, y una hoja 'Instrucciones').
+        Devuelve {filename, contentB64}. Mismo estilo visual que la plantilla de la masiva."""
+        import io
+        import base64
+        import xlsxwriter
+
+        headers = ["CÓDIGO", "CÓDIGO DE BARRAS", "NOMBRE", "UNIDAD", "PRECIO VENTA", "COSTO", "AFECTACIÓN", "BOLSA"]
+        ejemplos = [
+            ["PROD0001", "7751234000018", "CEMENTO SOL 42.5 KG", "UNIDAD", 33.90, 28.00, "GRAVADO", "NO"],
+            ["PROD0002", "7751234000025", "FIERRO CORRUGADO 1/2 PULG", "KILOGRAMO", 4.50, 3.20, "GRAVADO", "NO"],
+            ["PROD0004", "", "BOLSA PLÁSTICA", "UNIDAD", 0.50, 0.10, "GRAVADO", "SI"],
+        ]
+        buf = io.BytesIO()
+        wb = xlsxwriter.Workbook(buf, {"in_memory": True})
+        ws = wb.add_worksheet("Productos")
+        head = wb.add_format({"bold": True, "bg_color": "#2563eb", "font_color": "white", "border": 1})
+        # El código de barras se escribe como TEXTO para no perder ceros a la izquierda
+        # ni que Excel lo pase a notación científica (ej. 7.75E+12).
+        txtfmt = wb.add_format({"num_format": "@"})
+        for c, h in enumerate(headers):
+            ws.write(0, c, h, head)
+            ws.set_column(c, c, max(16, len(h) + 4), txtfmt if c == 1 else None)
+        for r, row in enumerate(ejemplos, 1):
+            ws.write_row(r, 0, row)
+        # Comentarios de ayuda al pasar el mouse por la cabecera (el triangulito rojo).
+        note = {"x_scale": 2.2, "y_scale": 1.8, "author": "CHASKIFACT"}
+        ws.write_comment(0, 1, (
+            "Opcional. El código de barras (EAN) que trae el producto, para escanearlo "
+            "en el POS. Déjalo vacío si el producto no tiene."), note)
+        ws.write_comment(0, 4, "Precio final CON IGV incluido (lo que paga el cliente).", note)
+        ws.write_comment(0, 5, "Opcional. Precio de compra referencial. NO afecta la facturación.", note)
+        ws.write_comment(0, 6, (
+            "Tipo de afectación de IGV. Elígelo del desplegable.\n"
+            "• GRAVADO = con IGV 18% (lo normal)\n"
+            "• EXONERADO / INAFECTO = sin IGV\n"
+            "• EXPORTACION / GRATUITO = casos especiales\n"
+            "Si lo dejas vacío se asume GRAVADO."), note)
+        ws.write_comment(0, 7, (
+            "SI / NO. Márcalo SI solo si el producto es una BOLSA PLÁSTICA: "
+            "cobra el ICBPER (monto fijo por unidad) al venderlo. Vacío = NO."), note)
+        # Desplegable (select) para UNIDAD, con ayuda al hacer clic en la celda.
+        ws.data_validation(1, 3, 1000, 3, {
+            "validate": "list", "source": [
+                "UNIDAD", "SERVICIO", "KILOGRAMO", "GRAMO", "LITRO", "GALON", "CAJA",
+                "METRO", "METRO CUADRADO", "METRO CUBICO", "MILLAR", "DOCENA"],
+            "input_title": "Unidad de medida",
+            "input_message": "Elige de la lista o escribe el código SUNAT (NIU, KGM…). Vacío = UNIDAD."})
+        # Desplegable (select) para AFECTACIÓN, con ayuda + alerta suave si no es de la lista.
+        ws.data_validation(1, 6, 1000, 6, {
+            "validate": "list", "source": [
+                "GRAVADO", "EXONERADO", "INAFECTO", "EXPORTACION", "GRATUITO"],
+            "input_title": "Afectación de IGV",
+            "input_message": (
+                "GRAVADO = con IGV 18% (lo normal).\n"
+                "EXONERADO / INAFECTO = sin IGV.\n"
+                "Vacío = GRAVADO."),
+            "error_type": "information",
+            "error_title": "Valor sugerido",
+            "error_message": "Usa: GRAVADO, EXONERADO, INAFECTO, EXPORTACION o GRATUITO."})
+        # Desplegable (select) SI/NO para BOLSA (ICBPER).
+        ws.data_validation(1, 7, 1000, 7, {
+            "validate": "list", "source": ["SI", "NO"],
+            "input_title": "Bolsa plástica (ICBPER)",
+            "input_message": (
+                "SI solo si es una bolsa plástica: cobra ICBPER por unidad.\n"
+                "Para todo lo demás: NO (o déjalo vacío).")})
+        ws.freeze_panes(1, 0)
+        wi = wb.add_worksheet("Instrucciones")
+        wi.set_column(0, 0, 110)
+        for r, line in enumerate([
+            "CHASKIFACT — Plantilla de importación de productos",
+            "",
+            "1. Una fila = un producto. 'CÓDIGO' es la clave: si ya existe, se ACTUALIZA; si no, se CREA.",
+            "2. 'CÓDIGO DE BARRAS' es opcional: el EAN del producto para escanearlo en el POS. No puede repetirse entre productos.",
+            "3. 'NOMBRE' es obligatorio. 'PRECIO VENTA' es el precio final CON IGV incluido.",
+            "4. 'UNIDAD': puedes escribir el nombre (UNIDAD, KILOGRAMO, CAJA…) o el código SUNAT (NIU, KGM, BX…). Vacío = UNIDAD (NIU).",
+            "5. 'AFECTACIÓN' (elígela del desplegable de la celda): define el IGV del producto.",
+            "     • GRAVADO = lleva IGV 18% (la mayoría de productos).  • EXONERADO / INAFECTO = sin IGV.",
+            "     • EXPORTACION / GRATUITO = casos especiales.  Si la dejas vacía se asume GRAVADO.",
+            "6. 'COSTO' es opcional (precio de compra, referencial). No afecta la facturación.",
+            "7. 'BOLSA' = SI solo para bolsas plásticas (cobran ICBPER por unidad al venderlas). Para el resto: NO o vacío.",
+            "8. Sube el archivo, revisa el resumen (nuevos / actualizados / errores) y recién ahí confirma.",
+        ]):
+            wi.write(r, 0, line)
+        wb.close()
+        return {"filename": "plantilla-productos-chaskifact.xlsx",
+                "contentB64": base64.b64encode(buf.getvalue()).decode("ascii")}
+
+    @api.model
+    def l10n_pe_ne_importar_productos(self, payload):
+        """Importa/actualiza productos desde el xlsx de la plantilla. payload = {contentB64, commit}.
+        UPSERT por CÓDIGO. commit=False → solo valida y devuelve el reporte (dry-run, no escribe);
+        commit=True → aplica y devuelve creados/actualizados/errores. Aislado por compañía."""
+        import io
+        import base64
+        import unicodedata
+
+        payload = payload or {}
+        commit = bool(payload.get("commit"))
+        try:
+            data = base64.b64decode(payload.get("contentB64") or "")
+        except Exception:
+            raise UserError(_("Archivo inválido."))
+
+        import openpyxl
+        try:
+            wb = openpyxl.load_workbook(io.BytesIO(data), data_only=True, read_only=True)
+        except Exception:
+            raise UserError(_("No se pudo leer el archivo. Sube un .xlsx válido (no un .xls antiguo)."))
+        ws = wb["Productos"] if "Productos" in wb.sheetnames else wb[wb.sheetnames[0]]
+        rows = list(ws.iter_rows(values_only=True))
+        if not rows:
+            raise UserError(_("El archivo está vacío."))
+
+        def norm(h):
+            s = unicodedata.normalize("NFKD", str(h or "")).encode("ascii", "ignore").decode("ascii")
+            return " ".join(s.lower().split())
+
+        header = [norm(h) for h in rows[0]]
+        idx = {h: i for i, h in enumerate(header) if h}
+        faltan = [h for h in ("codigo", "nombre") if h not in idx]
+        if faltan:
+            raise UserError(_("Faltan columnas obligatorias: %s. Usa la plantilla.") % ", ".join(faltan))
+
+        def cell(row, name):
+            i = idx.get(name)
+            return row[i] if i is not None and i < len(row) else None
+
+        def txt(v):
+            if v is None:
+                return ""
+            if isinstance(v, float) and v.is_integer():
+                return str(int(v))
+            return str(v).strip()
+
+        def num(v):
+            if v is None or (isinstance(v, str) and not v.strip()):
+                return None
+            if isinstance(v, (int, float)):
+                return float(v)
+            try:
+                return float(str(v).strip().replace(" ", "").replace(",", "."))
+            except ValueError:
+                return "ERROR"
+
+        Product = self.env["product.product"]
+        creados = actualizados = 0
+        errores = []
+        avisos = []
+        for n, row in enumerate(rows[1:], start=2):
+            if row is None or all(c is None or str(c).strip() == "" for c in row):
+                continue
+            cod = txt(cell(row, "codigo"))
+            nombre = txt(cell(row, "nombre"))
+            if not cod:
+                errores.append({"fila": n, "msg": "Falta el CÓDIGO"})
+                continue
+            if not nombre:
+                errores.append({"fila": n, "msg": "Falta el NOMBRE"})
+                continue
+            precio = num(cell(row, "precio venta"))
+            costo = num(cell(row, "costo"))
+            if precio == "ERROR" or costo == "ERROR":
+                errores.append({"fila": n, "msg": "PRECIO o COSTO no es un número válido"})
+                continue
+            uni_raw = norm(cell(row, "unidad"))
+            if not uni_raw:
+                unidad = "NIU"
+            elif uni_raw in UNIDAD_IMPORT:
+                unidad = UNIDAD_IMPORT[uni_raw]
+            elif uni_raw.upper() in _UNIDAD_CODES:
+                unidad = uni_raw.upper()
+            else:
+                unidad = "NIU"
+                avisos.append({"fila": n, "msg": "Unidad '%s' no reconocida, se usó UNIDAD (NIU)" % txt(cell(row, "unidad"))})
+            afe_raw = norm(cell(row, "afectacion"))
+            tax_code = AFECT_IMPORT.get(afe_raw, "1000") if afe_raw else "1000"
+            barcode = txt(cell(row, "codigo de barras"))
+            bolsa = norm(cell(row, "bolsa")) in ("si", "s")  # ICBPER: SI/NO (vacío = NO)
+
+            existing = Product.search([("default_code", "=", cod)], limit=1)
+            # El código de barras no puede pertenecer a OTRO producto (Odoo lo exige único).
+            if barcode:
+                dup = Product.search([("barcode", "=", barcode)], limit=1)
+                if dup and dup.id != existing.id:
+                    errores.append({"fila": n, "msg": "El código de barras '%s' ya pertenece a otro producto" % barcode})
+                    continue
+            if not commit:
+                if existing:
+                    actualizados += 1
+                else:
+                    creados += 1
+                continue
+            vals = {"name": nombre, "l10n_pe_ne_unit_code": unidad}
+            if precio is not None:
+                vals["list_price"] = precio
+            if costo is not None:
+                vals["standard_price"] = costo
+            if barcode:
+                vals["barcode"] = barcode
+            tax = self._l10n_pe_ne_tax_by_code(tax_code)
+            tax_ids = list(tax.ids) if tax else []
+            if bolsa:  # bolsa plástica → suma la tax ICBPER (monto fijo por unidad)
+                tax_ids += self._l10n_pe_ne_ensure_icbper_tax().ids
+            vals["taxes_id"] = [(6, 0, tax_ids)]
+            if existing:
+                existing.write(vals)
+                actualizados += 1
+            else:
+                vals.update({"default_code": cod, "type": "service",
+                             "sale_ok": True, "company_id": self.env.company.id})
+                Product.create(vals)
+                creados += 1
+        return {"commit": commit, "creados": creados, "actualizados": actualizados,
+                "errores": errores, "avisos": avisos,
+                "totalOk": creados + actualizados, "totalError": len(errores)}
 
     # ----------------------------------------------------------------- compras
     # Compra = factura de proveedor (account.move in_invoice). TODA la lógica en
@@ -3123,6 +3631,7 @@ class AccountMove(models.Model):
                     "precio": ln.price_unit or 0.0,
                     "descuento": ln.discount or 0.0,
                     "afectacion": afect,
+                    "unidad": self._l10n_pe_unit_code(ln),
                     "subtotal": ln.price_subtotal or 0.0,
                 }
             )
@@ -3168,21 +3677,27 @@ class AccountMove(models.Model):
             out["xml"] = b64(self.l10n_pe_biller_xml)
         if self.l10n_pe_biller_cdr:
             out["cdr"] = b64(self.l10n_pe_biller_cdr)
-        try:
-            pdf_att = (
-                self._l10n_pe_get_pdf_attachment() if self.l10n_pe_biller_xml else False
-            )
-            if pdf_att:
-                out["pdf"] = b64(pdf_att)
-        except Exception:
-            pass
-        if kind == "ticket":
+        # El PDF/ticket se renderiza contra el micro a partir del XML firmado (no del
+        # CDR): está disponible apenas FIRMADO (en_proceso), sin esperar a SUNAT. Se
+        # genera SOLO el formato pedido (un pedido de xml/cdr no debe disparar el micro).
+        # Antes se generaba el PDF SIEMPRE y se tragaba cualquier fallo → el controller
+        # devolvía un 404 opaco ("no tiene pdf") aunque el problema real fuera el micro
+        # caído o un timeout. Ahora, si falla justo el formato pedido, se propaga el
+        # motivo real (el controller lo traduce a un mensaje legible).
+        want_pdf = kind in (None, "pdf", "ticket")
+        if want_pdf and self.l10n_pe_biller_xml:
+            es_ticket = kind == "ticket"
             try:
-                t = self._l10n_pe_get_pdf_attachment(formato="TICKET") if self.l10n_pe_biller_xml else False
-                if t:
-                    out["ticket"] = b64(t)
+                att = self._l10n_pe_get_pdf_attachment(
+                    formato="TICKET" if es_ticket else "A4"
+                )
+                if att:
+                    out["ticket" if es_ticket else "pdf"] = b64(att)
             except Exception:
-                pass
+                # Solo se propaga cuando el cliente pedía EXACTAMENTE ese archivo; si el
+                # kind era None (uso interno/tests) se degrada en silencio como antes.
+                if kind in ("pdf", "ticket"):
+                    raise
         return out
 
     # ------------------------------------------------- descargas / PDF (SFS 2.4)
@@ -3645,6 +4160,168 @@ class AccountMove(models.Model):
                 }
             ],
         }
+
+    def _l10n_pe_rc_emision_item(self, id_linea):
+        """Un ítem del Resumen Diario para EMISIÓN (tipEstado 1 = registrar la boleta ante SUNAT).
+        Misma estructura que el de anulación pero con la identidad EMITIDA y estado 1."""
+        self.ensure_one()
+        fmt = self._l10n_pe_fmt
+        serie = self.l10n_pe_ne_serie_emit or self._l10n_pe_serie_correlativo()[0]
+        correlativo = self.l10n_pe_ne_corr_emit or self._l10n_pe_serie_correlativo()[1]
+        partner = self.partner_id
+        cats = self._l10n_pe_rc_totales()
+        idl = str(id_linea)
+        tributos = [
+            {
+                "idLineaRd": idl, "ideTributoRd": t["ideTributo"], "nomTributoRd": t["nomTributo"],
+                "codTipTributoRd": t["codTipTributo"], "mtoBaseImponibleRd": t["mtoBaseImponible"],
+                "mtoTributoRd": t["mtoTributo"],
+            }
+            for t in self._l10n_pe_tributos()
+        ]
+        icbper = self._l10n_pe_total_icbper()
+        if icbper:
+            tributos.append({"idLineaRd": idl, "ideTributoRd": "7152", "nomTributoRd": "ICBPER",
+                             "codTipTributoRd": "OTH", "mtoBaseImponibleRd": "0.00", "mtoTributoRd": fmt(icbper)})
+        if not any(t["ideTributoRd"] == "1000" for t in tributos):
+            tributos.append({"idLineaRd": idl, "ideTributoRd": "1000", "nomTributoRd": "IGV",
+                             "codTipTributoRd": "VAT", "mtoBaseImponibleRd": "0.00", "mtoTributoRd": "0.00"})
+        vat = (partner.vat or "").strip()
+        cod_doc = partner.l10n_latam_identification_type_id.l10n_pe_vat_code or ""
+        if not vat:
+            cod_doc, vat = "0", "00000000"
+        elif not cod_doc:
+            cod_doc = "6" if (len(vat) == 11 and vat.isdigit()) else "1"
+        return {
+            "fecEmision": self.invoice_date.strftime("%Y-%m-%d"),
+            "fecResumen": fields.Date.context_today(self).strftime("%Y-%m-%d"),
+            "tipDocResumen": "03",
+            "idDocResumen": "%s-%s" % (serie, (correlativo or "").zfill(8)),
+            "tipDocUsuario": cod_doc, "numDocUsuario": vat,
+            "tipMoneda": self.currency_id.name or "PEN",
+            "totValGrabado": fmt(cats["gravado"]), "totValExoneado": fmt(cats["exonerado"]),
+            "totValInafecto": fmt(cats["inafecto"]), "totValExportado": fmt(cats["exportado"]),
+            "totValGratuito": fmt(cats["gratuito"]), "totOtroCargo": "0.00",
+            "totImpCpe": fmt(self.amount_total),
+            "tipDocModifico": "", "serDocModifico": "", "numDocModifico": "",
+            "tipRegPercepcion": "", "porPercepcion": "", "monBasePercepcion": "",
+            "monPercepcion": "", "monTotIncPercepcion": "",
+            "tipEstado": "1",  # 1 = adicionar/registrar la boleta
+            "tributosDocResumen": tributos,
+        }
+
+    def _l10n_pe_build_rc_emision(self, fecha_gen, correlativo):
+        """RC de EMISIÓN para un CONJUNTO de boletas (self = recordset; misma compañía y fecha)."""
+        first = self[0]
+        return {
+            "id": {
+                "ruc": first.company_id.vat or "",
+                "fechaGeneracion": fecha_gen.strftime("%Y%m%d"),
+                "correlativo": str(correlativo),
+            },
+            "emisor": first._l10n_pe_emisor(),
+            "resumenDiario": [b._l10n_pe_rc_emision_item(i + 1) for i, b in enumerate(self)],
+        }
+
+    @api.model
+    def _l10n_pe_cron_resumen_boletas(self):
+        """Boletas por Resumen Diario (RC, tipEstado 1) IDEMPOTENTE, en dos fases:
+        A) ENVIAR: agrupa las boletas firmadas SIN ticket (por compañía+fecha), manda el RC vía
+           /resumenBoleta/enviar (firma + sendSummary) y GUARDA el ticket en cada boleta. No las
+           re-envía en la próxima corrida (ya tienen ticket) → no duplica el resumen en SUNAT.
+        B) CONSULTAR: pollea los grupos que ya tienen ticket vía /ticket/estado; al llegar el CDR
+           marca las boletas aceptado/rechazado y libera el ticket. Requiere instant + boletas_resumen."""
+        icp = self.env["ir.config_parameter"].sudo()
+        if icp.get_param("l10n_pe_ne_biller.boletas_resumen", "").strip().lower() not in ("1", "true"):
+            return
+        base = icp.get_param("l10n_pe_ne_biller.url", "http://localhost:8090").rstrip("/")
+        timeout = int(icp.get_param("l10n_pe_ne_biller.resumen_timeout", "80"))
+        STATUS_EN_PROCESO = 98
+
+        def _bus(b):
+            self.env["bus.bus"]._sendone(
+                "l10n_pe_biller_updates", "l10n_pe_biller_update",
+                {"move_id": b.id, "state": b.l10n_pe_biller_state})
+
+        # ── FASE B — consultar los grupos que YA tienen ticket (idempotente: no re-envía) ──
+        con_ticket = self.search(
+            [("l10n_pe_biller_state", "=", "en_proceso"), ("l10n_pe_ne_rc_ticket", "!=", False)],
+            limit=200,
+        )
+        por_ticket = {}
+        for m in con_ticket:
+            por_ticket.setdefault(m.l10n_pe_ne_rc_ticket, self.browse())
+            por_ticket[m.l10n_pe_ne_rc_ticket] |= m
+        for ticket, boletas in por_ticket.items():
+            company = boletas[0].company_id
+            headers = {"X-Api-Key": company.sudo().l10n_pe_ne_api_key or ""}
+            body = {"ruc": company.vat or "", "ticket": ticket, "canal": "GEM"}
+            try:
+                resp = requests.post(base + "/generator/ticket/estado", json=body, headers=headers, timeout=(5, timeout))
+            except Exception as e:  # noqa: BLE001 — red: reintenta con el MISMO ticket
+                _logger.warning("ticket %s: %s (reintenta)", ticket, e)
+                continue
+            if resp.status_code != 200:
+                continue  # transitorio: reintenta con el mismo ticket
+            data = resp.json() or {}
+            status = int(data.get("statusCode") or -1)
+            cdr = data.get("cdr") or ""
+            if status == STATUS_EN_PROCESO:
+                continue  # SUNAT aún procesa el resumen: reintenta luego (mismo ticket)
+            if cdr:
+                code, desc = boletas[0]._l10n_pe_parse_cdr_codes(base64.b64decode(cdr))
+                estado = "enviado" if code == "0" else "rechazado"
+                for b in boletas:
+                    b.l10n_pe_biller_state = estado
+                    b.l10n_pe_biller_message = (
+                        _("Aceptado por SUNAT vía Resumen Diario (RC corr %s). %s") % (b.l10n_pe_ne_rc_correlativo or "", desc or "")
+                        if code == "0" else
+                        _("Rechazado en el Resumen Diario (RC corr %s): ResponseCode %s. %s") % (b.l10n_pe_ne_rc_correlativo or "", code, desc or ""))[:2000]
+                    b.l10n_pe_ne_rc_ticket = False
+                    b.l10n_pe_ne_envi_zip = False
+                    b._l10n_pe_store_cdr(cdr)
+                    _bus(b)
+            else:
+                for b in boletas:
+                    b.l10n_pe_biller_state = "rechazado"
+                    b.l10n_pe_biller_message = _("Resumen Diario RC: SUNAT terminó con statusCode %s sin CDR.") % status
+                    b.l10n_pe_ne_rc_ticket = False
+                    _bus(b)
+            self.env.cr.commit()
+
+        # ── FASE A — enviar las boletas firmadas SIN ticket todavía (una llamada = un ticket) ──
+        sin_ticket = self.search(
+            [("l10n_pe_biller_state", "=", "en_proceso"), ("l10n_pe_ne_tipo_doc", "=", "03"),
+             ("l10n_pe_ne_serie_emit", "!=", False), ("l10n_pe_ne_rc_ticket", "=", False)],
+            limit=200,
+        )
+        grupos = {}
+        for m in sin_ticket:
+            grupos.setdefault((m.company_id.id, m.invoice_date), self.browse())
+            grupos[(m.company_id.id, m.invoice_date)] |= m
+        for (cid, fecha), boletas in grupos.items():
+            company = boletas[0].company_id
+            correlativo = self.env["ir.sequence"].next_by_code("l10n_pe.ne.rc") or "1"
+            fecha_gen = fields.Date.context_today(boletas[0])
+            payload = boletas._l10n_pe_build_rc_emision(fecha_gen, correlativo)
+            headers = {"X-Api-Key": company.sudo().l10n_pe_ne_api_key or ""}
+            try:
+                resp = requests.post(base + "/generator/resumenBoleta/enviar", json=payload, headers=headers, timeout=(5, timeout))
+            except Exception as e:  # noqa: BLE001 — no se envió: reintenta con un correlativo fresco
+                _logger.warning("resumen boletas %s/%s: %s (reintenta)", cid, fecha, e)
+                continue
+            if resp.status_code == 200 and (resp.json() or {}).get("ticket"):
+                ticket = resp.json()["ticket"]
+                for b in boletas:
+                    b.l10n_pe_ne_rc_ticket = ticket
+                    b.l10n_pe_ne_rc_correlativo = str(correlativo)
+                    b.l10n_pe_ne_rc_fecha = fecha_gen
+                    b.l10n_pe_biller_message = _("Resumen Diario enviado (RC corr %s), ticket %s — esperando SUNAT.") % (correlativo, ticket)
+            else:
+                msg = ("Resumen RC HTTP %s: %s" % (resp.status_code, resp.text))[:1500]
+                for b in boletas:
+                    b.l10n_pe_biller_message = msg
+            self.env.cr.commit()
 
     def _l10n_pe_store_baja_cdr(self, cdr_b64):
         """Guarda el CDR de la baja en un adjunto propio (no pisa el CDR original) y devuelve (code, desc)."""

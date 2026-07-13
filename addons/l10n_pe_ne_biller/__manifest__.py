@@ -17,6 +17,7 @@
         'views/account_payment_views.xml',
         'views/res_company_views.xml',
         'views/uom_views.xml',
+        'views/product_views.xml',
         'views/l10n_pe_ne_report_views.xml',
         'report/cotizacion_report.xml',
     ],

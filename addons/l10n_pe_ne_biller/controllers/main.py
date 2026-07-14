@@ -145,6 +145,10 @@ class L10nPeNeApi(http.Controller):
         u = self._user(uid)
         return request.env["l10n_pe_ne.cotizacion"].with_user(uid).with_company(u.company_id)
 
+    def _guia(self, uid):
+        u = self._user(uid)
+        return request.env["l10n_pe_ne.guia_remision"].with_user(uid).with_company(u.company_id)
+
     def _caja(self, uid):
         u = self._user(uid)
         return request.env["l10n_pe_ne.caja.sesion"].with_user(uid).with_company(u.company_id)
@@ -1073,6 +1077,91 @@ class L10nPeNeApi(http.Controller):
         return self._run(
             lambda: self._cotizacion(uid).l10n_pe_ne_delete_cotizacion(int(rec_id))
         )
+
+    # -------------------------------------------------------- guías de remisión
+    # GRE Remitente (tipo 09). Documento de traslado, NO es un comprobante account.move.
+    @http.route("/ne/api/guias", **_GET)
+    def list_guias(self, q=None, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        try:
+            pg = self._page_args(kw)
+            res = self._guia(uid).l10n_pe_ne_list_guias(
+                query=q or None,
+                limit=pg["limit"] if pg else 100,
+                offset=pg["offset"] if pg else None,
+            )
+            if pg:
+                res = {**res, "page": pg["page"], "pageSize": pg["pageSize"]}
+            return self._json(res)
+        except Exception as e:  # noqa: BLE001
+            return self._fail(e)
+
+    @http.route("/ne/api/guias", **_POST)
+    def create_guia(self, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(lambda: self._guia(uid).l10n_pe_ne_quick_guia(self._body()))
+
+    @http.route("/ne/api/guias/<int:rec_id>", **_PUT)
+    def update_guia(self, rec_id, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(
+            lambda: self._guia(uid).l10n_pe_ne_update_guia(dict(self._body(), id=int(rec_id)))
+        )
+
+    @http.route("/ne/api/guias/<int:rec_id>", **_DEL)
+    def delete_guia(self, rec_id, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(lambda: self._guia(uid).l10n_pe_ne_delete_guia(int(rec_id)))
+
+    @http.route("/ne/api/guias/<int:rec_id>/detalle", **_GET)
+    def guia_detalle(self, rec_id, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        try:
+            g = self._guia(uid).browse(rec_id).exists()
+            if not g:
+                return self._err("Guía no encontrada", status=404)
+            return self._json(g.l10n_pe_ne_guia_detalle())
+        except Exception as e:  # noqa: BLE001
+            return self._fail(e)
+
+    @http.route("/ne/api/guias/<int:rec_id>/emitir", **_POST)
+    def emitir_guia(self, rec_id, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(lambda: self._guia(uid).browse(int(rec_id)).l10n_pe_ne_emitir_guia())
+
+    @http.route("/ne/api/comprobantes/<int:rec_id>/guia-prefill", **_GET)
+    def guia_prefill(self, rec_id, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        try:
+            return self._json(self._guia(uid).l10n_pe_ne_guia_prefill(int(rec_id)))
+        except Exception as e:  # noqa: BLE001
+            return self._fail(e)
+
+    @http.route("/ne/api/guias/<int:rec_id>/<string:kind>", **_GET)
+    def guia_file(self, rec_id, kind, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        try:
+            return self._serve_file(
+                uid, "l10n_pe_ne.guia_remision", rec_id, kind, "l10n_pe_ne_get_files", "guia"
+            )
+        except Exception as e:  # noqa: BLE001
+            return self._fail(e)
 
     # ------------------------------------------------------------------- caja
     @http.route("/ne/api/caja", **_GET)

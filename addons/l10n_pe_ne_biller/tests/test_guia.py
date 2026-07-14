@@ -87,3 +87,22 @@ class TestGuiaMultiCompany(TestGuiaBase):
         otra = self.env["res.company"].create({"name": "Otra SAC 2", "vat": "20999999992"})
         res = self.Guia.with_company(otra).l10n_pe_ne_list_guias(offset=0)
         self.assertEqual(res["total"], 0)
+
+    def test_rule_aisla_lineas(self):
+        # La rule de las líneas también aísla (no solo la del padre).
+        g = self.Guia.create(self._vals())
+        otra = self.env["res.company"].create({"name": "Otra SAC 3", "vat": "20999999993"})
+        user_b = self.env["res.users"].create({
+            "name": "Emisor B2", "login": "emisor_b2_gre",
+            "company_id": otra.id, "company_ids": [(6, 0, [otra.id])],
+            "group_ids": [(4, self.env.ref("l10n_pe_ne_biller.group_l10n_pe_ne_emisor").id)],
+        })
+        lineas = self.env["l10n_pe_ne.guia_remision.line"].with_user(user_b).with_company(otra).search([])
+        self.assertFalse(lineas, "las líneas de otra compañía no deben ser visibles")
+
+    def test_list_filtra_con_busqueda(self):
+        # El ancla de compañía debe sobrevivir cuando hay término de búsqueda (domain +=).
+        self.Guia.create(self._vals())
+        otra = self.env["res.company"].create({"name": "Otra SAC 4", "vat": "20999999994"})
+        res = self.Guia.with_company(otra).l10n_pe_ne_list_guias(query="T001", offset=0)
+        self.assertEqual(res["total"], 0)

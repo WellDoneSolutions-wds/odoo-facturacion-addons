@@ -39,6 +39,10 @@ MODALIDADES_TRASLADO = [
 ]
 UNIDADES_PESO = [('KGM', 'Kilogramos'), ('TNE', 'Toneladas')]
 
+# Motivos cuyo XML el biller sustenta completo hoy. 04 necesita código de establecimiento
+# anexo (AddressTypeCode), 08/09 contenedor/puerto — ampliar biller + este set al soportarlos.
+SUPPORTED_MOTIVOS = ('01', '02', '13', '14', '18')
+
 
 class L10nPeNeGuiaRemision(models.Model):
     _name = 'l10n_pe_ne.guia_remision'
@@ -175,9 +179,15 @@ class L10nPeNeGuiaRemision(models.Model):
 
     # -------------------------------------------------------- payload biller
     def _l10n_pe_ne_doc_tipo(self, partner):
-        """Tipo de documento SUNAT (cat. 6) del partner: 6=RUC, 1=DNI, según longitud del vat."""
+        """Tipo de documento SUNAT (cat. 6): 6=RUC (11 dígitos), 1=DNI (8). Cualquier otra
+        cosa se rechaza acá — mandarlo mal es rechazo seguro de SUNAT."""
         vat = (partner.vat or '').strip()
-        return '6' if len(vat) == 11 else '1' if len(vat) == 8 else '6'
+        if len(vat) == 11:
+            return '6'
+        if len(vat) == 8:
+            return '1'
+        raise UserError(_('El documento de "%s" debe ser RUC (11 dígitos) o DNI (8); tiene "%s".')
+                        % (partner.display_name, vat or '—'))
 
     def _l10n_pe_ne_build_gre_payload(self):
         """Arma el JSON que espera el biller (`GreRequest`). Claves = campos de GreCabeceraRequest."""
@@ -257,12 +267,41 @@ class L10nPeNeGuiaRemision(models.Model):
     # ------------------------------------------------------------- emisión
     def _l10n_pe_ne_validar(self):
         self.ensure_one()
+        if self.estado not in ('borrador', 'error', 'rechazado'):
+            raise UserError(_('La guía %s ya fue emitida (estado: %s).') % (self.name, self.estado))
         if not self.line_ids:
             raise UserError(_('La guía necesita al menos un bien.'))
-        if self.modalidad_traslado == '02' and not (self.num_placa and self.conductor_num_doc):
-            raise UserError(_('Transporte privado: indica la placa y el documento del conductor.'))
-        if self.modalidad_traslado == '01' and not self.transportista_id:
-            raise UserError(_('Transporte público: indica el transportista.'))
+        if not self.peso_bruto or self.peso_bruto <= 0:
+            raise UserError(_('El peso bruto debe ser mayor a 0.'))
+        for campo, etiqueta in (('ubigeo_partida', 'partida'), ('ubigeo_llegada', 'llegada')):
+            if not re.fullmatch(r'\d{6}', self[campo] or ''):
+                raise UserError(_('El ubigeo de %s debe tener 6 dígitos.') % etiqueta)
+        if self.fecha_inicio_traslado and self.fecha_emision \
+                and self.fecha_inicio_traslado < self.fecha_emision:
+            raise UserError(_('La fecha de inicio del traslado no puede ser anterior a la emisión.'))
+        self._l10n_pe_ne_doc_tipo(self.partner_id)  # valida RUC/DNI del destinatario
+        if self.motivo_traslado not in SUPPORTED_MOTIVOS:
+            raise UserError(_('El motivo de traslado %s aún no soportado para emisión.')
+                            % self.motivo_traslado)
+        if self.motivo_traslado == '13' and not (self.des_motivo_traslado or '').strip():
+            raise UserError(_('El motivo "Otros" requiere describir el motivo del traslado.'))
+        if self.motivo_traslado == '02' and not self.proveedor_id:
+            raise UserError(_('El motivo "Compra" requiere indicar el proveedor.'))
+        if self.modalidad_traslado == '02':
+            faltantes = [etiqueta for campo, etiqueta in (
+                ('num_placa', _('la placa del vehículo')),
+                ('conductor_num_doc', _('el documento del conductor')),
+                ('conductor_nombres', _('los nombres del conductor')),
+                ('conductor_apellidos', _('los apellidos del conductor')),
+                ('conductor_licencia', _('la licencia de conducir')),
+            ) if not (self[campo] or '').strip()]
+            if faltantes:
+                raise UserError(_('Transporte privado: falta %s.') % ', '.join(faltantes))
+        else:
+            if not self.transportista_id:
+                raise UserError(_('Transporte público: indica el transportista.'))
+            if len((self.transportista_id.vat or '').strip()) != 11:
+                raise UserError(_('El transportista debe tener RUC (11 dígitos).'))
 
     def _l10n_pe_ne_store_cdr(self, cdr_b64):
         """Guarda el CDR (zip base64 del header X-Sunat-Cdr) como adjunto en l10n_pe_biller_cdr

@@ -121,3 +121,50 @@ class TestGuiaPayload(TestGuiaBase):
         g = self.Guia.create(self._vals())  # motivo 01
         cab = g._l10n_pe_ne_build_gre_payload()["cabecera"]
         self.assertNotIn("numDocProveedor", cab)
+
+
+class TestGuiaValidaciones(TestGuiaBase):
+    def _rechaza(self, msg_frag, **vals):
+        g = self.Guia.create(self._vals(**vals))
+        with self.assertRaisesRegex(UserError, msg_frag):
+            g._l10n_pe_ne_validar()
+
+    def test_peso_cero(self):
+        self._rechaza("peso bruto", peso_bruto=0)
+
+    def test_ubigeo_invalido(self):
+        self._rechaza("6 dígitos", ubigeo_partida="15A")
+
+    def test_inicio_antes_de_emision(self):
+        self._rechaza("no puede ser anterior",
+                      fecha_emision="2026-07-13", fecha_inicio_traslado="2026-07-10")
+
+    def test_destinatario_doc_invalido(self):
+        self.cliente.vat = "123"
+        self._rechaza("RUC .* o DNI")
+
+    def test_motivo_no_soportado(self):
+        self._rechaza("no soportado", motivo_traslado="04")
+
+    def test_motivo_otros_sin_descripcion(self):
+        self._rechaza("requiere describir", motivo_traslado="13")
+
+    def test_motivo_compra_sin_proveedor(self):
+        self._rechaza("requiere indicar el proveedor", motivo_traslado="02")
+
+    def test_privado_conductor_incompleto(self):
+        self._rechaza("licencia", conductor_licencia=False)
+
+    def test_publico_transportista_sin_ruc(self):
+        t = self.env["res.partner"].create({"name": "Transp", "vat": "12345678"})
+        self._rechaza("RUC", modalidad_traslado="01", transportista_id=t.id)
+
+    def test_no_reemite_aceptada(self):
+        g = self.Guia.create(self._vals())
+        g.estado = "enviado"
+        with self.assertRaisesRegex(UserError, "ya fue emitida"):
+            g._l10n_pe_ne_validar()
+
+    def test_valida_ok(self):
+        g = self.Guia.create(self._vals())
+        g._l10n_pe_ne_validar()  # no lanza

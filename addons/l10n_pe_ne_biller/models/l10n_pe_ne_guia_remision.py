@@ -5,8 +5,9 @@ es un documento de traslado propio, con su serie (T###) y su canal en el biller
 (`POST /generator/guia`, REST/OAuth2 — ver ms-ne-biller). Este modelo arma el payload que
 espera el biller (mismas claves que `GreCabeceraRequest`) y guarda el resultado.
 
-Fase 1 (modelo + orquestación): modelo + emisión al biller. La pantalla React (controller
-`/ne/api/guias`) y el PDF llegan en fases siguientes.
+El controller (`/ne/api/guias`), el PDF QWeb con el QR de SUNAT y la re-consulta del
+ticket (botón + cron) viven también en este addon; ver controllers/main.py y
+report/guia_report.xml.
 """
 import base64
 import io
@@ -44,6 +45,9 @@ UNIDADES_PESO = [('KGM', 'Kilogramos'), ('TNE', 'Toneladas')]
 # Motivos cuyo XML el biller sustenta completo hoy. 04 necesita código de establecimiento
 # anexo (AddressTypeCode), 08/09 contenedor/puerto — ampliar biller + este set al soportarlos.
 SUPPORTED_MOTIVOS = ('01', '02', '13', '14', '18')
+
+# Estados desde los que se puede (re)emitir o editar: aún sin CDR aceptado.
+ESTADOS_EMITIBLES = ('borrador', 'error', 'rechazado')
 
 
 class L10nPeNeGuiaRemision(models.Model):
@@ -271,7 +275,7 @@ class L10nPeNeGuiaRemision(models.Model):
     # ------------------------------------------------------------- emisión
     def _l10n_pe_ne_validar(self):
         self.ensure_one()
-        if self.estado not in ('borrador', 'error', 'rechazado'):
+        if self.estado not in ESTADOS_EMITIBLES:
             raise UserError(_('La guía %s ya fue emitida (estado: %s).') % (self.name, self.estado))
         if not self.line_ids:
             raise UserError(_('La guía necesita al menos un bien.'))
@@ -368,7 +372,7 @@ class L10nPeNeGuiaRemision(models.Model):
         # SUNAT valida fecEmision/horEmision contra el momento del envío: se estampan al
         # emitir (hora de Lima), no al crear el borrador. Solo en estados emitibles — una
         # guía ya aceptada no debe ver su fecha pisada ni siquiera antes del UserError.
-        if self.estado in ('borrador', 'error', 'rechazado'):
+        if self.estado in ESTADOS_EMITIBLES:
             ahora_lima = fields.Datetime.context_timestamp(
                 self.with_context(tz='America/Lima'), fields.Datetime.now())
             self.fecha_emision = ahora_lima.date()
@@ -624,9 +628,12 @@ class L10nPeNeGuiaRemision(models.Model):
         g = self.browse(int(payload.get('id') or 0)).exists()
         if not g:
             raise UserError(_('Guía no encontrada.'))
-        if g.estado not in ('borrador', 'error', 'rechazado'):
+        if g.estado not in ESTADOS_EMITIBLES:
             raise UserError(_('Solo se puede editar una guía en borrador.'))
         vals = g._l10n_pe_ne_guia_header_vals(payload)
+        # La serie es inmutable una vez numerada la guía (el correlativo depende de
+        # ella): honrarla aquí emitiría p.ej. T002-1 duplicando el de otra guía.
+        vals.pop('serie', None)
         if payload.get('destinatarioId') or payload.get('destinatario'):
             vals['partner_id'] = g._l10n_pe_ne_resolve_destinatario(payload).id
         if payload.get('items') is not None or payload.get('bienes') is not None:

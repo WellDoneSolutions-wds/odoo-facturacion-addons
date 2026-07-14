@@ -57,6 +57,12 @@ class TestGuiaNumeracion(TestGuiaBase):
         self.assertEqual(g1.name, "T005-1")
         self.assertEqual(g2.name, "T005-2")
 
+    def test_update_no_cambia_serie(self):
+        g = self.Guia.create(self._vals())  # T001-1
+        self.Guia.l10n_pe_ne_update_guia({"id": g.id, "serie": "T002"})
+        self.assertEqual(g.serie, "T001")
+        self.assertEqual(g.name, "T001-1")
+
     def test_indice_unico_secuencia_guia(self):
         # La carrera de creación concurrente debe morir en IntegrityError, no duplicar.
         from odoo.tools import mute_logger

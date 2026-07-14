@@ -4182,20 +4182,10 @@ class AccountMove(models.Model):
             }
             for t in self._l10n_pe_tributos()
         ]
-        # ICBPER: va como tributo 7152 en el RC para que la suma de componentes cuadre con totImpCpe
-        # (que incluye el ICBPER), evitando la observación 4027 del validador.
-        icbper = self._l10n_pe_total_icbper()
-        if icbper:
-            tributos.append(
-                {
-                    "idLineaRd": "1",
-                    "ideTributoRd": "7152",
-                    "nomTributoRd": "ICBPER",
-                    "codTipTributoRd": "OTH",
-                    "mtoBaseImponibleRd": "0.00",
-                    "mtoTributoRd": fmt(icbper),
-                }
-            )
+        # ICBPER (7152): NO se agrega aquí. _l10n_pe_tributos() ya lo incluye (regla 3279) y entra al
+        # RC por el comprehension de arriba. Duplicarlo generaba un segundo cac:TaxTotal con el mismo
+        # código de tributo → SUNAT rechazaba el RC (obs 2355: un solo TaxTotal por tributo/ítem). La
+        # suma de componentes con totImpCpe (obs 4027) sigue cuadrando: el ICBPER está presente una vez.
         # El validador exige que CADA línea del RC tenga el tributo IGV '1000'. Si la boleta no es
         # gravada (exo/inafecto/exportación/gratuita/IVAP), se agrega uno en cero (regla 2278).
         if not any(t["ideTributoRd"] == "1000" for t in tributos):
@@ -4272,10 +4262,8 @@ class AccountMove(models.Model):
             }
             for t in self._l10n_pe_tributos()
         ]
-        icbper = self._l10n_pe_total_icbper()
-        if icbper:
-            tributos.append({"idLineaRd": idl, "ideTributoRd": "7152", "nomTributoRd": "ICBPER",
-                             "codTipTributoRd": "OTH", "mtoBaseImponibleRd": "0.00", "mtoTributoRd": fmt(icbper)})
+        # ICBPER (7152): ya viene de _l10n_pe_tributos() por el comprehension; no re-agregarlo o SUNAT
+        # rechaza el RC con un TaxTotal duplicado (obs 2355).
         if not any(t["ideTributoRd"] == "1000" for t in tributos):
             tributos.append({"idLineaRd": idl, "ideTributoRd": "1000", "nomTributoRd": "IGV",
                              "codTipTributoRd": "VAT", "mtoBaseImponibleRd": "0.00", "mtoTributoRd": "0.00"})

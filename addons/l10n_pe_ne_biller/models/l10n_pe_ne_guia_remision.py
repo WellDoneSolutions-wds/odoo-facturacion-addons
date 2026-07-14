@@ -417,10 +417,10 @@ class L10nPeNeGuiaRemision(models.Model):
     @api.model
     def l10n_pe_ne_list_guias(self, query=None, limit=100, offset=None):
         """Lista de guías (para la UI). Paginación opt-in: con `offset` devuelve {items,total}."""
-        domain = []
+        domain = [('company_id', '=', self.env.company.id)]
         if query:
             q = query.strip()
-            domain = ['|', ('name', 'ilike', q), ('partner_id.name', 'ilike', q)]
+            domain += ['|', ('name', 'ilike', q), ('partner_id.name', 'ilike', q)]
         recs = self.search(domain, limit=limit, offset=offset or 0)
         items = [g._l10n_pe_ne_guia_dict() for g in recs]
         if offset is None:

@@ -68,3 +68,22 @@ class TestGuiaNumeracion(TestGuiaBase):
             with self.env.cr.savepoint():
                 Seq.create(dict(vals, name="GRE T777 duplicada"))
         self.assertIn("ir_sequence_gre_code_company_uniq", str(ctx.exception))
+
+
+class TestGuiaMultiCompany(TestGuiaBase):
+    def test_rule_aisla_companias(self):
+        self.Guia.create(self._vals())
+        otra = self.env["res.company"].create({"name": "Otra SAC", "vat": "20999999991"})
+        user_b = self.env["res.users"].create({
+            "name": "Emisor B", "login": "emisor_b_gre",
+            "company_id": otra.id, "company_ids": [(6, 0, [otra.id])],
+            "group_ids": [(4, self.env.ref("l10n_pe_ne_biller.group_l10n_pe_ne_emisor").id)],
+        })
+        visibles = self.Guia.with_user(user_b).with_company(otra).search([])
+        self.assertFalse(visibles, "un emisor de otra compañía no debe ver estas guías")
+
+    def test_list_filtra_por_company_activa(self):
+        self.Guia.create(self._vals())
+        otra = self.env["res.company"].create({"name": "Otra SAC 2", "vat": "20999999992"})
+        res = self.Guia.with_company(otra).l10n_pe_ne_list_guias(offset=0)
+        self.assertEqual(res["total"], 0)

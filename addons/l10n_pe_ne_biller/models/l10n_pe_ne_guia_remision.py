@@ -87,6 +87,9 @@ class L10nPeNeGuiaRemision(models.Model):
     transportista_id = fields.Many2one('res.partner', string='Transportista')
     num_reg_mtc = fields.Char(string='Registro MTC')
 
+    # Proveedor (motivo 02 Compra): SellerSupplierParty en el XML.
+    proveedor_id = fields.Many2one('res.partner', string='Proveedor')
+
     # Transporte privado (modalidad 02): vehículo + conductor.
     num_placa = fields.Char(string='Placa del vehículo')
     conductor_tipo_doc = fields.Selection([('1', 'DNI'), ('4', 'Carné ext.'), ('7', 'Pasaporte')],
@@ -203,6 +206,13 @@ class L10nPeNeGuiaRemision(models.Model):
             'ubiLlegada': self.ubigeo_llegada or '',
             'dirLlegada': self.dir_llegada or '',
         }
+        if self.motivo_traslado == '02' and self.proveedor_id:
+            prov = self.proveedor_id
+            cab.update({
+                'tipDocProveedor': self._l10n_pe_ne_doc_tipo(prov),
+                'numDocProveedor': prov.vat or '',
+                'rznSocialProveedor': prov.name or '',
+            })
         if self.modalidad_traslado == '01':  # transporte público
             t = self.transportista_id
             cab.update({
@@ -358,6 +368,8 @@ class L10nPeNeGuiaRemision(models.Model):
             'transportistaId': c.transportista_id.id if c.transportista_id else None,
             'transportista': c.transportista_id.name if c.transportista_id else '',
             'numRegMtc': c.num_reg_mtc or '',
+            'proveedorId': c.proveedor_id.id if c.proveedor_id else None,
+            'proveedor': c.proveedor_id.name if c.proveedor_id else '',
             'comprobanteId': c.comprobante_id.id if c.comprobante_id else None,
             'bienes': [{
                 'descripcion': l.descripcion, 'cantidad': l.cantidad, 'unidad': l.unidad or 'NIU',
@@ -483,6 +495,8 @@ class L10nPeNeGuiaRemision(models.Model):
             vals['fecha_inicio_traslado'] = payload['fechaInicioTraslado']
         if 'transportistaId' in payload:
             vals['transportista_id'] = int(payload['transportistaId']) if payload.get('transportistaId') else False
+        if 'proveedorId' in payload:
+            vals['proveedor_id'] = int(payload['proveedorId']) if payload.get('proveedorId') else False
         if 'comprobanteId' in payload:
             vals['comprobante_id'] = int(payload['comprobanteId']) if payload.get('comprobanteId') else False
         return vals

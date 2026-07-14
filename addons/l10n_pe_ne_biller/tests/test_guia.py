@@ -106,3 +106,18 @@ class TestGuiaMultiCompany(TestGuiaBase):
         otra = self.env["res.company"].create({"name": "Otra SAC 4", "vat": "20999999994"})
         res = self.Guia.with_company(otra).l10n_pe_ne_list_guias(query="T001", offset=0)
         self.assertEqual(res["total"], 0)
+
+
+class TestGuiaPayload(TestGuiaBase):
+    def test_payload_proveedor_motivo_compra(self):
+        prov = self.env["res.partner"].create({"name": "Proveedor SAC", "vat": "20507639024"})
+        g = self.Guia.create(self._vals(motivo_traslado="02", proveedor_id=prov.id))
+        cab = g._l10n_pe_ne_build_gre_payload()["cabecera"]
+        self.assertEqual(cab["numDocProveedor"], "20507639024")
+        self.assertEqual(cab["tipDocProveedor"], "6")
+        self.assertEqual(cab["rznSocialProveedor"], "Proveedor SAC")
+
+    def test_payload_sin_proveedor_no_manda_claves(self):
+        g = self.Guia.create(self._vals())  # motivo 01
+        cab = g._l10n_pe_ne_build_gre_payload()["cabecera"]
+        self.assertNotIn("numDocProveedor", cab)

@@ -1210,6 +1210,11 @@ class AccountMove(models.Model):
         # item "firmado" del worker async), reemplazarlo: sin esto quedaban DOS
         # adjuntos idénticos colgados del move (el viejo huérfano en el panel).
         if self.l10n_pe_biller_xml:
+            # Contenido distinto = re-emisión con XML corregido: los PDFs
+            # cacheados renderizan el XML viejo y quedarían servidos por
+            # siempre (el cache pdfver no detecta cambios de contenido).
+            if (self.l10n_pe_biller_xml.raw or b"") != body_text.encode("utf-8"):
+                self._l10n_pe_invalidar_pdfs()
             self.l10n_pe_biller_xml.unlink()
         att = self.env["ir.attachment"].create(
             {
@@ -1251,6 +1256,13 @@ class AccountMove(models.Model):
             self.l10n_pe_biller_message = _("La firma no devolvió un XML válido.")
             return False
         serie, correlativo = self._l10n_pe_serie_correlativo()
+        # Re-firma (re-emisión tras rechazo/error en modo instant): reemplaza el
+        # XML anterior (evita el adjunto huérfano) e invalida los PDFs cacheados
+        # del intento previo antes de pre-generar los nuevos.
+        if self.l10n_pe_biller_xml:
+            if (self.l10n_pe_biller_xml.raw or b"") != xml.encode("utf-8"):
+                self._l10n_pe_invalidar_pdfs()
+            self.l10n_pe_biller_xml.unlink()
         att = self.env["ir.attachment"].create(
             {
                 "name": "%s-%s-%s.xml" % (self.company_id.vat, serie, correlativo.zfill(8)),
@@ -1413,6 +1425,13 @@ class AccountMove(models.Model):
             self.l10n_pe_biller_state = "error"
             self.l10n_pe_biller_message = _("No se pudo encolar la emisión: %s") % exc
             return
+        # Re-emisión tras rechazado/error: el XML firmado y los PDFs del intento
+        # anterior quedan obsoletos (el worker firmará uno nuevo). Sin esto, el
+        # cache pdfver serviría la representación vieja para siempre y el PDF
+        # nuevo del worker jamás se adjuntaría (guard "ya hay PDF" del attach).
+        if self.l10n_pe_biller_xml:
+            self.l10n_pe_biller_xml.unlink()
+        self._l10n_pe_invalidar_pdfs()
         self.l10n_pe_biller_state = "en_proceso"
         self.l10n_pe_biller_message = _(
             "Encolado para envío a SUNAT — el resultado llega en unos minutos "
@@ -1436,6 +1455,31 @@ class AccountMove(models.Model):
         except Exception as exc:  # noqa: BLE001
             _logger.warning("async biller: no se pudo adelantar el cron: %s", exc)
 
+    def _l10n_pe_pdf_ver(self):
+        """Etiqueta de versión del template de PDF (`description` del adjunto):
+        _l10n_pe_get_pdf_attachment solo sirve el cache si coincide con el
+        `pdf_ver` vigente; cualquier PDF que se adjunte debe llevarla."""
+        return "pdfver:" + self.env["ir.config_parameter"].sudo().get_param(
+            "l10n_pe_ne_biller.pdf_ver", "1"
+        )
+
+    def _l10n_pe_invalidar_pdfs(self):
+        """Descarta los PDFs cacheados (A4 y ticket). Debe llamarse siempre que
+        el XML firmado cambie (re-emisión tras rechazo/error): la representación
+        impresa de un XML anterior no debe sobrevivir — el cache por `pdfver`
+        solo detecta cambios de template, no de contenido."""
+        self.ensure_one()
+        for campo in ("l10n_pe_biller_pdf", "l10n_pe_biller_pdf_ticket"):
+            att = self[campo]
+            if att:
+                try:
+                    att.sudo().unlink()
+                except Exception as exc:  # noqa: BLE001 — best-effort
+                    _logger.warning(
+                        "no se pudo descartar el PDF cacheado de %s: %s",
+                        self.name, exc,
+                    )
+
     def _l10n_pe_attach_async_pdf(self, s3c, bucket, item):
         """Adjunta el PDF pre-generado por el worker (pdf_s3_key del item), si
         ya existe y el move no tiene uno. Best-effort: si falta, el botón
@@ -1446,6 +1490,12 @@ class AccountMove(models.Model):
             return
         try:
             pdf_bytes = s3c.get_object(Bucket=bucket, Key=pdf_s3)["Body"].read()
+            if not pdf_bytes.startswith(b"%PDF"):
+                _logger.warning(
+                    "async biller: pdf_s3_key de %s no es un PDF; se ignora",
+                    self.name,
+                )
+                return
             serie = self.l10n_pe_ne_serie_emit
             corr = self.l10n_pe_ne_corr_emit
             if not serie or not corr:
@@ -1459,6 +1509,9 @@ class AccountMove(models.Model):
                     "res_id": self.id,
                     "mimetype": "application/pdf",
                     "raw": pdf_bytes,
+                    # Sin la etiqueta, la primera descarga vía API lo descartaba
+                    # (cache-busting) y re-renderizaba contra el micro (~hasta 60s).
+                    "description": self._l10n_pe_pdf_ver(),
                 }
             )
             self.l10n_pe_biller_pdf = att.id
@@ -3855,9 +3908,7 @@ class AccountMove(models.Model):
         # (config `pdf_ver`). Si esa versión cambió (mejora del template) o el PDF
         # viejo no la trae, se descarta y se regenera → nadie ve representaciones
         # desactualizadas. Para forzar regeneración masiva, subir el parámetro.
-        pdf_ver = "pdfver:" + self.env["ir.config_parameter"].sudo().get_param(
-            "l10n_pe_ne_biller.pdf_ver", "1"
-        )
+        pdf_ver = self._l10n_pe_pdf_ver()
         cached = self[cache_field]
         if cached:
             if cached.description == pdf_ver:

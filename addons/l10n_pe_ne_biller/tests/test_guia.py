@@ -235,3 +235,15 @@ class TestGuiaTicket(TestGuiaBase):
             g.l10n_pe_ne_consultar_ticket()
         self.assertEqual(g.estado, "en_proceso")
         self.assertIn("ilegible", g.l10n_pe_biller_message)
+
+
+class TestGuiaFechaEmision(TestGuiaBase):
+    def test_emitir_estampa_fecha_y_hora_lima(self):
+        g = self.Guia.create(self._vals(hora_emision="08:00:00",
+                                        fecha_emision="2026-01-01",
+                                        fecha_inicio_traslado="2026-12-31"))
+        resp = _Resp(text="<DespatchAdvice/>", headers={"X-Sunat-Ticket": "1"})
+        with patch(RUTA + ".post", return_value=resp):
+            g.l10n_pe_ne_emitir_guia()
+        self.assertNotEqual(str(g.fecha_emision), "2026-01-01")  # ya no es la fecha del borrador
+        self.assertNotEqual(g.hora_emision, "08:00:00")

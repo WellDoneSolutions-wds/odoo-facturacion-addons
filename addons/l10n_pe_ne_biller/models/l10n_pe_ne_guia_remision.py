@@ -343,6 +343,12 @@ class L10nPeNeGuiaRemision(models.Model):
         `X-Sunat-Cdr` (igual que la factura). Guarda ambos y fija el estado según el ResponseCode
         del CDR (0 = aceptado)."""
         self.ensure_one()
+        # SUNAT valida fecEmision/horEmision contra el momento del envío: se estampan al
+        # emitir (hora de Lima), no al crear el borrador.
+        ahora_lima = fields.Datetime.context_timestamp(
+            self.with_context(tz='America/Lima'), fields.Datetime.now())
+        self.fecha_emision = ahora_lima.date()
+        self.hora_emision = ahora_lima.strftime('%H:%M:%S')
         self._l10n_pe_ne_validar()
         icp = self.env['ir.config_parameter'].sudo()
         base = icp.get_param('l10n_pe_ne_biller.url', 'http://localhost:8090').rstrip('/')

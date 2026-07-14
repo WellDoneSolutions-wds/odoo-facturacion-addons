@@ -344,11 +344,13 @@ class L10nPeNeGuiaRemision(models.Model):
         del CDR (0 = aceptado)."""
         self.ensure_one()
         # SUNAT valida fecEmision/horEmision contra el momento del envío: se estampan al
-        # emitir (hora de Lima), no al crear el borrador.
-        ahora_lima = fields.Datetime.context_timestamp(
-            self.with_context(tz='America/Lima'), fields.Datetime.now())
-        self.fecha_emision = ahora_lima.date()
-        self.hora_emision = ahora_lima.strftime('%H:%M:%S')
+        # emitir (hora de Lima), no al crear el borrador. Solo en estados emitibles — una
+        # guía ya aceptada no debe ver su fecha pisada ni siquiera antes del UserError.
+        if self.estado in ('borrador', 'error', 'rechazado'):
+            ahora_lima = fields.Datetime.context_timestamp(
+                self.with_context(tz='America/Lima'), fields.Datetime.now())
+            self.fecha_emision = ahora_lima.date()
+            self.hora_emision = ahora_lima.strftime('%H:%M:%S')
         self._l10n_pe_ne_validar()
         icp = self.env['ir.config_parameter'].sudo()
         base = icp.get_param('l10n_pe_ne_biller.url', 'http://localhost:8090').rstrip('/')

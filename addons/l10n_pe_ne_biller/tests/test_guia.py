@@ -247,3 +247,12 @@ class TestGuiaFechaEmision(TestGuiaBase):
             g.l10n_pe_ne_emitir_guia()
         self.assertNotEqual(str(g.fecha_emision), "2026-01-01")  # ya no es la fecha del borrador
         self.assertNotEqual(g.hora_emision, "08:00:00")
+
+    def test_emitir_no_pisa_fecha_de_aceptada(self):
+        # Una guía ya aceptada no debe ver su fecha/hora pisadas ni aunque el intento falle.
+        g = self.Guia.create(self._vals(hora_emision="08:00:00", fecha_emision="2026-01-01"))
+        g.write({"estado": "enviado"})
+        with self.assertRaises(UserError):
+            g.l10n_pe_ne_emitir_guia()
+        self.assertEqual(str(g.fecha_emision), "2026-01-01")
+        self.assertEqual(g.hora_emision, "08:00:00")

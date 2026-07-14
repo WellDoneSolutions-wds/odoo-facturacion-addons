@@ -12,6 +12,22 @@ from odoo.exceptions import UserError
 
 _logger = logging.getLogger(__name__)
 
+# Cache del resource DynamoDB por región: crearlo cuesta 100-400ms de CPU y se
+# pagaba EN CADA consulta del autocomplete RUC/DNI. Vive por worker (prefork:
+# se puebla post-fork). Guarda (módulo_boto3, resource) para invalidarse solo
+# si boto3 fue parcheado (tests).
+_DYNAMO_RESOURCES = {}
+
+
+def _dynamo_resource(region):
+    cached = _DYNAMO_RESOURCES.get(region)
+    if cached is not None and cached[0] is boto3:
+        return cached[1]
+    resource = boto3.resource('dynamodb', region_name=region)
+    _DYNAMO_RESOURCES[region] = (boto3, resource)
+    return resource
+
+
 # Tiempo máximo (segundos) que esperamos a la API antes de rendirnos. Corto a
 # propósito: si el servicio externo está caído, la facturación no debe colgarse.
 LOOKUP_TIMEOUT = 8
@@ -136,13 +152,12 @@ class ResPartner(models.Model):
         # instancia en producción; variables de entorno o ~/.aws en local.
         # NUNCA guardar access/secret keys en la BD: cualquier admin las lee y
         # viajan en los backups (ya pasó una vez con una key de admin).
-        kwargs = {'region_name': region}
 
         # Clave primaria compuesta: la partición es el tipo de documento
         # (RUC/DNI, deducido de la longitud) y el rango es el número.
         doc_type = 'RUC' if len(doc_number) == 11 else 'DNI'
         try:
-            table = boto3.resource('dynamodb', **kwargs).Table(table_name)
+            table = _dynamo_resource(region).Table(table_name)
             response = table.get_item(Key={
                 hash_key: doc_type,
                 range_key: doc_number,

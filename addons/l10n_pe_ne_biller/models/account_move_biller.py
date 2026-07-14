@@ -21,6 +21,10 @@ from ..tools.amount_to_words import leyenda_monto
 
 _logger = logging.getLogger(__name__)
 
+# Cache de clientes boto3 por (service, region) — ver _l10n_pe_boto_client.
+# Guarda (módulo_boto3, cliente) para invalidarse solo si boto3 fue parcheado.
+_BOTO_CLIENTS = {}
+
 # Catálogo SUNAT de descripciones de motivo para Nota de Débito (08).
 ND_MOTIVO_DESC = {
     "01": "Intereses por mora",
@@ -1350,6 +1354,22 @@ class AccountMove(models.Model):
     # responde al instante; el Lambda facturas-worker procesa contra biller-core
     # con idempotencia (DynamoDB) y deja XML/CDR en S3; el cron de abajo recoge.
 
+    @api.model
+    def _l10n_pe_boto_client(self, service, region):
+        """Cliente boto3 memoizado por (service, region). Crear un cliente
+        cuesta 100-400ms de CPU (carga los modelos JSON del servicio) y se
+        pagaba dos veces POR EMISIÓN (dynamodb + sqs). El cache vive por
+        worker de Odoo (prefork: se puebla post-fork, sin estado compartido
+        entre procesos; los clientes boto3 son thread-safe para invocar).
+        Se reconstruye si el módulo boto3 cambió (tests que lo parchean)."""
+        key = (service, region)
+        cached = _BOTO_CLIENTS.get(key)
+        if cached is not None and cached[0] is boto3:
+            return cached[1]
+        client = boto3.client(service, region_name=region)
+        _BOTO_CLIENTS[key] = (boto3, client)
+        return client
+
     def _l10n_pe_enqueue_emission(self, icp):
         self.ensure_one()
         queue_url = icp.get_param("l10n_pe_ne_biller.sqs_queue_url", "")
@@ -1380,7 +1400,7 @@ class AccountMove(models.Model):
         table = icp.get_param("l10n_pe_ne_biller.results_table", "")
         if table:
             try:
-                boto3.client("dynamodb", region_name=region).delete_item(
+                self._l10n_pe_boto_client("dynamodb", region).delete_item(
                     TableName=table,
                     Key={
                         "ruc_emisor": {"S": msg["ruc"]},
@@ -1390,7 +1410,7 @@ class AccountMove(models.Model):
             except Exception as exc:  # noqa: BLE001
                 _logger.warning("async biller: no se pudo limpiar resultado previo: %s", exc)
         try:
-            boto3.client("sqs", region_name=region).send_message(
+            self._l10n_pe_boto_client("sqs", region).send_message(
                 QueueUrl=queue_url,
                 MessageBody=json.dumps(msg, ensure_ascii=False),
             )
@@ -1566,8 +1586,8 @@ class AccountMove(models.Model):
                 "async biller: faltan parámetros results_table/results_bucket o boto3"
             )
             return
-        ddb = boto3.client("dynamodb", region_name=region)
-        s3c = boto3.client("s3", region_name=region)
+        ddb = self._l10n_pe_boto_client("dynamodb", region)
+        s3c = self._l10n_pe_boto_client("s3", region)
         moves = self.search([("l10n_pe_biller_state", "=", "en_proceso")], limit=25)
         for move in moves:
             try:
@@ -4213,20 +4233,10 @@ class AccountMove(models.Model):
             }
             for t in self._l10n_pe_tributos()
         ]
-        # ICBPER: va como tributo 7152 en el RC para que la suma de componentes cuadre con totImpCpe
-        # (que incluye el ICBPER), evitando la observación 4027 del validador.
-        icbper = self._l10n_pe_total_icbper()
-        if icbper:
-            tributos.append(
-                {
-                    "idLineaRd": "1",
-                    "ideTributoRd": "7152",
-                    "nomTributoRd": "ICBPER",
-                    "codTipTributoRd": "OTH",
-                    "mtoBaseImponibleRd": "0.00",
-                    "mtoTributoRd": fmt(icbper),
-                }
-            )
+        # ICBPER (7152): NO se agrega aquí. _l10n_pe_tributos() ya lo incluye (regla 3279) y entra al
+        # RC por el comprehension de arriba. Duplicarlo generaba un segundo cac:TaxTotal con el mismo
+        # código de tributo → SUNAT rechazaba el RC (obs 2355: un solo TaxTotal por tributo/ítem). La
+        # suma de componentes con totImpCpe (obs 4027) sigue cuadrando: el ICBPER está presente una vez.
         # El validador exige que CADA línea del RC tenga el tributo IGV '1000'. Si la boleta no es
         # gravada (exo/inafecto/exportación/gratuita/IVAP), se agrega uno en cero (regla 2278).
         if not any(t["ideTributoRd"] == "1000" for t in tributos):
@@ -4303,10 +4313,8 @@ class AccountMove(models.Model):
             }
             for t in self._l10n_pe_tributos()
         ]
-        icbper = self._l10n_pe_total_icbper()
-        if icbper:
-            tributos.append({"idLineaRd": idl, "ideTributoRd": "7152", "nomTributoRd": "ICBPER",
-                             "codTipTributoRd": "OTH", "mtoBaseImponibleRd": "0.00", "mtoTributoRd": fmt(icbper)})
+        # ICBPER (7152): ya viene de _l10n_pe_tributos() por el comprehension; no re-agregarlo o SUNAT
+        # rechaza el RC con un TaxTotal duplicado (obs 2355).
         if not any(t["ideTributoRd"] == "1000" for t in tributos):
             tributos.append({"idLineaRd": idl, "ideTributoRd": "1000", "nomTributoRd": "IGV",
                              "codTipTributoRd": "VAT", "mtoBaseImponibleRd": "0.00", "mtoTributoRd": "0.00"})

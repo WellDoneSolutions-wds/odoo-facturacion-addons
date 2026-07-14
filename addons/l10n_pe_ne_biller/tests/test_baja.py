@@ -135,6 +135,42 @@ class TestBillerBaja(TransactionCase):
         self.assertEqual(len(igv), 1)                             # regla 2278: cada línea exige IGV 1000
         self.assertEqual(igv[0]['mtoTributoRd'], '0.00')          # en cero, no altera montos
 
+    def _boleta_icbper(self, correlativo='8'):
+        """Boleta B001 con una línea IGV + ICBPER (bolsa), lista para armar el RC.
+        _l10n_pe_tributos() ya expone el ICBPER (7152) a nivel cabecera (regla 3279)."""
+        if not self.igv:
+            self.skipTest("sin IGV 1000 en la localización")
+        icbper = self.env['account.tax'].create({
+            'name': 'ICBPER', 'type_tax_use': 'sale', 'amount_type': 'fixed', 'amount': 0.50,
+            'l10n_pe_edi_tax_code': '7152', 'tax_group_id': self.igv.tax_group_id.id})
+        cf = self.env['res.partner'].create({'name': 'VARIOS'})
+        move = self.env['account.move'].create({
+            'move_type': 'out_invoice', 'partner_id': cf.id, 'invoice_date': '2026-06-20',
+            'l10n_pe_serie': 'B001', 'l10n_pe_correlativo': correlativo,
+            'invoice_line_ids': [(0, 0, {'product_id': self.product.id, 'quantity': 2.0,
+                                         'price_unit': 45.0,
+                                         'tax_ids': [(6, 0, [self.igv.id, icbper.id])]})]})
+        move.l10n_pe_ne_tipo_doc = '03'
+        move.l10n_pe_ne_serie_emit = 'B001'
+        move.l10n_pe_ne_corr_emit = correlativo.zfill(8)
+        move.l10n_pe_ne_baja_correlativo = '1'
+        move.l10n_pe_ne_baja_fecha = '2026-06-21'
+        return move
+
+    def test_boleta_rc_baja_icbper_taxtotal_unico(self):
+        """Regresión (obs 2355 'un solo cac:TaxTotal por tributo/ítem'): una boleta con ICBPER
+        generaba DOS entradas 7152 en tributosDocResumen del RC de baja — _l10n_pe_tributos()
+        ya lo incluía y además se re-agregaba. Debe quedar UNA sola."""
+        linea = self._boleta_icbper()._l10n_pe_build_rc_request()['resumenDiario'][0]
+        icbper = [t for t in linea['tributosDocResumen'] if t['ideTributoRd'] == '7152']
+        self.assertEqual(len(icbper), 1, 'ICBPER (7152) duplicado en el RC de baja (obs 2355)')
+
+    def test_boleta_rc_emision_icbper_taxtotal_unico(self):
+        """Mismo bug/regresión en el Resumen Diario de EMISIÓN (_l10n_pe_rc_emision_item)."""
+        item = self._boleta_icbper(correlativo='9')._l10n_pe_rc_emision_item(1)
+        icbper = [t for t in item['tributosDocResumen'] if t['ideTributoRd'] == '7152']
+        self.assertEqual(len(icbper), 1, 'ICBPER (7152) duplicado en el RC de emisión (obs 2355)')
+
     def test_baja_fuera_de_plazo_rechaza(self):
         vieja = fields.Date.context_today(self.partner) - timedelta(days=10)
         move = self.env['account.move'].create({

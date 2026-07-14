@@ -6,6 +6,7 @@ from . import account_move_biller
 from . import account_payment_retencion
 from . import l10n_pe_ne_gasto
 from . import l10n_pe_ne_cotizacion
+from . import l10n_pe_ne_guia_remision
 from . import res_users
 from . import l10n_pe_ne_caja
 from . import l10n_pe_ne_lote

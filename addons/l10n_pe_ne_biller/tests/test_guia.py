@@ -56,3 +56,15 @@ class TestGuiaNumeracion(TestGuiaBase):
         g1, g2 = self.Guia.create([self._vals(serie="T005"), self._vals(serie="T005")])
         self.assertEqual(g1.name, "T005-1")
         self.assertEqual(g2.name, "T005-2")
+
+    def test_indice_unico_secuencia_guia(self):
+        # La carrera de creación concurrente debe morir en IntegrityError, no duplicar.
+        from odoo.tools import mute_logger
+        Seq = self.env["ir.sequence"].sudo()
+        vals = {"name": "GRE T777 (test)", "code": "l10n_pe.ne.guia_remision.T777",
+                "company_id": self.env.company.id, "padding": 1, "implementation": "no_gap"}
+        Seq.create(vals)
+        with mute_logger("odoo.sql_db"), self.assertRaises(Exception) as ctx:
+            with self.env.cr.savepoint():
+                Seq.create(dict(vals, name="GRE T777 duplicada"))
+        self.assertIn("ir_sequence_gre_code_company_uniq", str(ctx.exception))

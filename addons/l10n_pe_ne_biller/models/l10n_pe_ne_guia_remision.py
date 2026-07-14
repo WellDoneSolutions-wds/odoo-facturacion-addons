@@ -115,15 +115,27 @@ class L10nPeNeGuiaRemision(models.Model):
     l10n_pe_biller_message = fields.Char(string='Mensaje del facturador', copy=False)
     num_ticket = fields.Char(string='N° de ticket SUNAT', copy=False)
 
+    def init(self):
+        # Único parcial sobre las secuencias de guía: bajo REPEATABLE READ el lock
+        # consultivo no basta (el snapshot de una transacción concurrente puede no ver
+        # la secuencia recién commiteada y crearla de nuevo, duplicando correlativos).
+        # El índice convierte esa carrera en IntegrityError: un request fallido,
+        # nunca un correlativo duplicado ante SUNAT.
+        self.env.cr.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS ir_sequence_gre_code_company_uniq
+            ON ir_sequence (code, company_id)
+            WHERE code LIKE 'l10n_pe.ne.guia_remision.%'
+        """)
+
     @api.model
     def _l10n_pe_ne_next_correlativo(self, company, serie):
         """Correlativo por (compañía, serie): SUNAT exige numeración correlativa por serie y
         por RUC. Crea la secuencia al primer uso, sembrada tras el correlativo más alto ya
         emitido en esa serie (migración desde la secuencia global inicial)."""
         code = 'l10n_pe.ne.guia_remision.%s' % serie
-        # Lock consultivo por (code, compañía): serializa la creación/siembra de la
-        # secuencia en el primer uso — sin él, dos transacciones concurrentes pueden
-        # crear secuencias duplicadas y repetir correlativo (duplicado ante SUNAT).
+        # Lock consultivo: serializa el primer uso de una (serie, compañía) en el caso
+        # común. La garantía dura la pone el índice único parcial (ver init()): bajo
+        # REPEATABLE READ una transacción concurrente puede no ver el commit ajeno.
         self.env.cr.execute(
             "SELECT pg_advisory_xact_lock(hashtext(%s))", ('%s/%s' % (code, company.id),))
         Seq = self.env['ir.sequence'].sudo()

@@ -115,12 +115,40 @@ class L10nPeNeGuiaRemision(models.Model):
     l10n_pe_biller_message = fields.Char(string='Mensaje del facturador', copy=False)
     num_ticket = fields.Char(string='N° de ticket SUNAT', copy=False)
 
+    @api.model
+    def _l10n_pe_ne_next_correlativo(self, company, serie):
+        """Correlativo por (compañía, serie): SUNAT exige numeración correlativa por serie y
+        por RUC. Crea la secuencia al primer uso, sembrada tras el correlativo más alto ya
+        emitido en esa serie (migración desde la secuencia global inicial)."""
+        code = 'l10n_pe.ne.guia_remision.%s' % serie
+        Seq = self.env['ir.sequence'].sudo()
+        seq = Seq.search([('code', '=', code), ('company_id', '=', company.id)], limit=1)
+        if not seq:
+            ultimo = 0
+            for g in self.sudo().search([('company_id', '=', company.id), ('serie', '=', serie)]):
+                try:
+                    ultimo = max(ultimo, int(g.correlativo or 0))
+                except ValueError:
+                    pass
+            seq = Seq.create({
+                'name': 'GRE %s (%s)' % (serie, company.display_name),
+                'code': code,
+                'company_id': company.id,
+                'padding': 1,
+                'number_increment': 1,
+                'implementation': 'no_gap',
+                'number_next': ultimo + 1,
+            })
+        return seq.next_by_id()
+
     @api.model_create_multi
     def create(self, vals_list):
         for vals in vals_list:
             if not vals.get('name') or vals.get('name') == _('Nueva'):
                 serie = vals.get('serie') or 'T001'
-                corr = self.env['ir.sequence'].next_by_code('l10n_pe.ne.guia_remision') or '1'
+                company = self.env['res.company'].browse(
+                    vals.get('company_id') or self.env.company.id)
+                corr = self._l10n_pe_ne_next_correlativo(company, serie)
                 vals['correlativo'] = corr
                 vals['name'] = '%s-%s' % (serie, corr)
         return super().create(vals_list)

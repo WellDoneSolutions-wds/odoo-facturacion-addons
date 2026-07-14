@@ -12,7 +12,7 @@
     </record>
 
     <!-- Representación impresa de la GRE Remitente. Layout propio con logo, panel, datos de
-         traslado/transporte y QR SUNAT. Colores: violeta de marca #5046E4. -->
+         traslado/transporte y QR SUNAT. Colores: violeta de marca #334155. -->
     <template id="report_guia">
         <t t-call="web.html_container">
             <t t-foreach="docs" t-as="o">
@@ -29,10 +29,10 @@
                                     <div t-if="o.company_id.street" style="font-size:11px; color:#6b7280;"><span t-esc="o.company_id.street"/><t t-if="o.company_id.city">, <span t-esc="o.company_id.city"/></t></div>
                                 </td>
                                 <td style="vertical-align:top; width:44%; text-align:right;">
-                                    <div style="display:inline-block; border:1.5px solid #5046E4; border-radius:10px; padding:12px 18px; text-align:center; min-width:230px;">
-                                        <div style="color:#5046E4; font-weight:bold; font-size:14px; letter-spacing:.4px;">GUÍA DE REMISIÓN ELECTRÓNICA</div>
-                                        <div style="font-size:11px; color:#8b90a0;">REMITENTE</div>
-                                        <div style="border-top:1px solid #e6e8f2; margin:7px 0 5px;"/>
+                                    <div style="display:inline-block; border:1.5px solid #334155; border-radius:10px; padding:12px 18px; text-align:center; min-width:230px;">
+                                        <div style="color:#334155; font-weight:bold; font-size:14px; letter-spacing:.4px;">GUÍA DE REMISIÓN ELECTRÓNICA</div>
+                                        <div style="font-size:11px; color:#64748b;">REMITENTE</div>
+                                        <div style="border-top:1px solid #e2e8f0; margin:7px 0 5px;"/>
                                         <div style="font-size:11px; color:#4b5563;">R.U.C. N° <span t-esc="o.company_id.vat"/></div>
                                         <div style="font-size:15px; font-weight:bold;" t-esc="o.name"/>
                                         <div style="font-size:11px; color:#6b7280; margin-top:4px;">Fecha: <span t-field="o.fecha_emision"/></div>
@@ -42,8 +42,8 @@
                         </table>
 
                         <!-- Destinatario -->
-                        <div style="margin-top:18px; background:#f5f6fb; border:1px solid #e6e8f2; padding:11px 15px; border-radius:8px;">
-                            <div style="font-size:10px; text-transform:uppercase; letter-spacing:.08em; color:#8b90a0; margin-bottom:2px;">Destinatario</div>
+                        <div style="margin-top:18px; background:#f1f5f9; border:1px solid #e2e8f0; padding:11px 15px; border-radius:8px;">
+                            <div style="font-size:10px; text-transform:uppercase; letter-spacing:.08em; color:#64748b; margin-bottom:2px;">Destinatario</div>
                             <div style="font-weight:bold;"><span t-field="o.partner_id.name"/><t t-if="o.partner_id.vat"> · <span t-esc="o.partner_id.vat"/></t></div>
                         </div>
 
@@ -51,28 +51,29 @@
                         <table style="width:100%; margin-top:16px; border-collapse:collapse; font-size:11px;">
                             <tr>
                                 <td style="vertical-align:top; width:50%; padding-right:14px;">
-                                    <div style="font-size:10px; text-transform:uppercase; letter-spacing:.08em; color:#5046E4; font-weight:600; margin-bottom:4px;">Datos del traslado</div>
+                                    <div style="font-size:10px; text-transform:uppercase; letter-spacing:.08em; color:#334155; font-weight:600; margin-bottom:4px;">Datos del traslado</div>
                                     <table style="width:100%;">
-                                        <tr><td style="color:#8b90a0; padding:2px 0;">Motivo</td><td style="text-align:right;"><span t-field="o.motivo_traslado"/></td></tr>
-                                        <tr><td style="color:#8b90a0; padding:2px 0;">Modalidad</td><td style="text-align:right;"><span t-field="o.modalidad_traslado"/></td></tr>
-                                        <tr><td style="color:#8b90a0; padding:2px 0;">Peso bruto</td><td style="text-align:right;"><span t-esc="'%.3f' % o.peso_bruto"/> <span t-esc="o.uni_medida_peso"/></td></tr>
-                                        <tr><td style="color:#8b90a0; padding:2px 0;">N° de bultos</td><td style="text-align:right;"><span t-esc="o.num_bultos"/></td></tr>
-                                        <tr><td style="color:#8b90a0; padding:2px 0;">Inicio del traslado</td><td style="text-align:right;"><span t-field="o.fecha_inicio_traslado"/></td></tr>
+                                        <tr><td style="color:#64748b; padding:2px 0;">Motivo</td><td style="text-align:right;"><span t-field="o.motivo_traslado"/></td></tr>
+                                        <tr><td style="color:#64748b; padding:2px 0;">Modalidad</td><td style="text-align:right;"><span t-field="o.modalidad_traslado"/></td></tr>
+                                        <tr><td style="color:#64748b; padding:2px 0;">Peso bruto</td><td style="text-align:right;"><span t-esc="'%.3f' % o.peso_bruto"/> <span t-esc="o.uni_medida_peso"/></td></tr>
+                                        <tr><td style="color:#64748b; padding:2px 0;">N° de bultos</td><td style="text-align:right;"><span t-esc="o.num_bultos"/></td></tr>
+                                        <tr><td style="color:#64748b; padding:2px 0;">Inicio del traslado</td><td style="text-align:right;"><span t-field="o.fecha_inicio_traslado"/></td></tr>
+                                        <tr t-if="o.comprobante_id"><td style="color:#64748b; padding:2px 0;">Comprobante</td><td style="text-align:right;"><span t-esc="'%s-%s' % (o.comprobante_id.l10n_pe_ne_serie_emit or '', o.comprobante_id.l10n_pe_ne_corr_emit or '')"/></td></tr>
                                     </table>
                                 </td>
                                 <td style="vertical-align:top; width:50%; padding-left:14px;">
-                                    <div style="font-size:10px; text-transform:uppercase; letter-spacing:.08em; color:#5046E4; font-weight:600; margin-bottom:4px;">Transporte</div>
+                                    <div style="font-size:10px; text-transform:uppercase; letter-spacing:.08em; color:#334155; font-weight:600; margin-bottom:4px;">Transporte</div>
                                     <table style="width:100%;">
                                         <t t-if="o.modalidad_traslado == '02'">
-                                            <tr><td style="color:#8b90a0; padding:2px 0;">Placa</td><td style="text-align:right;" t-esc="o.num_placa or '—'"/></tr>
-                                            <tr><td style="color:#8b90a0; padding:2px 0;">Conductor</td><td style="text-align:right;"><span t-esc="o.conductor_nombres or ''"/> <span t-esc="o.conductor_apellidos or ''"/></td></tr>
-                                            <tr><td style="color:#8b90a0; padding:2px 0;">Doc. conductor</td><td style="text-align:right;" t-esc="o.conductor_num_doc or '—'"/></tr>
-                                            <tr><td style="color:#8b90a0; padding:2px 0;">Licencia</td><td style="text-align:right;" t-esc="o.conductor_licencia or '—'"/></tr>
+                                            <tr><td style="color:#64748b; padding:2px 0;">Placa</td><td style="text-align:right;" t-esc="o.num_placa or '—'"/></tr>
+                                            <tr><td style="color:#64748b; padding:2px 0;">Conductor</td><td style="text-align:right;"><span t-esc="o.conductor_nombres or ''"/> <span t-esc="o.conductor_apellidos or ''"/></td></tr>
+                                            <tr><td style="color:#64748b; padding:2px 0;">Doc. conductor</td><td style="text-align:right;" t-esc="o.conductor_num_doc or '—'"/></tr>
+                                            <tr><td style="color:#64748b; padding:2px 0;">Licencia</td><td style="text-align:right;" t-esc="o.conductor_licencia or '—'"/></tr>
                                         </t>
                                         <t t-else="">
-                                            <tr><td style="color:#8b90a0; padding:2px 0;">Transportista</td><td style="text-align:right;" t-esc="o.transportista_id.name or '—'"/></tr>
-                                            <tr t-if="o.transportista_id.vat"><td style="color:#8b90a0; padding:2px 0;">RUC</td><td style="text-align:right;" t-esc="o.transportista_id.vat"/></tr>
-                                            <tr><td style="color:#8b90a0; padding:2px 0;">Registro MTC</td><td style="text-align:right;" t-esc="o.num_reg_mtc or '—'"/></tr>
+                                            <tr><td style="color:#64748b; padding:2px 0;">Transportista</td><td style="text-align:right;" t-esc="o.transportista_id.name or '—'"/></tr>
+                                            <tr t-if="o.transportista_id.vat"><td style="color:#64748b; padding:2px 0;">RUC</td><td style="text-align:right;" t-esc="o.transportista_id.vat"/></tr>
+                                            <tr><td style="color:#64748b; padding:2px 0;">Registro MTC</td><td style="text-align:right;" t-esc="o.num_reg_mtc or '—'"/></tr>
                                         </t>
                                     </table>
                                 </td>
@@ -83,14 +84,14 @@
                         <table style="width:100%; margin-top:14px; border-collapse:collapse; font-size:11px;">
                             <tr>
                                 <td style="width:50%; padding-right:8px; vertical-align:top;">
-                                    <div style="background:#f5f6fb; border:1px solid #e6e8f2; border-radius:8px; padding:9px 12px;">
-                                        <div style="font-size:10px; text-transform:uppercase; letter-spacing:.06em; color:#8b90a0;">Punto de partida <span t-if="o.ubigeo_partida">· <span t-esc="o.ubigeo_partida"/></span></div>
+                                    <div style="background:#f1f5f9; border:1px solid #e2e8f0; border-radius:8px; padding:9px 12px;">
+                                        <div style="font-size:10px; text-transform:uppercase; letter-spacing:.06em; color:#64748b;">Punto de partida <span t-if="o.ubigeo_partida">· <span t-esc="o.ubigeo_partida"/></span></div>
                                         <div t-esc="o.dir_partida or ''"/>
                                     </div>
                                 </td>
                                 <td style="width:50%; padding-left:8px; vertical-align:top;">
-                                    <div style="background:#f5f6fb; border:1px solid #e6e8f2; border-radius:8px; padding:9px 12px;">
-                                        <div style="font-size:10px; text-transform:uppercase; letter-spacing:.06em; color:#8b90a0;">Punto de llegada <span t-if="o.ubigeo_llegada">· <span t-esc="o.ubigeo_llegada"/></span></div>
+                                    <div style="background:#f1f5f9; border:1px solid #e2e8f0; border-radius:8px; padding:9px 12px;">
+                                        <div style="font-size:10px; text-transform:uppercase; letter-spacing:.06em; color:#64748b;">Punto de llegada <span t-if="o.ubigeo_llegada">· <span t-esc="o.ubigeo_llegada"/></span></div>
                                         <div t-esc="o.dir_llegada or ''"/>
                                     </div>
                                 </td>
@@ -100,7 +101,7 @@
                         <!-- Bienes -->
                         <table style="width:100%; border-collapse:collapse; margin-top:16px; font-size:12px;">
                             <thead>
-                                <tr style="background:#5046E4; color:#ffffff;">
+                                <tr style="background:#334155; color:#ffffff;">
                                     <th style="text-align:center; padding:8px 6px; width:32px; border-radius:6px 0 0 0;">N°</th>
                                     <th style="text-align:left; padding:8px 10px;">Descripción</th>
                                     <th style="text-align:right; padding:8px 10px; width:80px;">Cantidad</th>
@@ -108,11 +109,11 @@
                                 </tr>
                             </thead>
                             <tbody>
-                                <tr t-foreach="o.line_ids" t-as="l" t-att-style="'border-bottom:1px solid #eef0f6;' + ('background:#fafbfe;' if l_index % 2 else '')">
-                                    <td style="text-align:center; padding:7px 6px; color:#9aa0b0;" t-esc="l_index + 1"/>
+                                <tr t-foreach="o.line_ids" t-as="l" t-att-style="'border-bottom:1px solid #eef2f6;' + ('background:#f8fafc;' if l_index % 2 else '')">
+                                    <td style="text-align:center; padding:7px 6px; color:#94a3b8;" t-esc="l_index + 1"/>
                                     <td style="padding:7px 10px;">
                                         <span t-esc="l.descripcion"/>
-                                        <div t-if="l.product_id.default_code" style="font-size:10px; color:#9aa0b0;">Cód.: <span t-esc="l.product_id.default_code"/></div>
+                                        <div t-if="l.product_id.default_code" style="font-size:10px; color:#94a3b8;">Cód.: <span t-esc="l.product_id.default_code"/></div>
                                     </td>
                                     <td style="text-align:right; padding:7px 10px;" t-esc="'%.2f' % l.cantidad"/>
                                     <td style="text-align:center; padding:7px 10px; color:#6b7280;" t-esc="l.unidad or 'NIU'"/>
@@ -126,10 +127,13 @@
                                 <td style="width:130px; vertical-align:top;">
                                     <t t-set="qr" t-value="o.l10n_pe_ne_qr_datauri()"/>
                                     <img t-if="qr" t-att-src="qr" style="width:110px; height:110px;"/>
+                                    <div t-if="not qr and o.estado != 'enviado'" style="width:110px; font-size:9px; color:#b91c1c; border:1px dashed #b91c1c; border-radius:8px; padding:8px; text-align:center;">
+                                        SIN VALOR PARA EL TRASLADO<br/>Pendiente de aceptación por SUNAT
+                                    </div>
                                 </td>
                                 <td style="vertical-align:top; padding-left:14px;">
                                     <t t-if="o.obs_guia">
-                                        <div style="font-size:10px; text-transform:uppercase; letter-spacing:.08em; color:#8b90a0;">Observación</div>
+                                        <div style="font-size:10px; text-transform:uppercase; letter-spacing:.08em; color:#64748b;">Observación</div>
                                         <div style="font-size:11px; color:#4b5563;" t-esc="o.obs_guia"/>
                                     </t>
                                 </td>
@@ -137,7 +141,7 @@
                         </table>
 
                         <!-- Pie -->
-                        <div style="margin-top:26px; border-top:1px solid #eef0f6; padding-top:10px; font-size:10px; color:#9aa0b0; text-align:center;">
+                        <div style="margin-top:26px; border-top:1px solid #eef2f6; padding-top:10px; font-size:10px; color:#94a3b8; text-align:center;">
                             Representación impresa de la Guía de Remisión Electrónica. Consulte la validez en SUNAT.
                         </div>
                     </div>

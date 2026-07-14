@@ -51,4 +51,15 @@
     <field name="interval_type">minutes</field>
     <field name="active" eval="True"/>
   </record>
+
+  <!-- Re-consulta de guías de remisión que quedaron en proceso (SUNAT sin CDR al emitir). -->
+  <record id="ir_cron_l10n_pe_ne_guias_en_proceso" model="ir.cron">
+    <field name="name">NE: consultar guías de remisión en proceso</field>
+    <field name="model_id" ref="model_l10n_pe_ne_guia_remision"/>
+    <field name="state">code</field>
+    <field name="code">model._cron_consultar_en_proceso()</field>
+    <field name="interval_number">10</field>
+    <field name="interval_type">minutes</field>
+    <field name="active" eval="True"/>
+  </record>
 </odoo>

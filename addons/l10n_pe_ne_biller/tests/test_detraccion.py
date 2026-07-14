@@ -40,6 +40,39 @@ class TestBillerDetraccion(TransactionCase):
         self.assertIn('2006', {l['codLeyenda'] for l in payload['leyendas']})
         self.assertEqual(payload['datoPago']['mtoNetoPendientePago'], '708.00')
 
+    def test_detraccion_cuenta_del_comprobante_gana(self):
+        """La cuenta de detracción tecleada en el comprobante gana sobre la configurada
+        en la empresa. Regresión: antes el cuentaBN del payload solo se guardaba en la
+        empresa (y solo la primera vez), así que emisiones posteriores salían con la
+        cuenta vieja en el PDF/XML."""
+        self.company.l10n_pe_ne_cuenta_detraccion = 'CUENTA-EMPRESA-VIEJA'
+        move = self.env['account.move'].create({
+            'move_type': 'out_invoice', 'partner_id': self.partner.id, 'invoice_date': '2026-06-20',
+            'l10n_pe_serie': 'F001', 'l10n_pe_correlativo': '9',
+            'invoice_line_ids': [(0, 0, {'product_id': self.product.id, 'quantity': 1.0,
+                                         'price_unit': 600.0, 'tax_ids': [(6, 0, self.igv.ids)]})]})
+        move._l10n_pe_ne_quick_flags(move, {'detraccion': {
+            'codBien': '037', 'tasa': 12, 'cuentaBN': 'CUENTA-NUEVA-123'}})
+        # La cuenta queda EN el comprobante, no pisa la de la empresa (ya tenía una).
+        self.assertEqual(move.l10n_pe_ne_detraccion_cuenta, 'CUENTA-NUEVA-123')
+        self.assertEqual(self.company.l10n_pe_ne_cuenta_detraccion, 'CUENTA-EMPRESA-VIEJA')
+        move.action_post()
+        adic = move._l10n_pe_build_invoice_request()['cabecera']['adicionalCabecera']
+        self.assertEqual(adic['ctaBancoNacionDetraccion'], 'CUENTA-NUEVA-123')
+
+    def test_detraccion_cuenta_fija_default_empresa_si_vacia(self):
+        """Si la empresa aún no tiene cuenta de detracción, la primera emisión la fija."""
+        self.company.l10n_pe_ne_cuenta_detraccion = False
+        move = self.env['account.move'].create({
+            'move_type': 'out_invoice', 'partner_id': self.partner.id, 'invoice_date': '2026-06-20',
+            'l10n_pe_serie': 'F001', 'l10n_pe_correlativo': '10',
+            'invoice_line_ids': [(0, 0, {'product_id': self.product.id, 'quantity': 1.0,
+                                         'price_unit': 600.0, 'tax_ids': [(6, 0, self.igv.ids)]})]})
+        move._l10n_pe_ne_quick_flags(move, {'detraccion': {
+            'codBien': '037', 'tasa': 12, 'cuentaBN': 'PRIMERA-CUENTA'}})
+        self.assertEqual(move.l10n_pe_ne_detraccion_cuenta, 'PRIMERA-CUENTA')
+        self.assertEqual(self.company.l10n_pe_ne_cuenta_detraccion, 'PRIMERA-CUENTA')
+
     def test_percepcion_en_factura(self):
         move = self.env['account.move'].create({
             'move_type': 'out_invoice', 'partner_id': self.partner.id, 'invoice_date': '2026-06-20',

@@ -26,15 +26,6 @@
     <field name="number_increment">1</field>
     <field name="implementation">no_gap</field>
   </record>
-  <!-- Correlativo de la Guía de Remisión (el número final es SERIE-CORRELATIVO, p.ej. T001-1).
-       Sin prefijo/padding: SUNAT numera correlativos sin ceros a la izquierda. -->
-  <record id="seq_l10n_pe_ne_guia_remision" model="ir.sequence">
-    <field name="name">Guía de Remisión NE Express</field>
-    <field name="code">l10n_pe.ne.guia_remision</field>
-    <field name="padding">1</field>
-    <field name="number_increment">1</field>
-    <field name="implementation">no_gap</field>
-  </record>
   <!-- URL base del microservicio ms-ne-biller. Editable en Ajustes > Técnico > Parámetros del sistema.
        El código usa este parámetro (clave l10n_pe_ne_biller.url) con localhost:8090 como respaldo. -->
   <record id="param_l10n_pe_ne_biller_url" model="ir.config_parameter">

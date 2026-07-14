@@ -214,6 +214,12 @@ class AccountMove(models.Model):
         copy=False,
         help="Catálogo 59 (001 = depósito en cuenta del Banco de la Nación).",
     )
+    l10n_pe_ne_detraccion_cuenta = fields.Char(
+        string="Cuenta de detracción (Banco de la Nación)",
+        copy=False,
+        help="Cuenta del Banco de la Nación de ESTE comprobante. Si se deja vacía, "
+        "se usa la cuenta de detracciones configurada en la empresa.",
+    )
     l10n_pe_ne_percepcion = fields.Boolean(string="Aplica percepción", copy=False)
     l10n_pe_ne_percepcion_rate = fields.Float(
         string="% Percepción", digits=(5, 2), default=2.0, copy=False
@@ -410,7 +416,8 @@ class AccountMove(models.Model):
         if self.l10n_pe_ne_detraccion:
             block.update(
                 {
-                    "ctaBancoNacionDetraccion": self.company_id.l10n_pe_ne_cuenta_detraccion
+                    "ctaBancoNacionDetraccion": self.l10n_pe_ne_detraccion_cuenta
+                    or self.company_id.l10n_pe_ne_cuenta_detraccion
                     or "",
                     "codBienDetraccion": self.l10n_pe_ne_detraccion_code or "",
                     "porDetraccion": fmt(self.l10n_pe_ne_detraccion_rate),
@@ -3631,8 +3638,13 @@ class AccountMove(models.Model):
             move.l10n_pe_ne_detraccion_rate = float(d.get("tasa") or 12)
             if d.get("medioPago"):
                 move.l10n_pe_ne_detraccion_medio_pago = d["medioPago"]
-            if d.get("cuentaBN") and not move.company_id.l10n_pe_ne_cuenta_detraccion:
-                move.company_id.sudo().l10n_pe_ne_cuenta_detraccion = d["cuentaBN"]
+            if d.get("cuentaBN"):
+                # La cuenta se guarda EN el comprobante (lo tecleado siempre gana y sale
+                # tal cual en su PDF/XML). Además, si la empresa aún no tiene cuenta de
+                # detracción por defecto, se fija con la primera para futuras emisiones.
+                move.l10n_pe_ne_detraccion_cuenta = d["cuentaBN"]
+                if not move.company_id.l10n_pe_ne_cuenta_detraccion:
+                    move.company_id.sudo().l10n_pe_ne_cuenta_detraccion = d["cuentaBN"]
         p = payload.get("percepcion")
         if p:
             move.l10n_pe_ne_percepcion = True

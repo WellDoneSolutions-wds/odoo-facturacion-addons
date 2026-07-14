@@ -44,3 +44,15 @@ class TestGuiaNumeracion(TestGuiaBase):
         otra = self.env["res.company"].create({"name": "Otra Empresa SAC", "vat": "20999999991"})
         g = self.Guia.with_company(otra).create(self._vals(company_id=otra.id))
         self.assertEqual(g.name, "T001-1")  # no comparte secuencia entre RUCs
+
+    def test_siembra_tras_correlativo_existente(self):
+        # Migración: guías numeradas por la secuencia global vieja no deben colisionar.
+        g_viejo = self.Guia.create(self._vals())
+        g_viejo.write({"serie": "T009", "correlativo": "41", "name": "T009-41"})
+        g = self.Guia.create(self._vals(serie="T009"))
+        self.assertEqual(g.name, "T009-42")
+
+    def test_batch_create_misma_serie_nueva(self):
+        g1, g2 = self.Guia.create([self._vals(serie="T005"), self._vals(serie="T005")])
+        self.assertEqual(g1.name, "T005-1")
+        self.assertEqual(g2.name, "T005-2")

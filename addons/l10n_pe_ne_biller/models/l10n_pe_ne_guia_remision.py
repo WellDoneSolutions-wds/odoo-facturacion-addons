@@ -121,6 +121,11 @@ class L10nPeNeGuiaRemision(models.Model):
         por RUC. Crea la secuencia al primer uso, sembrada tras el correlativo más alto ya
         emitido en esa serie (migración desde la secuencia global inicial)."""
         code = 'l10n_pe.ne.guia_remision.%s' % serie
+        # Lock consultivo por (code, compañía): serializa la creación/siembra de la
+        # secuencia en el primer uso — sin él, dos transacciones concurrentes pueden
+        # crear secuencias duplicadas y repetir correlativo (duplicado ante SUNAT).
+        self.env.cr.execute(
+            "SELECT pg_advisory_xact_lock(hashtext(%s))", ('%s/%s' % (code, company.id),))
         Seq = self.env['ir.sequence'].sudo()
         seq = Seq.search([('code', '=', code), ('company_id', '=', company.id)], limit=1)
         if not seq:

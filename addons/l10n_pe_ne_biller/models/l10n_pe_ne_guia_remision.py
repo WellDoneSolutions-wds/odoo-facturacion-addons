@@ -328,6 +328,11 @@ class L10nPeNeGuiaRemision(models.Model):
         if code == '0':
             self.estado = 'enviado'
             self.l10n_pe_biller_message = _('Aceptada por SUNAT — CDR ResponseCode 0. %s') % (desc or '')
+        elif not code:
+            # CDR ilegible (base64/zip corrupto o sin ResponseCode): NO es un rechazo
+            # de SUNAT — queda en_proceso para que el botón/cron reintenten con el ticket.
+            self.estado = 'en_proceso'
+            self.l10n_pe_biller_message = _('CDR recibido pero ilegible; se reintentará la consulta del ticket.')
         else:
             self.estado = 'rechazado'
             self.l10n_pe_biller_message = _('Rechazada por SUNAT (ResponseCode %s). %s') % (code or '—', desc or '')

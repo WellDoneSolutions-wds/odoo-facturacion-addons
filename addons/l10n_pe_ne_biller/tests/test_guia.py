@@ -225,3 +225,13 @@ class TestGuiaTicket(TestGuiaBase):
         g = self.Guia.create(self._vals())
         with self.assertRaises(UserError):
             g.l10n_pe_ne_consultar_ticket()
+
+    def test_cdr_ilegible_mantiene_en_proceso(self):
+        # Un CDR corrupto NO es un rechazo de SUNAT: debe poder reintentarse.
+        g = self.Guia.create(self._vals())
+        g.write({"estado": "en_proceso", "num_ticket": "156123"})
+        resp = _Resp(text='{"codRespuesta":"0"}', headers={"X-Sunat-Cdr": "AAAA"})  # b64 válido, zip inválido
+        with patch(RUTA + ".get", return_value=resp):
+            g.l10n_pe_ne_consultar_ticket()
+        self.assertEqual(g.estado, "en_proceso")
+        self.assertIn("ilegible", g.l10n_pe_biller_message)

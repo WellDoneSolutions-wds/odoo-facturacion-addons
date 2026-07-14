@@ -1141,6 +1141,15 @@ class L10nPeNeApi(http.Controller):
             return self._unauth()
         return self._run(lambda: self._guia(uid).browse(int(rec_id)).l10n_pe_ne_emitir_guia())
 
+    @http.route("/ne/api/guias/<int:rec_id>/consultar", **_POST)
+    def consultar_guia(self, rec_id, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(
+            lambda: self._guia(uid).browse(int(rec_id)).l10n_pe_ne_consultar_ticket()
+        )
+
     @http.route("/ne/api/comprobantes/<int:rec_id>/guia-prefill", **_GET)
     def guia_prefill(self, rec_id, **kw):
         uid = self._identify()

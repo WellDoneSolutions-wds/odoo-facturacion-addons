@@ -321,6 +321,17 @@ class L10nPeNeGuiaRemision(models.Model):
         self.l10n_pe_biller_cdr = att.id
         return self.env['account.move']._l10n_pe_parse_cdr_codes(cdr_bytes)
 
+    def _l10n_pe_ne_aplicar_cdr(self, cdr_b64):
+        """Guarda el CDR y fija estado/mensaje según su ResponseCode (0 = aceptada).
+        Camino común de la emisión síncrona y de la re-consulta del ticket."""
+        code, desc = self._l10n_pe_ne_store_cdr(cdr_b64)
+        if code == '0':
+            self.estado = 'enviado'
+            self.l10n_pe_biller_message = _('Aceptada por SUNAT — CDR ResponseCode 0. %s') % (desc or '')
+        else:
+            self.estado = 'rechazado'
+            self.l10n_pe_biller_message = _('Rechazada por SUNAT (ResponseCode %s). %s') % (code or '—', desc or '')
+
     def l10n_pe_ne_emitir_guia(self):
         """Emite la GRE al biller (`POST /generator/guia`): firma, envía a SUNAT y recoge el CDR.
         El biller devuelve el XML firmado en el body y el CDR (zip base64) en el header
@@ -350,23 +361,49 @@ class L10nPeNeGuiaRemision(models.Model):
                 'raw': body.encode('utf-8'),
             })
             self.l10n_pe_biller_xml = att.id
+            self.num_ticket = resp.headers.get('X-Sunat-Ticket') or self.num_ticket
             cdr_b64 = resp.headers.get('X-Sunat-Cdr')
             if cdr_b64:
-                code, desc = self._l10n_pe_ne_store_cdr(cdr_b64)
-                if code == '0':
-                    self.estado = 'enviado'
-                    self.l10n_pe_biller_message = _('Aceptada por SUNAT — CDR ResponseCode 0. %s') % (desc or '')
-                else:
-                    self.estado = 'rechazado'
-                    self.l10n_pe_biller_message = _('Rechazada por SUNAT (ResponseCode %s). %s') % (code or '—', desc or '')
+                self._l10n_pe_ne_aplicar_cdr(cdr_b64)
             else:
-                # Firmada y enviada, pero SUNAT aún no devolvió el CDR (ticket en proceso).
+                # Firmada y enviada, pero SUNAT aún no devolvió el CDR: queda el ticket
+                # para re-consultar (botón en la SPA + cron cada 10 min).
                 self.estado = 'en_proceso'
                 self.l10n_pe_biller_message = _('Firmada y enviada; SUNAT aún no devolvió el CDR.')
         else:
             self.estado = 'rechazado' if resp.status_code == 400 else 'error'
             self.l10n_pe_biller_message = ('HTTP %s: %s' % (resp.status_code, body))[:2000]
         return self._l10n_pe_ne_guia_dict()
+
+    def l10n_pe_ne_consultar_ticket(self):
+        """Re-consulta al biller el ticket de una guía en_proceso
+        (GET /generator/guia/ticket/{numTicket}) y aplica el CDR si ya está."""
+        self.ensure_one()
+        if self.estado != 'en_proceso' or not self.num_ticket:
+            raise UserError(_('Solo se puede consultar una guía en proceso con ticket de SUNAT.'))
+        icp = self.env['ir.config_parameter'].sudo()
+        base = icp.get_param('l10n_pe_ne_biller.url', 'http://localhost:8090').rstrip('/')
+        headers = {'X-Api-Key': self.company_id.sudo().l10n_pe_ne_api_key or ''}
+        try:
+            resp = requests.get('%s/generator/guia/ticket/%s' % (base, self.num_ticket),
+                                headers=headers, timeout=(5, 60))
+        except requests.RequestException as exc:
+            raise UserError(_('Error de conexión con el facturador: %s') % exc)
+        cdr_b64 = resp.headers.get('X-Sunat-Cdr')
+        if resp.status_code == 200 and cdr_b64:
+            self._l10n_pe_ne_aplicar_cdr(cdr_b64)
+        elif resp.status_code != 200:
+            self.l10n_pe_biller_message = ('HTTP %s: %s' % (resp.status_code, resp.text or ''))[:2000]
+        return self._l10n_pe_ne_guia_dict()
+
+    @api.model
+    def _cron_consultar_en_proceso(self):
+        """Cron: re-consulta todas las guías en_proceso con ticket. Best-effort."""
+        for g in self.search([('estado', '=', 'en_proceso'), ('num_ticket', '!=', False)]):
+            try:
+                g.l10n_pe_ne_consultar_ticket()
+            except Exception as exc:  # noqa: BLE001 — reintenta al próximo cron
+                _logger.warning('GRE %s: re-consulta falló: %s', g.name, exc)
 
     # ------------------------------------------------------- serialización
     def _l10n_pe_ne_guia_dict(self):

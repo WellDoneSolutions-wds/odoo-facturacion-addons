@@ -168,3 +168,60 @@ class TestGuiaValidaciones(TestGuiaBase):
     def test_valida_ok(self):
         g = self.Guia.create(self._vals())
         g._l10n_pe_ne_validar()  # no lanza
+
+
+class _Resp:
+    def __init__(self, status=200, text="", headers=None):
+        self.status_code = status
+        self.text = text
+        self.headers = headers or {}
+
+
+def _cdr_zip_b64(response_code="0", extra_xml=""):
+    xml = (
+        '<ar:ApplicationResponse xmlns:ar="urn:ar" xmlns:cbc="urn:cbc" xmlns:cac="urn:cac">'
+        + extra_xml +
+        '<cac:DocumentResponse><cac:Response>'
+        '<cbc:ResponseCode>%s</cbc:ResponseCode>'
+        '<cbc:Description>ACEPTADA</cbc:Description>'
+        '</cac:Response></cac:DocumentResponse></ar:ApplicationResponse>' % response_code
+    )
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("R-20123456789-09-T001-1.xml", xml)
+    return base64.b64encode(buf.getvalue()).decode()
+
+
+RUTA = "odoo.addons.l10n_pe_ne_biller.models.l10n_pe_ne_guia_remision.requests"
+
+
+class TestGuiaTicket(TestGuiaBase):
+    def test_emitir_guarda_ticket_cuando_no_hay_cdr(self):
+        g = self.Guia.create(self._vals())
+        resp = _Resp(text="<DespatchAdvice/>", headers={"X-Sunat-Ticket": "156123"})
+        with patch(RUTA + ".post", return_value=resp):
+            g.l10n_pe_ne_emitir_guia()
+        self.assertEqual(g.estado, "en_proceso")
+        self.assertEqual(g.num_ticket, "156123")
+
+    def test_consultar_ticket_aplica_cdr(self):
+        g = self.Guia.create(self._vals())
+        g.write({"estado": "en_proceso", "num_ticket": "156123"})
+        resp = _Resp(text='{"codRespuesta":"0"}', headers={"X-Sunat-Cdr": _cdr_zip_b64("0")})
+        with patch(RUTA + ".get", return_value=resp):
+            g.l10n_pe_ne_consultar_ticket()
+        self.assertEqual(g.estado, "enviado")
+        self.assertTrue(g.l10n_pe_biller_cdr)
+
+    def test_consultar_en_proceso_sigue_igual(self):
+        g = self.Guia.create(self._vals())
+        g.write({"estado": "en_proceso", "num_ticket": "156123"})
+        resp = _Resp(text='{"codRespuesta":"98"}')
+        with patch(RUTA + ".get", return_value=resp):
+            g.l10n_pe_ne_consultar_ticket()
+        self.assertEqual(g.estado, "en_proceso")
+
+    def test_consultar_sin_ticket_rechaza(self):
+        g = self.Guia.create(self._vals())
+        with self.assertRaises(UserError):
+            g.l10n_pe_ne_consultar_ticket()

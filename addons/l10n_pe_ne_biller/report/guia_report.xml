@@ -58,6 +58,7 @@
                                         <tr><td style="color:#8b90a0; padding:2px 0;">Peso bruto</td><td style="text-align:right;"><span t-esc="'%.3f' % o.peso_bruto"/> <span t-esc="o.uni_medida_peso"/></td></tr>
                                         <tr><td style="color:#8b90a0; padding:2px 0;">N° de bultos</td><td style="text-align:right;"><span t-esc="o.num_bultos"/></td></tr>
                                         <tr><td style="color:#8b90a0; padding:2px 0;">Inicio del traslado</td><td style="text-align:right;"><span t-field="o.fecha_inicio_traslado"/></td></tr>
+                                        <tr t-if="o.comprobante_id"><td style="color:#8b90a0; padding:2px 0;">Comprobante</td><td style="text-align:right;"><span t-esc="'%s-%s' % (o.comprobante_id.l10n_pe_ne_serie_emit or '', o.comprobante_id.l10n_pe_ne_corr_emit or '')"/></td></tr>
                                     </table>
                                 </td>
                                 <td style="vertical-align:top; width:50%; padding-left:14px;">
@@ -126,6 +127,9 @@
                                 <td style="width:130px; vertical-align:top;">
                                     <t t-set="qr" t-value="o.l10n_pe_ne_qr_datauri()"/>
                                     <img t-if="qr" t-att-src="qr" style="width:110px; height:110px;"/>
+                                    <div t-if="not qr and o.estado != 'enviado'" style="width:110px; font-size:9px; color:#b91c1c; border:1px dashed #b91c1c; border-radius:8px; padding:8px; text-align:center;">
+                                        SIN VALOR PARA EL TRASLADO<br/>Pendiente de aceptación por SUNAT
+                                    </div>
                                 </td>
                                 <td style="vertical-align:top; padding-left:14px;">
                                     <t t-if="o.obs_guia">

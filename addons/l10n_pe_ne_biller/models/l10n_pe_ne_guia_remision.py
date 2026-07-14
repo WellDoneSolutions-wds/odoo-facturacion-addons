@@ -9,9 +9,11 @@ Fase 1 (modelo + orquestación): modelo + emisión al biller. La pantalla React 
 `/ne/api/guias`) y el PDF llegan en fases siguientes.
 """
 import base64
+import io
 import json
 import logging
 import re
+import zipfile
 
 import requests
 
@@ -121,6 +123,8 @@ class L10nPeNeGuiaRemision(models.Model):
     l10n_pe_biller_cdr = fields.Many2one('ir.attachment', string='CDR', copy=False)
     l10n_pe_biller_message = fields.Char(string='Mensaje del facturador', copy=False)
     num_ticket = fields.Char(string='N° de ticket SUNAT', copy=False)
+    l10n_pe_ne_qr_url = fields.Char(string='URL del QR (SUNAT)', copy=False,
+                                    help='Viene en el CDR aceptado; es el QR válido para sustentar el traslado.')
 
     def init(self):
         # Único parcial sobre las secuencias de guía: bajo REPEATABLE READ el lock
@@ -303,6 +307,23 @@ class L10nPeNeGuiaRemision(models.Model):
             if len((self.transportista_id.vat or '').strip()) != 11:
                 raise UserError(_('El transportista debe tener RUC (11 dígitos).'))
 
+    def _l10n_pe_ne_extraer_qr_url(self, cdr_bytes):
+        """URL del código QR que SUNAT incluye en el CDR aceptado de la GRE. El QR de la
+        representación impresa DEBE ser este (RS 123-2022) — no uno generado localmente.
+        Busca la primera URL http(s) en los cbc:Note / cbc:DocumentDescription del
+        ApplicationResponse (regex sobre bytes, tolerante a namespaces)."""
+        try:
+            with zipfile.ZipFile(io.BytesIO(cdr_bytes)) as zf:
+                xml_name = next((n for n in zf.namelist() if n.lower().endswith('.xml')), None)
+                content = zf.read(xml_name) if xml_name else b''
+        except Exception:  # noqa: BLE001
+            return ''
+        for m in re.finditer(rb'<cbc:(?:Note|DocumentDescription)>([^<]*)</cbc:(?:Note|DocumentDescription)>', content):
+            um = re.search(r'https?://[^\s|<>"]+', m.group(1).decode('utf-8', 'replace'))
+            if um:
+                return um.group(0)
+        return ''
+
     def _l10n_pe_ne_store_cdr(self, cdr_b64):
         """Guarda el CDR (zip base64 del header X-Sunat-Cdr) como adjunto en l10n_pe_biller_cdr
         y devuelve (responseCode, description). Reusa el parser del CDR de account.move."""
@@ -319,6 +340,7 @@ class L10nPeNeGuiaRemision(models.Model):
             'raw': cdr_bytes,
         })
         self.l10n_pe_biller_cdr = att.id
+        self.l10n_pe_ne_qr_url = self._l10n_pe_ne_extraer_qr_url(cdr_bytes) or self.l10n_pe_ne_qr_url
         return self.env['account.move']._l10n_pe_parse_cdr_codes(cdr_bytes)
 
     def _l10n_pe_ne_aplicar_cdr(self, cdr_b64):
@@ -490,24 +512,16 @@ class L10nPeNeGuiaRemision(models.Model):
 
     # --------------------------------------------------- representación impresa
     def l10n_pe_ne_qr_data(self):
-        """Cadena del QR (formato SUNAT): RUC|tipoDoc|serie|correlativo|fecEmision|tipDocDest|numDocDest|hash."""
+        """Contenido del QR de la representación impresa: la URL que SUNAT devolvió en el
+        CDR aceptado. Sin CDR aceptado no hay QR (la guía aún no sustenta el traslado)."""
         self.ensure_one()
-        hash_ = ''
-        if self.l10n_pe_biller_xml:
-            m = re.search(rb'<ds:DigestValue>([^<]*)</ds:DigestValue>', self.l10n_pe_biller_xml.raw or b'')
-            if m:
-                hash_ = m.group(1).decode()
-        d = self.partner_id
-        tipdoc = '6' if len(d.vat or '') == 11 else '1' if len(d.vat or '') == 8 else '6'
-        return '|'.join([
-            self.company_id.vat or '', '09', self.serie or '', self.correlativo or '',
-            self.fecha_emision.strftime('%Y-%m-%d') if self.fecha_emision else '',
-            tipdoc, d.vat or '', hash_,
-        ])
+        return self.l10n_pe_ne_qr_url or ''
 
     def l10n_pe_ne_qr_datauri(self):
         """QR como data-URI PNG para la representación impresa. '' si no se puede generar."""
         self.ensure_one()
+        if not self.l10n_pe_ne_qr_data():
+            return ''
         try:
             png = self.env['ir.actions.report'].barcode('QR', self.l10n_pe_ne_qr_data(), width=220, height=220)
             return 'data:image/png;base64,' + base64.b64encode(png).decode()

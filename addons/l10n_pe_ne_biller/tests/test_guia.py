@@ -256,3 +256,21 @@ class TestGuiaFechaEmision(TestGuiaBase):
             g.l10n_pe_ne_emitir_guia()
         self.assertEqual(str(g.fecha_emision), "2026-01-01")
         self.assertEqual(g.hora_emision, "08:00:00")
+
+
+class TestGuiaQr(TestGuiaBase):
+    def test_extrae_url_del_cdr(self):
+        g = self.Guia.create(self._vals())
+        g.write({"estado": "en_proceso", "num_ticket": "1"})
+        nota = "|https://e-factura.sunat.gob.pe/v1/contribuyente/gem/comprobantes/xyz123|"
+        cdr = _cdr_zip_b64("0", extra_xml="<cbc:Note>%s</cbc:Note>" % nota)
+        resp = _Resp(text='{"codRespuesta":"0"}', headers={"X-Sunat-Cdr": cdr})
+        with patch(RUTA + ".get", return_value=resp):
+            g.l10n_pe_ne_consultar_ticket()
+        self.assertEqual(g.l10n_pe_ne_qr_url,
+                         "https://e-factura.sunat.gob.pe/v1/contribuyente/gem/comprobantes/xyz123")
+        self.assertEqual(g.l10n_pe_ne_qr_data(), g.l10n_pe_ne_qr_url)
+
+    def test_sin_cdr_no_hay_qr(self):
+        g = self.Guia.create(self._vals())
+        self.assertEqual(g.l10n_pe_ne_qr_data(), "")

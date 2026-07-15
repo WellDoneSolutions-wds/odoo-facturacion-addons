@@ -465,24 +465,50 @@ class AccountMove(models.Model):
             dato["tipMonedaMtoNetoPendientePago"] = moneda
         return dato
 
+    def _l10n_pe_cuotas_netas(self):
+        """Cuotas guardadas AJUSTADAS al neto pendiente. Con detracción, las cuotas pueden
+        venir sobre el TOTAL (front antiguo, emisión masiva, API); se escalan al neto para
+        que sumen exactamente el pendiente — la última absorbe el redondeo. Sin detracción
+        el neto == total, así que no cambian. Garantiza sum(cuotas) == mtoNetoPendientePago
+        pase lo que pase (SUNAT lo exige) y que el cliente no pague la parte detraída."""
+        cuotas = [
+            c
+            for c in (self.l10n_pe_ne_cuotas or [])
+            if c.get("fecha") and float(c.get("monto") or 0) > 0
+        ]
+        if not cuotas:
+            return []
+        neto = self._l10n_pe_neto_pendiente()
+        suma = sum(float(c["monto"]) for c in cuotas)
+        if suma <= 0 or abs(suma - neto) < 0.01:
+            return [{"fecha": c["fecha"], "monto": round(float(c["monto"]), 2)} for c in cuotas]
+        factor = neto / suma
+        out, acc = [], 0.0
+        for i, c in enumerate(cuotas):
+            if i < len(cuotas) - 1:
+                monto = round(float(c["monto"]) * factor, 2)
+                acc += monto
+            else:  # la última cuota cuadra el total al neto exacto
+                monto = round(neto - acc, 2)
+            out.append({"fecha": c["fecha"], "monto": monto})
+        return out
+
     def _l10n_pe_credito_pendiente(self):
-        """Monto neto pendiente del crédito = suma de cuotas; si no hay, el neto
-        (total − detracción). Las cuotas ya deben venir sobre el neto cuando hay
-        detracción (las arma el front); el fallback usa el neto por robustez."""
-        s = sum(float(c.get("monto") or 0) for c in (self.l10n_pe_ne_cuotas or []))
-        return s if s > 0 else self._l10n_pe_neto_pendiente()
+        """Monto neto pendiente del crédito = suma de las cuotas (ya ajustadas al neto);
+        si no hay cuotas, el neto (total − detracción)."""
+        netas = self._l10n_pe_cuotas_netas()
+        return sum(c["monto"] for c in netas) if netas else self._l10n_pe_neto_pendiente()
 
     def _l10n_pe_detalle_pago(self):
-        """detallePago (cuotas) para crédito: usa las cuotas guardadas o una = total."""
+        """detallePago (cuotas) para crédito: cuotas ajustadas al neto, o una = neto."""
         moneda = self.currency_id.name or "PEN"
         out = [
             {
-                "mtoCuotaPago": self._l10n_pe_fmt(float(c.get("monto") or 0)),
-                "fecCuotaPago": c.get("fecha") or "",
+                "mtoCuotaPago": self._l10n_pe_fmt(c["monto"]),
+                "fecCuotaPago": c["fecha"],
                 "tipMonedaCuotaPago": moneda,
             }
-            for c in (self.l10n_pe_ne_cuotas or [])
-            if c.get("fecha") and float(c.get("monto") or 0) > 0
+            for c in self._l10n_pe_cuotas_netas()
         ]
         if not out:
             fecha = self.invoice_date_due or self.invoice_date

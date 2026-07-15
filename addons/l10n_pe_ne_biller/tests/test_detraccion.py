@@ -34,11 +34,31 @@ class TestBillerDetraccion(TransactionCase):
         adic = cab['adicionalCabecera']
         self.assertEqual(adic['codBienDetraccion'], '037')
         self.assertEqual(adic['porDetraccion'], '12.00')
-        self.assertEqual(adic['mtoDetraccion'], '84.96')   # 12% de 708
+        # SUNAT redondea la detracción al entero: 12% de 708 = 84.96 -> 85.
+        self.assertEqual(adic['mtoDetraccion'], '85.00')
         self.assertEqual(adic['ctaBancoNacionDetraccion'], '00-000-000000')
         self.assertEqual(adic['codMedioPago'], '001')
         self.assertIn('2006', {l['codLeyenda'] for l in payload['leyendas']})
-        self.assertEqual(payload['datoPago']['mtoNetoPendientePago'], '708.00')
+        # Neto pendiente = total − detracción = 708 − 85 = 623.00 (el cliente paga el neto).
+        self.assertEqual(payload['datoPago']['mtoNetoPendientePago'], '623.00')
+
+    def test_detraccion_credito_neto_y_cuota_sobre_neto(self):
+        """Crédito con detracción: el neto pendiente y la cuota (sin cuotas explícitas)
+        van sobre total − detracción, no sobre el total. Regresión del bug reportado:
+        antes las cuotas repartían el total completo."""
+        move = self.env['account.move'].create({
+            'move_type': 'out_invoice', 'partner_id': self.partner.id, 'invoice_date': '2026-06-20',
+            'l10n_pe_serie': 'F001', 'l10n_pe_correlativo': '11',
+            'l10n_pe_ne_forma_pago': 'Credito',
+            'l10n_pe_ne_detraccion': True, 'l10n_pe_ne_detraccion_code': '037',
+            'l10n_pe_ne_detraccion_rate': 12.0,
+            'invoice_line_ids': [(0, 0, {'product_id': self.product.id, 'quantity': 1.0,
+                                         'price_unit': 600.0, 'tax_ids': [(6, 0, self.igv.ids)]})]})
+        move.action_post()
+        payload = move._l10n_pe_build_invoice_request()
+        # total 708, detracción 85 -> neto pendiente 623.00; la cuota default = neto.
+        self.assertEqual(payload['datoPago']['mtoNetoPendientePago'], '623.00')
+        self.assertEqual(payload['detallePago'][0]['mtoCuotaPago'], '623.00')
 
     def test_detraccion_cuenta_del_comprobante_gana(self):
         """La cuenta de detracción tecleada en el comprobante gana sobre la configurada

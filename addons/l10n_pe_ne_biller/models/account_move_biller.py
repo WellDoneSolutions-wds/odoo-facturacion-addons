@@ -16,6 +16,7 @@ except ImportError:  # pragma: no cover
 
 from odoo import _, api, fields, models
 from odoo.exceptions import UserError
+from odoo.tools import float_round
 
 from ..tools.amount_to_words import leyenda_monto
 
@@ -405,9 +406,21 @@ class AccountMove(models.Model):
 
     def _l10n_pe_detraccion_monto(self):
         self.ensure_one()
-        return round(
-            self.amount_total * (self.l10n_pe_ne_detraccion_rate or 0.0) / 100.0, 2
+        # SUNAT (SPOT): el monto de la detracción se redondea al ENTERO más próximo
+        # (sin decimales), medio hacia arriba. Ej.: 12% de 25 386.52 = 3046.38 -> 3046.
+        return float_round(
+            self.amount_total * (self.l10n_pe_ne_detraccion_rate or 0.0) / 100.0,
+            precision_digits=0,
+            rounding_method="HALF-UP",
         )
+
+    def _l10n_pe_neto_pendiente(self):
+        """Neto pendiente de pago = total − detracción (si aplica). Con detracción el
+        cliente solo paga el neto; el monto detraído se deposita en el Banco de la Nación,
+        así que el pendiente/cuotas van sobre el neto, no sobre el total."""
+        self.ensure_one()
+        det = self._l10n_pe_detraccion_monto() if self.l10n_pe_ne_detraccion else 0.0
+        return round((self.amount_total or 0.0) - det, 2)
 
     def _l10n_pe_adicional_cabecera(self):
         """Bloque adicional de la cabecera: detracción y/o total a cobrar de la percepción."""
@@ -444,15 +457,20 @@ class AccountMove(models.Model):
             }
         dato = {"formaPago": "Contado"}
         if self.l10n_pe_ne_detraccion:
-            # Operación al contado con detracción: se declara el neto pendiente de pago.
-            dato["mtoNetoPendientePago"] = self._l10n_pe_fmt(self.amount_total)
+            # Operación al contado con detracción: el neto pendiente es total − detracción
+            # (lo que el cliente paga; la detracción va al Banco de la Nación).
+            dato["mtoNetoPendientePago"] = self._l10n_pe_fmt(
+                self._l10n_pe_neto_pendiente()
+            )
             dato["tipMonedaMtoNetoPendientePago"] = moneda
         return dato
 
     def _l10n_pe_credito_pendiente(self):
-        """Monto neto pendiente del crédito = suma de cuotas; si no hay, el total."""
+        """Monto neto pendiente del crédito = suma de cuotas; si no hay, el neto
+        (total − detracción). Las cuotas ya deben venir sobre el neto cuando hay
+        detracción (las arma el front); el fallback usa el neto por robustez."""
         s = sum(float(c.get("monto") or 0) for c in (self.l10n_pe_ne_cuotas or []))
-        return s if s > 0 else (self.amount_total or 0.0)
+        return s if s > 0 else self._l10n_pe_neto_pendiente()
 
     def _l10n_pe_detalle_pago(self):
         """detallePago (cuotas) para crédito: usa las cuotas guardadas o una = total."""
@@ -470,7 +488,7 @@ class AccountMove(models.Model):
             fecha = self.invoice_date_due or self.invoice_date
             out = [
                 {
-                    "mtoCuotaPago": self._l10n_pe_fmt(self.amount_total),
+                    "mtoCuotaPago": self._l10n_pe_fmt(self._l10n_pe_neto_pendiente()),
                     "fecCuotaPago": fecha.strftime("%Y-%m-%d") if fecha else "",
                     "tipMonedaCuotaPago": moneda,
                 }

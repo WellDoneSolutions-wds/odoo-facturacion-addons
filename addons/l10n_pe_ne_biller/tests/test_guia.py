@@ -150,7 +150,9 @@ class TestGuiaValidaciones(TestGuiaBase):
         self._rechaza("RUC .* o DNI")
 
     def test_motivo_no_soportado(self):
-        self._rechaza("no soportado", motivo_traslado="04")
+        # '04' pasó a SUPPORTED_MOTIVOS (traslado entre establecimientos, ver
+        # TestGuiaWizard/amendment 3c); se usa '08' (Importación), que sigue sin XML.
+        self._rechaza("no soportado", motivo_traslado="08")
 
     def test_motivo_otros_sin_descripcion(self):
         self._rechaza("requiere describir", motivo_traslado="13")
@@ -280,3 +282,61 @@ class TestGuiaQr(TestGuiaBase):
     def test_sin_cdr_no_hay_qr(self):
         g = self.Guia.create(self._vals())
         self.assertEqual(g.l10n_pe_ne_qr_data(), "")
+
+
+class TestGuiaWizard(TestGuiaBase):
+    def _vals_wizard(self, **extra):
+        v = self._vals()
+        v.pop('num_placa', None); v.pop('conductor_num_doc', None)
+        v.update({
+            'vehiculo_ids': [(0, 0, {'placa': 'BET714', 'principal': True,
+                                     'ent_autorizacion': '06', 'num_autorizacion': '00786756'})],
+            'conductor_ids': [(0, 0, {'tipo_doc': '1', 'num_doc': '71958406', 'nombres': 'Hernan',
+                                      'apellidos': 'Vilca', 'licencia': 'U71958406', 'principal': True})],
+            'ind_retorno_vacio': True, 'cod_estab_partida': '0000',
+        })
+        v.update(extra)
+        return v
+
+    def test_payload_wizard_completo(self):
+        g = self.Guia.create(self._vals_wizard(ind_transbordo=True))
+        p = g._l10n_pe_ne_build_gre_payload()
+        cab = p['cabecera']
+        self.assertEqual(cab['indTransbordoProgDatosEnvio'], '1')
+        self.assertEqual(cab['indRetornoVehiculoVacio'], '1')
+        self.assertNotIn('indTrasladoVehiculoM1L', cab)     # apagado = ausente
+        self.assertEqual(cab['codEstabPartida'], '0000')
+        self.assertEqual(cab['numPlacaTransPrivado'], 'BET714')  # principal alimenta el legado
+        self.assertEqual(cab['entAutorizacionVehiculoPrincipal'], '06')
+
+    def test_payload_secundarios(self):
+        v = self._vals_wizard()
+        v['vehiculo_ids'].append((0, 0, {'placa': 'XYZ999', 'principal': False}))
+        v['conductor_ids'].append((0, 0, {'tipo_doc': '1', 'num_doc': '12345678', 'nombres': 'Juan',
+                                          'apellidos': 'Quispe', 'licencia': 'Q12345678', 'principal': False}))
+        g = self.Guia.create(v)
+        p = g._l10n_pe_ne_build_gre_payload()
+        self.assertEqual(p['cabecera']['vehiculosSecundarios'], [
+            {'numPlaca': 'XYZ999', 'entAutorizacion': '', 'numAutorizacion': ''}])
+        self.assertEqual(p['cabecera']['conductoresSecundarios'][0]['numDoc'], '12345678')
+
+    def test_max_dos_secundarios(self):
+        v = self._vals_wizard()
+        for i in range(3):
+            v['vehiculo_ids'].append((0, 0, {'placa': 'S%03d' % i, 'principal': False}))
+        g = self.Guia.create(v)
+        with self.assertRaisesRegex(UserError, 'máximo 2'):
+            g._l10n_pe_ne_validar()
+
+    def test_compat_legado(self):
+        g = self.Guia.create(self._vals())  # payload viejo con num_placa/conductor_*
+        p = g._l10n_pe_ne_build_gre_payload()
+        self.assertEqual(p['cabecera']['numPlacaTransPrivado'], 'ABC123')
+
+    def test_multiples_comprobantes(self):
+        v = self._vals_wizard()
+        g = self.Guia.create(v)
+        d = g.l10n_pe_ne_guia_detalle()
+        self.assertIn('comprobanteIds', d)
+        self.assertIn('vehiculos', d)
+        self.assertTrue(d['vehiculos'][0]['principal'])

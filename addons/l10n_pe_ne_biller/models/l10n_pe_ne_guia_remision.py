@@ -284,12 +284,17 @@ class L10nPeNeGuiaRemision(models.Model):
             cab['indRetornoVehiculoVacio'] = '1'
         # Establecimientos propios (motivo 04): el RUC gemelo SIEMPRE es el de esta
         # compañía — nunca se manda un codEstab* sin su rucEstab* (el biller lo rechaza).
+        # Sin RUC de compañía configurado no hay con qué llenar rucEstab*: mejor fallar acá
+        # con un mensaje claro que mandar el campo vacío al biller (F4).
+        if (self.cod_estab_partida or self.cod_estab_llegada) and not self.company_id.vat:
+            raise UserError(_('Configure el RUC de la compañía antes de emitir con '
+                              'establecimiento propio de partida/llegada.'))
         if self.cod_estab_partida:
             cab['codEstabPartida'] = self.cod_estab_partida
-            cab['rucEstabPartida'] = self.company_id.vat or ''
+            cab['rucEstabPartida'] = self.company_id.vat
         if self.cod_estab_llegada:
             cab['codEstabLlegada'] = self.cod_estab_llegada
-            cab['rucEstabLlegada'] = self.company_id.vat or ''
+            cab['rucEstabLlegada'] = self.company_id.vat
         if self.fecha_entrega_transportista:
             cab['fecEntregaBienesTransportista'] = self.fecha_entrega_transportista.strftime('%Y-%m-%d')
         if self.ent_autorizacion_carga:
@@ -414,19 +419,26 @@ class L10nPeNeGuiaRemision(models.Model):
         if self.modalidad_traslado == '02':
             if self.ind_m1l:
                 pass  # RS SUNAT: vehículos categoría M1/L no exigen vehículo/conductor
-            elif self.vehiculo_ids or self.conductor_ids:
+            else:
                 if len(self.vehiculo_ids.filtered('principal')) > 1:
                     raise UserError(_('Transporte privado: solo puede haber un vehículo principal.'))
                 if len(self.conductor_ids.filtered('principal')) > 1:
                     raise UserError(_('Transporte privado: solo puede haber un conductor principal.'))
-            else:
-                faltantes = [etiqueta for campo, etiqueta in (
-                    ('num_placa', _('la placa del vehículo')),
-                    ('conductor_num_doc', _('el documento del conductor')),
-                    ('conductor_nombres', _('los nombres del conductor')),
-                    ('conductor_apellidos', _('los apellidos del conductor')),
-                    ('conductor_licencia', _('la licencia de conducir')),
-                ) if not (self[campo] or '').strip()]
+                # Completitud exigida en AMBOS lados (vehículo Y conductor), sin importar
+                # qué representación use cada uno (lista nueva o campos legados): antes,
+                # que UN lado tuviera datos (en cualquier representación) bastaba para
+                # saltarse la validación del otro, colando conductor/vehículo vacíos hasta
+                # el biller (F1).
+                veh = self._l10n_pe_ne_principal(self.vehiculo_ids)
+                cond = self._l10n_pe_ne_principal(self.conductor_ids)
+                efectivos = (
+                    (_('la placa del vehículo'), (veh.placa if veh else self.num_placa) or ''),
+                    (_('el documento del conductor'), (cond.num_doc if cond else self.conductor_num_doc) or ''),
+                    (_('los nombres del conductor'), (cond.nombres if cond else self.conductor_nombres) or ''),
+                    (_('los apellidos del conductor'), (cond.apellidos if cond else self.conductor_apellidos) or ''),
+                    (_('la licencia de conducir'), (cond.licencia if cond else self.conductor_licencia) or ''),
+                )
+                faltantes = [etiqueta for etiqueta, valor in efectivos if not valor.strip()]
                 if faltantes:
                     raise UserError(_('Transporte privado: falta %s.') % ', '.join(faltantes))
         else:
@@ -762,21 +774,43 @@ class L10nPeNeGuiaRemision(models.Model):
         if 'proveedorId' in payload:
             vals['proveedor_id'] = int(payload['proveedorId']) if payload.get('proveedorId') else False
         if 'vehiculos' in payload:
-            vals['vehiculo_ids'] = [(5, 0, 0)] + [(0, 0, {
-                'placa': v.get('placa') or '',
-                'ent_autorizacion': v.get('entAutorizacion') or False,
-                'num_autorizacion': v.get('numAutorizacion') or False,
-                'principal': bool(v.get('principal')),
-            }) for v in (payload.get('vehiculos') or [])]
+            # placa es required= en el modelo línea, pero eso solo garantiza NOT NULL en
+            # SQL: un Char required acepta '' sin quejarse. Sin este guard, un vehículo sin
+            # placa se cuela silenciosamente (F2) y llega vacío al biller.
+            veh_vals = []
+            for v in (payload.get('vehiculos') or []):
+                placa = (v.get('placa') or '').strip()
+                if not placa:
+                    raise UserError(_('Cada vehículo necesita la placa.'))
+                veh_vals.append((0, 0, {
+                    'placa': placa,
+                    'ent_autorizacion': v.get('entAutorizacion') or False,
+                    'num_autorizacion': v.get('numAutorizacion') or False,
+                    'principal': bool(v.get('principal')),
+                }))
+            vals['vehiculo_ids'] = [(5, 0, 0)] + veh_vals
         if 'conductores' in payload:
-            vals['conductor_ids'] = [(5, 0, 0)] + [(0, 0, {
-                'tipo_doc': c.get('tipoDoc') or '1',
-                'num_doc': c.get('numDoc') or '',
-                'nombres': c.get('nombres') or '',
-                'apellidos': c.get('apellidos') or '',
-                'licencia': c.get('licencia') or '',
-                'principal': bool(c.get('principal')),
-            }) for c in (payload.get('conductores') or [])]
+            cond_vals = []
+            for c in (payload.get('conductores') or []):
+                num_doc = (c.get('numDoc') or '').strip()
+                nombres = (c.get('nombres') or '').strip()
+                apellidos = (c.get('apellidos') or '').strip()
+                licencia = (c.get('licencia') or '').strip()
+                faltantes = [etiqueta for etiqueta, valor in (
+                    (_('N° de documento'), num_doc), (_('nombres'), nombres),
+                    (_('apellidos'), apellidos), (_('licencia de conducir'), licencia),
+                ) if not valor]
+                if faltantes:
+                    raise UserError(_('Cada conductor necesita %s.') % ', '.join(faltantes))
+                cond_vals.append((0, 0, {
+                    'tipo_doc': c.get('tipoDoc') or '1',
+                    'num_doc': num_doc,
+                    'nombres': nombres,
+                    'apellidos': apellidos,
+                    'licencia': licencia,
+                    'principal': bool(c.get('principal')),
+                }))
+            vals['conductor_ids'] = [(5, 0, 0)] + cond_vals
         if 'comprobanteIds' in payload:
             ids = [int(x) for x in (payload.get('comprobanteIds') or [])]
             vals['comprobante_ids'] = [(6, 0, ids)]

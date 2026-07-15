@@ -340,3 +340,81 @@ class TestGuiaWizard(TestGuiaBase):
         self.assertIn('comprobanteIds', d)
         self.assertIn('vehiculos', d)
         self.assertTrue(d['vehiculos'][0]['principal'])
+
+    # ---------------------------------------------------- 3a: modalidad 01
+    def test_publico_sin_fecha_entrega_transportista(self):
+        t = self.env['res.partner'].create({'name': 'Transportista GRE', 'vat': '20100190797'})
+        g = self.Guia.create(self._vals(modalidad_traslado='01', transportista_id=t.id))
+        with self.assertRaisesRegex(UserError, 'entrega'):
+            g._l10n_pe_ne_validar()
+
+    # ------------------------------------------------------ 3b: motivo 02
+    def test_compra_con_estab_partida_rechaza(self):
+        prov = self.env['res.partner'].create({'name': 'Proveedor GRE', 'vat': '20507639024'})
+        g = self.Guia.create(self._vals(motivo_traslado='02', proveedor_id=prov.id,
+                                        cod_estab_partida='0001'))
+        with self.assertRaisesRegex(UserError, 'no admite establecimiento'):
+            g._l10n_pe_ne_validar()
+
+    # ------------------------------------------------------ 3c: motivo 04
+    def test_motivo_04_sin_estab_rechaza(self):
+        g = self.Guia.create(self._vals(motivo_traslado='04'))
+        with self.assertRaisesRegex(UserError, 'establecimiento en partida y llegada'):
+            g._l10n_pe_ne_validar()
+
+    def test_motivo_04_con_ambos_estab_pasa(self):
+        # F4: rucEstabPartida/rucEstabLlegada exigen company.vat configurado.
+        self.env.company.vat = '20601030013'
+        g = self.Guia.create(self._vals(motivo_traslado='04', cod_estab_partida='0000',
+                                        cod_estab_llegada='0001'))
+        g._l10n_pe_ne_validar()  # no lanza
+        cab = g._l10n_pe_ne_build_gre_payload()['cabecera']
+        self.assertEqual(cab['rucEstabPartida'], '20601030013')
+        self.assertEqual(cab['rucEstabLlegada'], '20601030013')
+
+    # ---------------------------------------------------- exención M1L
+    def test_m1l_sin_vehiculo_ni_conductor_pasa(self):
+        g = self.Guia.create(self._vals(
+            modalidad_traslado='02', ind_m1l=True,
+            num_placa=False, conductor_num_doc=False, conductor_nombres=False,
+            conductor_apellidos=False, conductor_licencia=False,
+        ))
+        g._l10n_pe_ne_validar()  # no lanza
+
+    # ------------------------------------------------- ambigüedad de principal
+    def test_dos_vehiculos_principales_rechaza(self):
+        v = self._vals_wizard()
+        v['vehiculo_ids'].append((0, 0, {'placa': 'XYZ999', 'principal': True}))
+        g = self.Guia.create(v)
+        with self.assertRaisesRegex(UserError, 'un vehículo principal'):
+            g._l10n_pe_ne_validar()
+
+    # --------------------------------------------------------- F1 regresión
+    def test_conductor_vacio_con_vehiculo_en_lista_rechaza(self):
+        # Antes bastaba con que el LADO vehículo tuviera datos (en cualquier
+        # representación) para que el lado conductor se colara vacío hasta el biller.
+        g = self.Guia.create(self._vals(
+            modalidad_traslado='02',
+            num_placa=False, conductor_num_doc=False, conductor_nombres=False,
+            conductor_apellidos=False, conductor_licencia=False,
+            vehiculo_ids=[(0, 0, {'placa': 'BET714', 'principal': True})],
+        ))
+        with self.assertRaisesRegex(UserError, 'conductor'):
+            g._l10n_pe_ne_validar()
+
+    # --------------------------------------------------------- F2 regresión
+    def test_header_vals_vehiculo_sin_placa_rechaza(self):
+        with self.assertRaisesRegex(UserError, 'placa'):
+            self.Guia._l10n_pe_ne_guia_header_vals({'vehiculos': [{'principal': True}]})
+
+    def test_header_vals_conductor_incompleto_rechaza(self):
+        with self.assertRaisesRegex(UserError, 'conductor'):
+            self.Guia._l10n_pe_ne_guia_header_vals(
+                {'conductores': [{'nombres': 'Juan', 'principal': True}]})
+
+    # --------------------------------------------------------- F4 regresión
+    def test_estab_partida_sin_vat_compania_rechaza(self):
+        self.env.company.vat = False
+        g = self.Guia.create(self._vals(cod_estab_partida='0000'))
+        with self.assertRaisesRegex(UserError, 'RUC de la compañía'):
+            g._l10n_pe_ne_build_gre_payload()

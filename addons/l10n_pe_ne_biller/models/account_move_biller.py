@@ -1503,6 +1503,13 @@ class AccountMove(models.Model):
         ya existe y el move no tiene uno. Best-effort: si falta, el botón
         Descargar PDF cae al camino síncrono de siempre."""
         self.ensure_one()
+        # El worker pre-genera el A4 SIN logo del emisor ni dirección del cliente (el mensaje
+        # de la cola no los lleva, ver _l10n_pe_enqueue_emission). Si el emisor tiene logo o el
+        # cliente tiene dirección, ese PDF saldría incompleto: NO lo adjuntamos y dejamos que la
+        # descarga lo regenere por la ruta síncrona (_l10n_pe_get_pdf_attachment), que sí los
+        # incluye. Si no hay nada que agregar, reusamos el del worker (más rápido, sin diferencia).
+        if self.company_id.logo or self.partner_id.street or self.partner_id.street2:
+            return
         pdf_s3 = (item.get("pdf_s3_key") or {}).get("S", "")
         if not pdf_s3 or self.l10n_pe_biller_pdf:
             return

@@ -16,6 +16,7 @@ except ImportError:  # pragma: no cover
 
 from odoo import _, api, fields, models
 from odoo.exceptions import UserError
+from odoo.tools import float_round
 
 from ..tools.amount_to_words import leyenda_monto
 
@@ -405,9 +406,21 @@ class AccountMove(models.Model):
 
     def _l10n_pe_detraccion_monto(self):
         self.ensure_one()
-        return round(
-            self.amount_total * (self.l10n_pe_ne_detraccion_rate or 0.0) / 100.0, 2
+        # SUNAT (SPOT): el monto de la detracción se redondea al ENTERO más próximo
+        # (sin decimales), medio hacia arriba. Ej.: 12% de 25 386.52 = 3046.38 -> 3046.
+        return float_round(
+            self.amount_total * (self.l10n_pe_ne_detraccion_rate or 0.0) / 100.0,
+            precision_digits=0,
+            rounding_method="HALF-UP",
         )
+
+    def _l10n_pe_neto_pendiente(self):
+        """Neto pendiente de pago = total − detracción (si aplica). Con detracción el
+        cliente solo paga el neto; el monto detraído se deposita en el Banco de la Nación,
+        así que el pendiente/cuotas van sobre el neto, no sobre el total."""
+        self.ensure_one()
+        det = self._l10n_pe_detraccion_monto() if self.l10n_pe_ne_detraccion else 0.0
+        return round((self.amount_total or 0.0) - det, 2)
 
     def _l10n_pe_adicional_cabecera(self):
         """Bloque adicional de la cabecera: detracción y/o total a cobrar de la percepción."""
@@ -444,33 +457,64 @@ class AccountMove(models.Model):
             }
         dato = {"formaPago": "Contado"}
         if self.l10n_pe_ne_detraccion:
-            # Operación al contado con detracción: se declara el neto pendiente de pago.
-            dato["mtoNetoPendientePago"] = self._l10n_pe_fmt(self.amount_total)
+            # Operación al contado con detracción: el neto pendiente es total − detracción
+            # (lo que el cliente paga; la detracción va al Banco de la Nación).
+            dato["mtoNetoPendientePago"] = self._l10n_pe_fmt(
+                self._l10n_pe_neto_pendiente()
+            )
             dato["tipMonedaMtoNetoPendientePago"] = moneda
         return dato
 
+    def _l10n_pe_cuotas_netas(self):
+        """Cuotas guardadas AJUSTADAS al neto pendiente. Con detracción, las cuotas pueden
+        venir sobre el TOTAL (front antiguo, emisión masiva, API); se escalan al neto para
+        que sumen exactamente el pendiente — la última absorbe el redondeo. Sin detracción
+        el neto == total, así que no cambian. Garantiza sum(cuotas) == mtoNetoPendientePago
+        pase lo que pase (SUNAT lo exige) y que el cliente no pague la parte detraída."""
+        cuotas = [
+            c
+            for c in (self.l10n_pe_ne_cuotas or [])
+            if c.get("fecha") and float(c.get("monto") or 0) > 0
+        ]
+        if not cuotas:
+            return []
+        neto = self._l10n_pe_neto_pendiente()
+        suma = sum(float(c["monto"]) for c in cuotas)
+        if suma <= 0 or abs(suma - neto) < 0.01:
+            return [{"fecha": c["fecha"], "monto": round(float(c["monto"]), 2)} for c in cuotas]
+        factor = neto / suma
+        out, acc = [], 0.0
+        for i, c in enumerate(cuotas):
+            if i < len(cuotas) - 1:
+                monto = round(float(c["monto"]) * factor, 2)
+                acc += monto
+            else:  # la última cuota cuadra el total al neto exacto
+                monto = round(neto - acc, 2)
+            out.append({"fecha": c["fecha"], "monto": monto})
+        return out
+
     def _l10n_pe_credito_pendiente(self):
-        """Monto neto pendiente del crédito = suma de cuotas; si no hay, el total."""
-        s = sum(float(c.get("monto") or 0) for c in (self.l10n_pe_ne_cuotas or []))
-        return s if s > 0 else (self.amount_total or 0.0)
+        """Monto neto pendiente del crédito = suma de las cuotas (ya ajustadas al neto);
+        si no hay cuotas, el neto (total − detracción)."""
+        netas = self._l10n_pe_cuotas_netas()
+        return sum(c["monto"] for c in netas) if netas else self._l10n_pe_neto_pendiente()
 
     def _l10n_pe_detalle_pago(self):
-        """detallePago (cuotas) para crédito: usa las cuotas guardadas o una = total."""
+        """detallePago (cuotas) para crédito: cuotas ajustadas al neto, o una = neto."""
         moneda = self.currency_id.name or "PEN"
         out = [
             {
-                "mtoCuotaPago": self._l10n_pe_fmt(float(c.get("monto") or 0)),
-                "fecCuotaPago": c.get("fecha") or "",
+                "mtoCuotaPago": self._l10n_pe_fmt(c["monto"]),
+                "fecCuotaPago": c["fecha"],
                 "tipMonedaCuotaPago": moneda,
             }
-            for c in (self.l10n_pe_ne_cuotas or [])
-            if c.get("fecha") and float(c.get("monto") or 0) > 0
+            for c in self._l10n_pe_cuotas_netas()
         ]
         if not out:
             fecha = self.invoice_date_due or self.invoice_date
             out = [
                 {
-                    "mtoCuotaPago": self._l10n_pe_fmt(self.amount_total),
+                    "mtoCuotaPago": self._l10n_pe_fmt(self._l10n_pe_neto_pendiente()),
                     "fecCuotaPago": fecha.strftime("%Y-%m-%d") if fecha else "",
                     "tipMonedaCuotaPago": moneda,
                 }
@@ -1485,6 +1529,13 @@ class AccountMove(models.Model):
         ya existe y el move no tiene uno. Best-effort: si falta, el botón
         Descargar PDF cae al camino síncrono de siempre."""
         self.ensure_one()
+        # El worker pre-genera el A4 SIN logo del emisor ni dirección del cliente (el mensaje
+        # de la cola no los lleva, ver _l10n_pe_enqueue_emission). Si el emisor tiene logo o el
+        # cliente tiene dirección, ese PDF saldría incompleto: NO lo adjuntamos y dejamos que la
+        # descarga lo regenere por la ruta síncrona (_l10n_pe_get_pdf_attachment), que sí los
+        # incluye. Si no hay nada que agregar, reusamos el del worker (más rápido, sin diferencia).
+        if self.company_id.logo or self.partner_id.street or self.partner_id.street2:
+            return
         pdf_s3 = (item.get("pdf_s3_key") or {}).get("S", "")
         if not pdf_s3 or self.l10n_pe_biller_pdf:
             return

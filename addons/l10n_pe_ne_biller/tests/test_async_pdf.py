@@ -122,6 +122,18 @@ class TestAsyncPdf(TransactionCase):
         self.assertFalse(self.move.l10n_pe_biller_xml, "el XML del intento rechazado se descarta")
         self.assertFalse(self.move.l10n_pe_biller_pdf, "el PDF del intento rechazado se descarta")
 
+    def test_attach_async_pdf_no_reusa_si_hay_direccion(self):
+        # (A) El A4 del worker sale SIN logo del emisor ni dirección del cliente (el mensaje de
+        # la cola no los lleva). Si el cliente tiene dirección —o el emisor logo: es el mismo
+        # guard `company.logo or street or street2`—, NO se adjunta el PDF del worker: la
+        # descarga lo regenera por la ruta síncrona, que sí los incluye. Ni siquiera toca S3.
+        s3c = _s3_mock(b'%PDF-1.4 pdf del worker')
+        self.move.partner_id.street = 'AV. SIEMPRE VIVA 123'
+        self.move._l10n_pe_attach_async_pdf(s3c, 'bucket', self.item)
+        self.assertFalse(self.move.l10n_pe_biller_pdf,
+                         "con dirección del cliente NO reusa el PDF (incompleto) del worker")
+        s3c.get_object.assert_not_called()
+
     def test_attach_async_pdf_noop_sin_key_o_con_pdf(self):
         # Sin pdf_s3_key en el item: no toca S3.
         s3c = _s3_mock(b'%PDF-1.4 x')

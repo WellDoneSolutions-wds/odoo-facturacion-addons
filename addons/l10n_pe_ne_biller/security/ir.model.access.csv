@@ -12,3 +12,5 @@ access_ne_emisor_caja_sesion,ne.emisor.caja.sesion,model_l10n_pe_ne_caja_sesion,
 access_ne_emisor_caja_movimiento,ne.emisor.caja.movimiento,model_l10n_pe_ne_caja_movimiento,group_l10n_pe_ne_emisor,1,1,1,0
 access_ne_emisor_lote,ne.emisor.lote,model_l10n_pe_ne_lote,group_l10n_pe_ne_emisor,1,1,1,1
 access_ne_emisor_lote_fila,ne.emisor.lote.fila,model_l10n_pe_ne_lote_fila,group_l10n_pe_ne_emisor,1,1,1,1
+access_ne_emisor_vehiculo,ne.emisor.vehiculo,model_l10n_pe_ne_vehiculo,group_l10n_pe_ne_emisor,1,1,1,1
+access_ne_emisor_conductor,ne.emisor.conductor,model_l10n_pe_ne_conductor,group_l10n_pe_ne_emisor,1,1,1,1

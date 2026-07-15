@@ -149,6 +149,10 @@ class L10nPeNeApi(http.Controller):
         u = self._user(uid)
         return request.env["l10n_pe_ne.guia_remision"].with_user(uid).with_company(u.company_id)
 
+    def _flota(self, uid, model):
+        u = self._user(uid)
+        return request.env[model].with_user(uid).with_company(u.company_id)
+
     def _caja(self, uid):
         u = self._user(uid)
         return request.env["l10n_pe_ne.caja.sesion"].with_user(uid).with_company(u.company_id)
@@ -1171,6 +1175,79 @@ class L10nPeNeApi(http.Controller):
             )
         except Exception as e:  # noqa: BLE001
             return self._fail(e)
+
+    # ------------------------------------------------- maestros frecuentes (GRE)
+    # Vehículos y conductores 'frecuentes' que el wizard de guías reutiliza al
+    # emitir (mismo criterio que el wizard de SUNAT: se guardan al usarlos).
+    @http.route("/ne/api/vehiculos", **_GET)
+    def list_vehiculos(self, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        try:
+            return self._json(self._flota(uid, "l10n_pe_ne.vehiculo").l10n_pe_ne_list())
+        except Exception as e:  # noqa: BLE001
+            return self._fail(e)
+
+    @http.route("/ne/api/vehiculos", **_POST)
+    def upsert_vehiculo(self, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(
+            lambda: self._flota(uid, "l10n_pe_ne.vehiculo")
+            .l10n_pe_ne_upsert(self._body())
+            ._l10n_pe_ne_dict()
+        )
+
+    @http.route("/ne/api/vehiculos/<int:rec_id>", **_DEL)
+    def delete_vehiculo(self, rec_id, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+
+        def op():
+            rec = self._flota(uid, "l10n_pe_ne.vehiculo").browse(int(rec_id)).exists()
+            if rec:
+                rec.unlink()
+            return {"ok": True, "modo": "eliminado"}
+
+        return self._run(op)
+
+    @http.route("/ne/api/conductores", **_GET)
+    def list_conductores(self, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        try:
+            return self._json(self._flota(uid, "l10n_pe_ne.conductor").l10n_pe_ne_list())
+        except Exception as e:  # noqa: BLE001
+            return self._fail(e)
+
+    @http.route("/ne/api/conductores", **_POST)
+    def upsert_conductor(self, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(
+            lambda: self._flota(uid, "l10n_pe_ne.conductor")
+            .l10n_pe_ne_upsert(self._body())
+            ._l10n_pe_ne_dict()
+        )
+
+    @http.route("/ne/api/conductores/<int:rec_id>", **_DEL)
+    def delete_conductor(self, rec_id, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+
+        def op():
+            rec = self._flota(uid, "l10n_pe_ne.conductor").browse(int(rec_id)).exists()
+            if rec:
+                rec.unlink()
+            return {"ok": True, "modo": "eliminado"}
+
+        return self._run(op)
 
     # ------------------------------------------------------------------- caja
     @http.route("/ne/api/caja", **_GET)

@@ -10,3 +10,4 @@ from . import l10n_pe_ne_guia_remision
 from . import res_users
 from . import l10n_pe_ne_caja
 from . import l10n_pe_ne_lote
+from . import l10n_pe_ne_flota

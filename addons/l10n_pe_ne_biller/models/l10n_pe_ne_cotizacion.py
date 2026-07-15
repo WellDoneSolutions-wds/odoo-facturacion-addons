@@ -8,6 +8,7 @@ Modelo propio simplificado (misma filosofía que l10n_pe_ne.gasto): TODA la lóg
 Aislado por compañía (regla multi-compañía global en security). El PDF se genera con
 un reporte QWeb nativo de Odoo (report/cotizacion_report.xml)."""
 import base64
+from datetime import timedelta
 
 from odoo import _, api, fields, models
 from odoo.exceptions import UserError
@@ -280,6 +281,14 @@ class L10nPeNeCotizacion(models.Model):
         if cot:
             cot.unlink()
         return {'ok': True, 'modo': 'eliminado'}
+
+    def l10n_pe_ne_valida_hasta(self):
+        """'dd/mm/aaaa' de fecha + validez, para la representación impresa (el cliente ve
+        la fecha límite concreta, no cuántos días contar)."""
+        self.ensure_one()
+        if not self.fecha:
+            return ''
+        return (self.fecha + timedelta(days=self.validez_dias or 0)).strftime('%d/%m/%Y')
 
     def l10n_pe_ne_importe_en_letras(self):
         """Importe total en letras, formato peruano estándar: 'OCHO CON 50/100 SOLES'.

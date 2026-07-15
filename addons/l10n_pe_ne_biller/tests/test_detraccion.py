@@ -60,6 +60,31 @@ class TestBillerDetraccion(TransactionCase):
         self.assertEqual(payload['datoPago']['mtoNetoPendientePago'], '623.00')
         self.assertEqual(payload['detallePago'][0]['mtoCuotaPago'], '623.00')
 
+    def test_detraccion_credito_cuotas_explicitas_se_ajustan_al_neto(self):
+        """Cuotas explícitas que suman el TOTAL (front antiguo / masiva) se escalan al neto:
+        el cliente no paga la parte detraída. Regresión del caso reportado (p.ej. 830x3 sobre
+        2490 debía repartir 2390). Aquí: total 708, cuotas 236x3=708 -> se ajustan a 623."""
+        move = self.env['account.move'].create({
+            'move_type': 'out_invoice', 'partner_id': self.partner.id, 'invoice_date': '2026-06-20',
+            'l10n_pe_serie': 'F001', 'l10n_pe_correlativo': '12',
+            'l10n_pe_ne_forma_pago': 'Credito',
+            'l10n_pe_ne_detraccion': True, 'l10n_pe_ne_detraccion_code': '037',
+            'l10n_pe_ne_detraccion_rate': 12.0,
+            'l10n_pe_ne_cuotas': [
+                {'fecha': '2026-07-20', 'monto': 236.0},
+                {'fecha': '2026-08-20', 'monto': 236.0},
+                {'fecha': '2026-09-20', 'monto': 236.0},
+            ],
+            'invoice_line_ids': [(0, 0, {'product_id': self.product.id, 'quantity': 1.0,
+                                         'price_unit': 600.0, 'tax_ids': [(6, 0, self.igv.ids)]})]})
+        move.action_post()
+        payload = move._l10n_pe_build_invoice_request()
+        cuotas = payload['detallePago']
+        self.assertEqual(len(cuotas), 3)
+        suma = round(sum(float(c['mtoCuotaPago']) for c in cuotas), 2)
+        self.assertEqual(suma, 623.00)  # 708 escalado al neto (708 − 85)
+        self.assertEqual(payload['datoPago']['mtoNetoPendientePago'], '623.00')
+
     def test_detraccion_cuenta_del_comprobante_gana(self):
         """La cuenta de detracción tecleada en el comprobante gana sobre la configurada
         en la empresa. Regresión: antes el cuentaBN del payload solo se guardaba en la

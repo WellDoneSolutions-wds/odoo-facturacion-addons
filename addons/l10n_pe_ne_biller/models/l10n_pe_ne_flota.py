@@ -45,6 +45,13 @@ class L10nPeNeVehiculo(models.Model):
         return [v._l10n_pe_ne_dict()
                 for v in self.search([('company_id', '=', self.env.company.id)])]
 
+    @api.model
+    def l10n_pe_ne_delete_vehiculo(self, rec_id):
+        v = self.browse(int(rec_id or 0)).exists()
+        if v:
+            v.unlink()
+        return {'ok': True, 'modo': 'eliminado'}
+
 
 class L10nPeNeConductor(models.Model):
     _name = 'l10n_pe_ne.conductor'
@@ -91,3 +98,10 @@ class L10nPeNeConductor(models.Model):
     def l10n_pe_ne_list(self):
         return [c._l10n_pe_ne_dict()
                 for c in self.search([('company_id', '=', self.env.company.id)])]
+
+    @api.model
+    def l10n_pe_ne_delete_conductor(self, rec_id):
+        c = self.browse(int(rec_id or 0)).exists()
+        if c:
+            c.unlink()
+        return {'ok': True, 'modo': 'eliminado'}

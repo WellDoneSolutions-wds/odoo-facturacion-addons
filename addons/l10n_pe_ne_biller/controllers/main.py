@@ -1205,14 +1205,10 @@ class L10nPeNeApi(http.Controller):
         uid = self._identify()
         if not uid:
             return self._unauth()
-
-        def op():
-            rec = self._flota(uid, "l10n_pe_ne.vehiculo").browse(int(rec_id)).exists()
-            if rec:
-                rec.unlink()
-            return {"ok": True, "modo": "eliminado"}
-
-        return self._run(op)
+        return self._run(
+            lambda: self._flota(uid, "l10n_pe_ne.vehiculo")
+            .l10n_pe_ne_delete_vehiculo(rec_id)
+        )
 
     @http.route("/ne/api/conductores", **_GET)
     def list_conductores(self, **kw):
@@ -1240,14 +1236,10 @@ class L10nPeNeApi(http.Controller):
         uid = self._identify()
         if not uid:
             return self._unauth()
-
-        def op():
-            rec = self._flota(uid, "l10n_pe_ne.conductor").browse(int(rec_id)).exists()
-            if rec:
-                rec.unlink()
-            return {"ok": True, "modo": "eliminado"}
-
-        return self._run(op)
+        return self._run(
+            lambda: self._flota(uid, "l10n_pe_ne.conductor")
+            .l10n_pe_ne_delete_conductor(rec_id)
+        )
 
     # ------------------------------------------------------------------- caja
     @http.route("/ne/api/caja", **_GET)

@@ -102,5 +102,14 @@
             <field name="domain_force">[('company_id', 'in', company_ids)]</field>
             <field name="global" eval="True"/>
         </record>
+
+        <!-- Aislamiento multi-compañía para los establecimientos anexos del
+             emisor (GRE): mismo patrón que vehículo/conductor. -->
+        <record id="rule_l10n_pe_ne_establecimiento_company" model="ir.rule">
+            <field name="name">Establecimiento NE Express: aislamiento por compañía</field>
+            <field name="model_id" ref="model_l10n_pe_ne_establecimiento"/>
+            <field name="domain_force">[('company_id', 'in', company_ids)]</field>
+            <field name="global" eval="True"/>
+        </record>
     </data>
 </odoo>

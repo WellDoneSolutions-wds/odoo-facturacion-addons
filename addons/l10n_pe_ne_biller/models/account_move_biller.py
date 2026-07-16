@@ -1999,6 +1999,10 @@ class AccountMove(models.Model):
         move = self.env["account.move"].create(vals)
         self._l10n_pe_ne_quick_flags(move, payload)
         move.action_post()
+        # Stock: el bien sale (o vuelve, si es NC) cuando la venta existe en Odoo, no cuando
+        # SUNAT responde — la mercadería ya cambió de manos. Va después del post y antes de
+        # enviar: si SUNAT rechaza, el movimiento se corrige con la NC, igual que el importe.
+        move._l10n_pe_ne_mover_stock()
         # Nota de Crédito: no puede acreditar más de lo facturado. Se permiten VARIAS NC
         # sobre el mismo comprobante, pero el ACUMULADO no puede superar su total: el tope
         # de esta nota es el saldo pendiente de acreditar (total − NC previas vigentes).
@@ -3104,6 +3108,149 @@ class AccountMove(models.Model):
         if t in ("servicio", "servicios", "service"):
             return "service"
         return "service" if (unidad or "").strip().upper() == "ZZ" else "consu"
+    def _l10n_pe_ne_lineas_con_stock(self):
+        """Líneas del comprobante cuyo producto lleva existencias. En Odoo 19 eso es
+        type='consu' Y is_storable=True: 'consu' solo dice que es tangible; el booleano decide
+        si se rastrea. Un servicio nunca mueve stock."""
+        self.ensure_one()
+        return self.invoice_line_ids.filtered(
+            lambda l: l.product_id
+            and l.product_id.type == "consu"
+            and l.product_id.is_storable
+            and (l.quantity or 0) > 0
+        )
+
+    def _l10n_pe_ne_mover_stock(self, reversa=False):
+        """Descuenta (o repone) el stock de las líneas de bien del comprobante.
+
+        `reversa=True` invierte la dirección y marca los movimientos como reversa: lo usa
+        _l10n_pe_ne_revertir_stock cuando SUNAT rechaza.
+
+        La factura NO mueve stock en Odoo: los movimientos nacen de un stock.picking, que en
+        el flujo estándar viene de un sale.order. Esta app no usa sale.order —emite el
+        account.move directo— así que el movimiento se crea aquí, igual que hace el POS de
+        Odoo (pos_order._create_order_picking() corre aparte de _generate_pos_order_invoice()).
+
+        Dirección según el documento:
+          * 01/03 (factura/boleta) → SALIDA: existencias → cliente.
+          * 07 (nota de crédito)   → ENTRADA: cliente → existencias. Sin esto, anular una
+            venta dejaría el stock descontado para siempre y el kardex se iría en falso.
+          * 08 (nota de débito)    → nada: es un cargo (mora, penalidad), no mueve bienes.
+
+        NUNCA bloquea la venta: si no hay existencias el movimiento igual se hace y el stock
+        queda negativo — coherente con la caja, que tampoco bloquea. Un negativo es una señal
+        visible de que falta un ajuste, y es preferible a impedirle vender a quien tiene el
+        producto en la mano. Los fallos se tragan a propósito: el comprobante ya es válido
+        ante SUNAT y no puede caerse porque el inventario no cuadre.
+        """
+        self.ensure_one()
+        tipo = self.l10n_pe_ne_tipo_doc or self._l10n_pe_document_type()
+        if tipo not in ("01", "03", "07"):
+            return self.env["stock.move"].browse()
+        lineas = self._l10n_pe_ne_lineas_con_stock()
+        if not lineas:
+            return self.env["stock.move"].browse()
+        wh = self.env["stock.warehouse"].search(
+            [("company_id", "=", self.company_id.id)], limit=1
+        )
+        clientes = self.env.ref(
+            "stock.stock_location_customers", raise_if_not_found=False
+        )
+        if not wh or not clientes:
+            _logger.warning(
+                "stock: sin almacén o ubicación de clientes para %s; no se mueve stock",
+                self.name,
+            )
+            return self.env["stock.move"].browse()
+        # La NC va al revés que la factura; y una reversa va al revés de lo que sea.
+        # Los dos XOR: la reversa de una NC vuelve a ser una salida.
+        entrada = (tipo == "07") != bool(reversa)
+        origen, destino = (
+            (clientes, wh.lot_stock_id) if entrada else (wh.lot_stock_id, clientes)
+        )
+        moves = self.env["stock.move"].browse()
+        for l in lineas:
+            # Sin 'name': stock.move no lo tiene en Odoo 19 (su `reference` se computa).
+            # `origin` deja el rastro legible; l10n_pe_ne_move_id es el enlace real (por id).
+            moves |= self.env["stock.move"].create(
+                {
+                    "product_id": l.product_id.id,
+                    "product_uom_qty": abs(l.quantity),
+                    "product_uom": l.product_uom_id.id,
+                    "location_id": origen.id,
+                    "location_dest_id": destino.id,
+                    "company_id": self.company_id.id,
+                    "origin": self.name or "",
+                    "l10n_pe_ne_move_id": self.id,
+                    "l10n_pe_ne_reversa": reversa,
+                }
+            )
+        try:
+            moves._action_confirm()
+            moves._action_assign()
+            for m in moves:
+                # quantity explícito: sin esto _action_done mueve solo lo reservado, y sin
+                # existencias no reserva nada → la salida quedaría en 0 y el kardex mentiría.
+                m.quantity = m.product_uom_qty
+                m.picked = True
+            moves._action_done()
+        except Exception as e:  # noqa: BLE001 — el comprobante ya es válido: el stock no lo tumba
+            _logger.exception("stock: no se pudo mover el stock de %s: %s", self.name, e)
+            return self.env["stock.move"].browse()
+        return moves
+
+    def _l10n_pe_ne_revertir_stock(self):
+        """Deshace el movimiento de un comprobante que SUNAT rechazó.
+
+        Un rechazado NO existe para SUNAT: hay que corregir y emitir uno NUEVO. Ese nuevo
+        comprobante vuelve a descontar, así que si el rechazado se queda con su movimiento,
+        el bien sale DOS VECES del kardex por una sola venta.
+
+        Se REVIERTE, no se borra: el kardex es un libro: se compensa con el movimiento
+        contrario y queda el rastro de que hubo un intento. Borrar el original escondería que
+        pasó algo, que es justo lo que un inventario permanente no debe hacer.
+
+        Idempotente: si ya se revirtió, no hace nada. Lo llama el write() al detectar la
+        transición a 'rechazado' — por ahí pasan los tres caminos que la fijan (el envío
+        síncrono, el cron de pendientes y el resumen diario de boletas), y también cualquiera
+        que se agregue después.
+        """
+        self.ensure_one()
+        Move = self.env["stock.move"]
+        hechos = Move.search(
+            [
+                ("l10n_pe_ne_move_id", "=", self.id),
+                ("l10n_pe_ne_reversa", "=", False),
+                ("state", "=", "done"),
+            ]
+        )
+        if not hechos:
+            return Move.browse()
+        ya = Move.search_count(
+            [("l10n_pe_ne_move_id", "=", self.id), ("l10n_pe_ne_reversa", "=", True)]
+        )
+        if ya:
+            return Move.browse()
+        return self._l10n_pe_ne_mover_stock(reversa=True)
+
+    def write(self, vals):
+        """Revierte el stock al pasar a 'rechazado'.
+
+        Va en el write y no en cada sitio que fija el estado porque son tres (envío síncrono,
+        cron de pendientes, resumen diario de boletas) y mañana pueden ser cuatro: la
+        invariante no debe depender de que alguien se acuerde de llamar al helper.
+
+        Solo los que ENTRAN a rechazado (los que ya lo estaban no se re-revierten).
+        """
+        revertir = self.browse()
+        if vals.get("l10n_pe_biller_state") == "rechazado":
+            revertir = self.filtered(
+                lambda m: m.l10n_pe_biller_state != "rechazado"
+            )
+        res = super().write(vals)
+        for m in revertir:
+            m._l10n_pe_ne_revertir_stock()
+        return res
 
     def _l10n_pe_ne_quick_product(self, ln, tax=None, create=True, precio_con_igv=True):
         """Resuelve el product.product de una línea para que el documento USE un registro de Odoo:
@@ -3146,6 +3293,10 @@ class AccountMove(models.Model):
             "type": self._l10n_pe_ne_tipo_producto(ln.get("tipo"), uni),
             "sale_ok": True,
             "list_price": precio,
+            # is_storable va en False por defecto en Odoo: sin decirlo explícito, el producto
+            # NO llevaría existencias y nunca movería stock. El auto-creado al emitir se queda
+            # sin stock a propósito (nadie eligió); el catálogo lo manda por llevaStock.
+            "is_storable": bool(ln.get("llevaStock")),
             # company_id del emisor: aísla el producto por RUC (igual que el cliente).
             "company_id": self.env.company.id,
         }
@@ -3178,6 +3329,12 @@ class AccountMove(models.Model):
             # "bien" | "servicio" — el vocabulario del negocio, no el de Odoo (consu/service).
             # 'combo' no lo usa esta app; si apareciera, se trata como bien (es tangible).
             "tipo": "servicio" if p.type == "service" else "bien",
+            # ¿Se le llevan existencias? (Odoo: is_storable). Va en False por defecto, así que
+            # SIN esto ningún producto movería stock nunca: es lo que activa _l10n_pe_ne_mover_stock.
+            "llevaStock": bool(p.is_storable),
+            # Existencias actuales. Solo tiene sentido si llevaStock; si no, va en 0 y la UI
+            # muestra un guion (no es "cero unidades", es "no aplica").
+            "stock": p.qty_available if p.is_storable else 0.0,
         }
 
     def _l10n_pe_ne_partner_dict(self, p):
@@ -3332,6 +3489,7 @@ class AccountMove(models.Model):
                 "precioUnitario": producto.get("precio"),
                 "unidad": producto.get("unidad"),
                 "tipo": producto.get("tipo"),
+                "llevaStock": producto.get("llevaStock"),
             },
             tax,
         )
@@ -3358,6 +3516,8 @@ class AccountMove(models.Model):
             # Solo si viene explícito: aquí NO se deduce de la unidad. Cambiar la unidad de un
             # producto ya clasificado no debe reclasificarlo a su espalda.
             vals["type"] = self._l10n_pe_ne_tipo_producto(producto["tipo"])
+        if "llevaStock" in producto:
+            vals["is_storable"] = bool(producto.get("llevaStock"))
         if producto.get("precio") is not None:
             vals["list_price"] = float(producto.get("precio") or 0)
         if producto.get("taxCode"):

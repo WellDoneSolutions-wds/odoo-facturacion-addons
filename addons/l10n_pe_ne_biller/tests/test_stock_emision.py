@@ -1,5 +1,6 @@
 from unittest.mock import patch
 
+from odoo.exceptions import UserError
 from odoo.tests import TransactionCase, tagged
 
 from .common import EnvioSincronoMixin
@@ -218,3 +219,54 @@ class TestStockEmision(EnvioSincronoMixin, TransactionCase):
         d = self.env['account.move']._l10n_pe_ne_product_dict(self.servicio)
         self.assertFalse(d['llevaStock'])
         self.assertEqual(d['stock'], 0)
+
+    # -- COMPRAS: la otra mitad del kardex ------------------------------------------------
+    def _compra(self, lineas=None, total=100, numero='5001'):
+        payload = {'proveedor': {'tipoDoc': '6', 'numDoc': '20100070970', 'razonSocial': 'PROVEEDOR SAC'},
+                   'tipoComprobante': '01', 'serie': 'F001', 'numero': numero,
+                   'fecha': '2026-07-16', 'total': total, 'descripcion': 'COMPRA TEST'}
+        if lineas is not None:
+            payload['lineas'] = lineas
+        return self.env['account.move'].l10n_pe_ne_create_compra(payload)
+
+    def test_compra_con_detalle_ingresa_stock(self):
+        self._abastecer(2)
+        self._compra([{'productId': self.bien.id, 'cantidad': 8, 'precioUnitario': 10}], total=80)
+        self.assertEqual(self._stock(), 10, "la compra detallada ENTRA al stock: 2 + 8")
+
+    def test_compra_sin_detalle_no_mueve_nada(self):
+        """El flujo de siempre (solo total) sigue igual: no toda compra es mercadería."""
+        self._abastecer(5)
+        self._compra(numero='5002')            # sin `lineas`
+        self.assertEqual(self._stock(), 5)
+
+    def test_compra_de_servicio_no_mueve(self):
+        self._abastecer(5)
+        self._compra([{'productId': self.servicio.id, 'cantidad': 3, 'precioUnitario': 50}],
+                     total=150, numero='5003')
+        self.assertEqual(self._stock(), 5)
+
+    def test_compra_no_sale_por_el_camino_de_venta(self):
+        """La trampa: _l10n_pe_document_type() no distingue compras — a un in_invoice le
+        devuelve un tipo de VENTA (01 o 03 según el proveedor), así que sin la guarda de
+        move_type una compra entraría por el camino de la venta y SACARÍA el stock."""
+        self._abastecer(10)
+        d = self._compra([{'productId': self.bien.id, 'cantidad': 4, 'precioUnitario': 10}],
+                         total=40, numero='5004')
+        compra = self.env['account.move'].browse(d['id'])
+        self.assertIn(compra._l10n_pe_document_type(), ('01', '03'))   # la trampa sigue ahí
+        self.assertFalse(compra._l10n_pe_ne_mover_stock(), "la guarda la corta")
+        self.assertEqual(self._stock(), 14, "10 + 4: entró, no salió")
+
+    def test_compra_no_crea_productos_en_el_catalogo(self):
+        """El proveedor los llama a su manera: crearlos aquí llenaría el catálogo de
+        duplicados. Sin producto elegido, la línea es solo un importe."""
+        antes = self.env['product.product'].search_count([])
+        self._compra([{'descripcion': 'ALGO QUE NO EXISTE EN EL CATALOGO', 'cantidad': 2,
+                       'precioUnitario': 10}], total=20, numero='5005')
+        self.assertEqual(self.env['product.product'].search_count([]), antes)
+
+    def test_compra_con_cantidad_cero_rechaza(self):
+        with self.assertRaises(UserError):
+            self._compra([{'productId': self.bien.id, 'cantidad': 0, 'precioUnitario': 10}],
+                         total=10, numero='5006')

@@ -3144,6 +3144,11 @@ class AccountMove(models.Model):
         ante SUNAT y no puede caerse porque el inventario no cuadre.
         """
         self.ensure_one()
+        # Solo documentos de VENTA. _l10n_pe_document_type() no distingue: para un `in_invoice`
+        # (una compra) devuelve '03', así que sin esta guarda una compra entraría por acá y
+        # SACARÍA el stock en vez de meterlo. La compra va por _l10n_pe_ne_mover_stock_compra.
+        if self.move_type not in ("out_invoice", "out_refund"):
+            return self.env["stock.move"].browse()
         tipo = self.l10n_pe_ne_tipo_doc or self._l10n_pe_document_type()
         if tipo not in ("01", "03", "07"):
             return self.env["stock.move"].browse()
@@ -3168,6 +3173,16 @@ class AccountMove(models.Model):
         origen, destino = (
             (clientes, wh.lot_stock_id) if entrada else (wh.lot_stock_id, clientes)
         )
+        return self._l10n_pe_ne_stock_aplicar(lineas, origen, destino, reversa=reversa)
+
+    def _l10n_pe_ne_stock_aplicar(self, lineas, origen, destino, reversa=False):
+        """Motor común: crea y valida los movimientos de `lineas` entre dos ubicaciones.
+
+        Lo comparten la venta (existencias → cliente), la devolución por NC, la reversa de un
+        rechazo y la compra (proveedor → existencias). Lo único que cambia entre ellas son las
+        dos ubicaciones y el sentido; la mecánica —y el "nunca bloquear"— es la misma.
+        """
+        self.ensure_one()
         moves = self.env["stock.move"].browse()
         for l in lineas:
             # Sin 'name': stock.move no lo tiene en Odoo 19 (su `reference` se computa).
@@ -3194,10 +3209,40 @@ class AccountMove(models.Model):
                 m.quantity = m.product_uom_qty
                 m.picked = True
             moves._action_done()
-        except Exception as e:  # noqa: BLE001 — el comprobante ya es válido: el stock no lo tumba
+        except Exception as e:  # noqa: BLE001 — el documento ya existe: el stock no lo tumba
             _logger.exception("stock: no se pudo mover el stock de %s: %s", self.name, e)
             return self.env["stock.move"].browse()
         return moves
+
+    def _l10n_pe_ne_mover_stock_compra(self):
+        """Entrada de mercadería por una compra: proveedor → existencias.
+
+        Es la otra mitad del kardex. Sin esto solo hay salidas y todo negocio deriva a
+        negativo: un inventario permanente es entradas MENOS salidas.
+
+        Va aparte de _l10n_pe_ne_mover_stock y no reusa su dirección a propósito: aquella
+        deduce el sentido de _l10n_pe_document_type(), que para un `in_invoice` devuelve '03'
+        — o sea que trataría la compra como una boleta y SACARÍA el stock en vez de meterlo.
+        """
+        self.ensure_one()
+        if self.move_type != "in_invoice":
+            return self.env["stock.move"].browse()
+        lineas = self._l10n_pe_ne_lineas_con_stock()
+        if not lineas:
+            return self.env["stock.move"].browse()
+        wh = self.env["stock.warehouse"].search(
+            [("company_id", "=", self.company_id.id)], limit=1
+        )
+        proveedores = self.env.ref(
+            "stock.stock_location_suppliers", raise_if_not_found=False
+        )
+        if not wh or not proveedores:
+            _logger.warning(
+                "stock: sin almacén o ubicación de proveedores para %s; no entra mercadería",
+                self.name,
+            )
+            return self.env["stock.move"].browse()
+        return self._l10n_pe_ne_stock_aplicar(lineas, proveedores, wh.lot_stock_id)
 
     def _l10n_pe_ne_revertir_stock(self):
         """Deshace el movimiento de un comprobante que SUNAT rechazó.
@@ -3821,11 +3866,50 @@ class AccountMove(models.Model):
         return {"items": items, "total": self.search_count(domain)}
 
     @api.model
+    def _l10n_pe_ne_compra_lineas(self, compra):
+        """invoice_line_ids de una compra, desde `lineas` si vienen, o la línea única del total.
+
+        El detalle es OPCIONAL a propósito: no toda compra es mercadería (luz, alquiler,
+        servicios), y el flujo de "solo el total" existe para registrar el crédito fiscal sin
+        inventariar nada. Quien necesita kardex, detalla; el resto sigue como siempre.
+        Solo las líneas con producto pueden mover stock (ver _l10n_pe_ne_lineas_con_stock)."""
+        lineas = compra.get("lineas") or []
+        if not lineas:
+            total = float(compra.get("total") or 0)
+            return [
+                (0, 0, {
+                    "name": compra.get("descripcion") or "COMPRA",
+                    "quantity": 1,
+                    "price_unit": total,
+                    "tax_ids": [(6, 0, [])],
+                })
+            ]
+        out = []
+        for ln in lineas:
+            # create=False: una compra NO da de alta productos en el catálogo. El proveedor
+            # los llama a su manera y crearlos aquí llenaría el catálogo de duplicados; se
+            # elige uno existente desde la UI. Sin producto, la línea es solo un importe.
+            prod = self._l10n_pe_ne_quick_product(ln, create=False)
+            cant = float(ln.get("cantidad") or 0)
+            if cant <= 0:
+                raise UserError(_("Cada línea de la compra necesita una cantidad mayor a 0."))
+            vals = {
+                "name": ln.get("descripcion") or (prod.name if prod else "ITEM"),
+                "quantity": cant,
+                "price_unit": float(ln.get("precioUnitario") or 0),
+                "tax_ids": [(6, 0, [])],
+            }
+            if prod:
+                vals["product_id"] = prod.id
+            out.append((0, 0, vals))
+        return out
+
+    @api.model
     def l10n_pe_ne_create_compra(self, compra):
         """Registra una compra (factura de proveedor). payload: {proveedor:{numDoc,
         razonSocial,tipoDoc}, tipoComprobante(cat.10), serie, numero, fecha, total,
-        descripcion, moneda}. Registro simple (línea = total); el IGV/crédito fiscal
-        detallado queda para una iteración posterior."""
+        descripcion, moneda, lineas?}. Sin `lineas` es el registro simple de siempre
+        (línea = total); con `lineas` se detalla por producto y la mercadería ENTRA al stock."""
         compra = compra or {}
         prov = self._l10n_pe_ne_quick_partner(compra.get("proveedor") or {})
         if not prov.supplier_rank:
@@ -3851,18 +3935,7 @@ class AccountMove(models.Model):
             "invoice_date": compra.get("fecha") or fields.Date.context_today(self),
             "ref": doc_num,
             "l10n_latam_document_number": doc_num,
-            "invoice_line_ids": [
-                (
-                    0,
-                    0,
-                    {
-                        "name": compra.get("descripcion") or "COMPRA",
-                        "quantity": 1,
-                        "price_unit": total,
-                        "tax_ids": [(6, 0, [])],
-                    },
-                )
-            ],
+            "invoice_line_ids": self._l10n_pe_ne_compra_lineas(compra),
         }
         moneda = self._l10n_pe_ne_quick_currency(compra.get("moneda"))
         if moneda:
@@ -3878,6 +3951,9 @@ class AccountMove(models.Model):
             vals["l10n_latam_document_type_id"] = dt.id
         move = self.create(vals)
         move.action_post()
+        # La otra mitad del kardex: la mercadería detallada ENTRA al stock. Sin líneas con
+        # producto no mueve nada, así que la compra "solo total" de siempre no cambia.
+        move._l10n_pe_ne_mover_stock_compra()
         return move._l10n_pe_ne_compra_dict()
 
     @api.model

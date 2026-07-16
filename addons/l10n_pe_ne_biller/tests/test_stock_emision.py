@@ -1,0 +1,131 @@
+from unittest.mock import patch
+
+from odoo.tests import TransactionCase, tagged
+
+from .common import EnvioSincronoMixin
+
+_TARGET = 'odoo.addons.l10n_pe_ne_biller.models.account_move_biller.requests.post'
+
+
+@tagged('post_install', '-at_install')
+class TestStockEmision(EnvioSincronoMixin, TransactionCase):
+    """El puente: la emisión mueve el stock.
+
+    En Odoo la factura NO mueve stock (account/ no menciona stock.move) — los movimientos
+    vienen de un picking, que en el flujo estándar nace de un sale.order. Esta app no usa
+    sale.order, así que el movimiento se crea al emitir, como hace el POS de Odoo.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.company = self.env.company
+        self.igv = self.env['account.tax'].search([
+            ('company_id', '=', self.company.id), ('type_tax_use', '=', 'sale'),
+            ('l10n_pe_edi_tax_code', '=', '1000')], limit=1)
+        self.wh = self.env['stock.warehouse'].search([('company_id', '=', self.company.id)], limit=1)
+        ruc_type = self.env['l10n_latam.identification.type'].search(
+            [('l10n_pe_vat_code', '=', '6')], limit=1)
+        self.partner = self.env['res.partner'].create({
+            'name': 'CLIENTE STOCK', 'vat': '20100070970',
+            'l10n_latam_identification_type_id': ruc_type.id})
+        # Un BIEN con stock y un SERVICIO: la misma venta debe mover solo el primero.
+        self.bien = self.env['product.product'].create({
+            'name': 'BIEN CON STOCK', 'type': 'consu', 'is_storable': True})
+        self.servicio = self.env['product.product'].create({
+            'name': 'SERVICIO SIN STOCK', 'type': 'service'})
+
+    def _stock(self, prod=None):
+        p = prod or self.bien
+        p.invalidate_recordset()
+        return p.qty_available
+
+    def _abastecer(self, qty, prod=None):
+        q = self.env['stock.quant'].with_context(inventory_mode=True).create({
+            'product_id': (prod or self.bien).id,
+            'location_id': self.wh.lot_stock_id.id,
+            'inventory_quantity': qty})
+        q.action_apply_inventory()
+
+    def _venta(self, prod, qty, tipo='01', serie='F001', corr='9001'):
+        move = self.env['account.move'].create({
+            'move_type': 'out_refund' if tipo == '07' else 'out_invoice',
+            'partner_id': self.partner.id, 'invoice_date': '2026-07-16',
+            'l10n_pe_serie': serie, 'l10n_pe_correlativo': corr,
+            'invoice_line_ids': [(0, 0, {'product_id': prod.id, 'quantity': qty,
+                                         'price_unit': 100.0, 'tax_ids': [(6, 0, self.igv.ids)]})]})
+        move.action_post()
+        return move
+
+    # -- qué líneas mueven ---------------------------------------------------------------
+    def test_solo_las_lineas_de_bien_con_stock_mueven(self):
+        m = self.env['account.move'].create({
+            'move_type': 'out_invoice', 'partner_id': self.partner.id,
+            'invoice_date': '2026-07-16', 'l10n_pe_serie': 'F001', 'l10n_pe_correlativo': '9010',
+            'invoice_line_ids': [
+                (0, 0, {'product_id': self.bien.id, 'quantity': 2, 'price_unit': 100.0,
+                        'tax_ids': [(6, 0, self.igv.ids)]}),
+                (0, 0, {'product_id': self.servicio.id, 'quantity': 5, 'price_unit': 50.0,
+                        'tax_ids': [(6, 0, self.igv.ids)]}),
+            ]})
+        m.action_post()
+        lineas = m._l10n_pe_ne_lineas_con_stock()
+        self.assertEqual(len(lineas), 1, "solo el bien; el servicio nunca mueve stock")
+        self.assertEqual(lineas.product_id, self.bien)
+
+    def test_bien_sin_is_storable_no_mueve(self):
+        """'consu' solo dice tangible; is_storable es el que decide que se rastrea."""
+        suelto = self.env['product.product'].create({
+            'name': 'BIEN SIN RASTREO', 'type': 'consu', 'is_storable': False})
+        m = self._venta(suelto, 3, corr='9011')
+        self.assertFalse(m._l10n_pe_ne_lineas_con_stock())
+        self.assertFalse(m._l10n_pe_ne_mover_stock())
+
+    # -- la dirección del movimiento ------------------------------------------------------
+    def test_factura_descuenta(self):
+        self._abastecer(10)
+        self.assertEqual(self._stock(), 10)
+        self._venta(self.bien, 3, corr='9020')._l10n_pe_ne_mover_stock()
+        self.assertEqual(self._stock(), 7, "vender 3 de 10 deja 7")
+
+    def test_nota_de_credito_repone(self):
+        """Anular una venta devuelve el bien: sin esto el kardex se va en falso para siempre."""
+        self._abastecer(10)
+        self._venta(self.bien, 3, corr='9030')._l10n_pe_ne_mover_stock()
+        self.assertEqual(self._stock(), 7)
+        nc = self._venta(self.bien, 3, tipo='07', serie='FC01', corr='9031')
+        nc.l10n_pe_ne_tipo_doc = '07'
+        nc._l10n_pe_ne_mover_stock()
+        self.assertEqual(self._stock(), 10, "la NC repone lo vendido")
+
+    def test_nota_de_debito_no_mueve(self):
+        """La ND es un cargo (mora, penalidad): no mueve bienes."""
+        self._abastecer(10)
+        nd = self._venta(self.bien, 1, corr='9040')
+        nd.l10n_pe_ne_tipo_doc = '08'
+        self.assertFalse(nd._l10n_pe_ne_mover_stock())
+        self.assertEqual(self._stock(), 10)
+
+    # -- no bloquear ----------------------------------------------------------------------
+    def test_sin_existencias_vende_igual_y_queda_negativo(self):
+        """Nunca se le impide vender a quien tiene el producto en la mano — coherente con la
+        caja, que tampoco bloquea. El negativo es la señal visible de que falta un ajuste."""
+        self._abastecer(1)
+        m = self._venta(self.bien, 5, corr='9050')
+        moves = m._l10n_pe_ne_mover_stock()
+        self.assertTrue(moves, "el movimiento se hace igual")
+        self.assertEqual(self._stock(), -4, "1 − 5 = −4, visible")
+
+    def test_emitir_por_la_api_descuenta(self):
+        """El camino real de la SPA (quick_emit), no el helper suelto."""
+        self._abastecer(20)
+        # El envío a SUNAT se dobla: aquí se prueba el stock, no la emisión.
+        ok = type('R', (), {'status_code': 200, 'text': '<?xml version="1.0"?><Invoice/>',
+                            'headers': {}})()
+        with patch(_TARGET, return_value=ok):
+            self.env['account.move'].l10n_pe_ne_quick_emit({
+                'tipoDoc': '01', 'moneda': 'PEN',
+                'cliente': {'tipoDoc': '6', 'numDoc': '20100070970', 'razonSocial': 'CLIENTE STOCK'},
+                'lineas': [{'descripcion': self.bien.name, 'productId': self.bien.id,
+                            'cantidad': 4, 'precioUnitario': 100, 'taxCode': '1000'}],
+            })
+        self.assertEqual(self._stock(), 16, "emitir por la API descuenta 4 de 20")

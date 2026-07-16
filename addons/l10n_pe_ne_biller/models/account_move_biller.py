@@ -1999,6 +1999,10 @@ class AccountMove(models.Model):
         move = self.env["account.move"].create(vals)
         self._l10n_pe_ne_quick_flags(move, payload)
         move.action_post()
+        # Stock: el bien sale (o vuelve, si es NC) cuando la venta existe en Odoo, no cuando
+        # SUNAT responde — la mercadería ya cambió de manos. Va después del post y antes de
+        # enviar: si SUNAT rechaza, el movimiento se corrige con la NC, igual que el importe.
+        move._l10n_pe_ne_mover_stock()
         # Nota de Crédito: no puede acreditar más de lo facturado. Se permiten VARIAS NC
         # sobre el mismo comprobante, pero el ACUMULADO no puede superar su total: el tope
         # de esta nota es el saldo pendiente de acreditar (total − NC previas vigentes).
@@ -3081,6 +3085,90 @@ class AccountMove(models.Model):
             "periodo": periodo,
             "total": sum(moves.mapped("amount_total")),
         }
+
+    def _l10n_pe_ne_lineas_con_stock(self):
+        """Líneas del comprobante cuyo producto lleva existencias. En Odoo 19 eso es
+        type='consu' Y is_storable=True: 'consu' solo dice que es tangible; el booleano decide
+        si se rastrea. Un servicio nunca mueve stock."""
+        self.ensure_one()
+        return self.invoice_line_ids.filtered(
+            lambda l: l.product_id
+            and l.product_id.type == "consu"
+            and l.product_id.is_storable
+            and (l.quantity or 0) > 0
+        )
+
+    def _l10n_pe_ne_mover_stock(self):
+        """Descuenta (o repone) el stock de las líneas de bien del comprobante.
+
+        La factura NO mueve stock en Odoo: los movimientos nacen de un stock.picking, que en
+        el flujo estándar viene de un sale.order. Esta app no usa sale.order —emite el
+        account.move directo— así que el movimiento se crea aquí, igual que hace el POS de
+        Odoo (pos_order._create_order_picking() corre aparte de _generate_pos_order_invoice()).
+
+        Dirección según el documento:
+          * 01/03 (factura/boleta) → SALIDA: existencias → cliente.
+          * 07 (nota de crédito)   → ENTRADA: cliente → existencias. Sin esto, anular una
+            venta dejaría el stock descontado para siempre y el kardex se iría en falso.
+          * 08 (nota de débito)    → nada: es un cargo (mora, penalidad), no mueve bienes.
+
+        NUNCA bloquea la venta: si no hay existencias el movimiento igual se hace y el stock
+        queda negativo — coherente con la caja, que tampoco bloquea. Un negativo es una señal
+        visible de que falta un ajuste, y es preferible a impedirle vender a quien tiene el
+        producto en la mano. Los fallos se tragan a propósito: el comprobante ya es válido
+        ante SUNAT y no puede caerse porque el inventario no cuadre.
+        """
+        self.ensure_one()
+        tipo = self.l10n_pe_ne_tipo_doc or self._l10n_pe_document_type()
+        if tipo not in ("01", "03", "07"):
+            return self.env["stock.move"].browse()
+        lineas = self._l10n_pe_ne_lineas_con_stock()
+        if not lineas:
+            return self.env["stock.move"].browse()
+        wh = self.env["stock.warehouse"].search(
+            [("company_id", "=", self.company_id.id)], limit=1
+        )
+        clientes = self.env.ref(
+            "stock.stock_location_customers", raise_if_not_found=False
+        )
+        if not wh or not clientes:
+            _logger.warning(
+                "stock: sin almacén o ubicación de clientes para %s; no se mueve stock",
+                self.name,
+            )
+            return self.env["stock.move"].browse()
+        devolucion = tipo == "07"
+        origen, destino = (
+            (clientes, wh.lot_stock_id) if devolucion else (wh.lot_stock_id, clientes)
+        )
+        moves = self.env["stock.move"].browse()
+        for l in lineas:
+            # Sin 'name': stock.move no lo tiene en Odoo 19 (su `reference` se computa).
+            # `origin` es el campo de documento de origen y deja el rastro al comprobante.
+            moves |= self.env["stock.move"].create(
+                {
+                    "product_id": l.product_id.id,
+                    "product_uom_qty": abs(l.quantity),
+                    "product_uom": l.product_uom_id.id,
+                    "location_id": origen.id,
+                    "location_dest_id": destino.id,
+                    "company_id": self.company_id.id,
+                    "origin": self.name or "",
+                }
+            )
+        try:
+            moves._action_confirm()
+            moves._action_assign()
+            for m in moves:
+                # quantity explícito: sin esto _action_done mueve solo lo reservado, y sin
+                # existencias no reserva nada → la salida quedaría en 0 y el kardex mentiría.
+                m.quantity = m.product_uom_qty
+                m.picked = True
+            moves._action_done()
+        except Exception as e:  # noqa: BLE001 — el comprobante ya es válido: el stock no lo tumba
+            _logger.exception("stock: no se pudo mover el stock de %s: %s", self.name, e)
+            return self.env["stock.move"].browse()
+        return moves
 
     def _l10n_pe_ne_quick_product(self, ln, tax=None, create=True, precio_con_igv=True):
         """Resuelve el product.product de una línea para que el documento USE un registro de Odoo:

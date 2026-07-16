@@ -1870,6 +1870,7 @@ class AccountMove(models.Model):
             origin = self._l10n_pe_ne_quick_origin(
                 payload.get("docAfectado") or payload.get("afectado")
             )
+            origin._l10n_pe_check_afectable_con_nota()
         if origin is not None:
             partner = origin.partner_id
         else:
@@ -2105,6 +2106,33 @@ class AccountMove(models.Model):
                 "No se encontró el documento afectado (envía docAfectado.id o serie+correlativo)."
             )
         )
+
+    def _l10n_pe_check_afectable_con_nota(self):
+        """Una NC/ND solo puede emitirse sobre una factura o una boleta: SUNAT rechaza la
+        referencia a otra nota. La guarda va en el call site de la emisión y no dentro de
+        _l10n_pe_ne_quick_origin porque ese helper lo comparte la anulación, que SÍ acepta
+        notas (una NC se anula comunicando su baja)."""
+        self.ensure_one()
+        tipo = self.l10n_pe_ne_tipo_doc or self._l10n_pe_document_type()
+        if tipo not in ("01", "03"):
+            docname = {
+                "07": _("Nota de Crédito"),
+                "08": _("Nota de Débito"),
+            }.get(tipo, tipo)
+            raise UserError(
+                _(
+                    "Una nota de crédito o débito solo puede emitirse sobre una factura o una "
+                    "boleta; el documento afectado (%(doc)s %(serie)s-%(corr)s) es una nota. "
+                    "Para anularla, comunique su baja."
+                )
+                % {
+                    "doc": docname,
+                    "serie": self.l10n_pe_ne_serie_emit
+                    or self._l10n_pe_serie_correlativo()[0],
+                    "corr": self.l10n_pe_ne_corr_emit
+                    or self._l10n_pe_serie_correlativo()[1],
+                }
+            )
 
     @api.model
     def l10n_pe_ne_quick_anular(self, payload):

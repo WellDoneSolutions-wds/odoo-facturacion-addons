@@ -192,3 +192,31 @@ class TestBillerBaja(TransactionCase):
             move.action_l10n_pe_send_baja()
             p.assert_not_called()                    # un comprobante ya anulado no se reenvía
         self.assertEqual(move.l10n_pe_biller_state, 'anulado')
+
+    # -- Documento afectable por una nota (07/08) --------------------------------------
+    # La baja SÍ acepta notas (una NC se anula comunicando su baja) y comparte con la
+    # emisión el resolvedor del afectado, por eso la guarda del tipo es aparte.
+
+    def test_factura_es_afectable_con_nota(self):
+        self._factura()._l10n_pe_check_afectable_con_nota()   # no lanza
+
+    def test_nota_de_debito_no_es_afectable_con_nota(self):
+        """El tipo sale del cálculo (out_invoice + debit_origin_id = 08)."""
+        factura = self._factura()
+        nd = self.env['account.move'].create({
+            'move_type': 'out_invoice', 'partner_id': self.partner.id,
+            'invoice_date': '2026-06-21', 'l10n_pe_serie': 'F001', 'l10n_pe_correlativo': '124',
+            'debit_origin_id': factura.id,
+            'invoice_line_ids': [(0, 0, {'product_id': self.product.id, 'quantity': 1.0,
+                                         'price_unit': 50.0, 'tax_ids': [(6, 0, self.igv.ids)]})]})
+        self.assertEqual(nd._l10n_pe_document_type(), '08')
+        with self.assertRaises(UserError):           # una nota no se emite sobre otra nota
+            nd._l10n_pe_check_afectable_con_nota()
+
+    def test_nota_de_credito_no_es_afectable_con_nota(self):
+        """El tipo sale del congelado al enviar (l10n_pe_ne_tipo_doc), que es lo que mira
+        la guarda primero — igual que el resto de las guardas de baja."""
+        nc = self._factura()
+        nc.l10n_pe_ne_tipo_doc = '07'
+        with self.assertRaises(UserError):
+            nc._l10n_pe_check_afectable_con_nota()

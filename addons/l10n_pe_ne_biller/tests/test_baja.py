@@ -140,9 +140,10 @@ class TestBillerBaja(TransactionCase):
         _l10n_pe_tributos() ya expone el ICBPER (7152) a nivel cabecera (regla 3279)."""
         if not self.igv:
             self.skipTest("sin IGV 1000 en la localización")
-        icbper = self.env['account.tax'].create({
-            'name': 'ICBPER', 'type_tax_use': 'sale', 'amount_type': 'fixed', 'amount': 0.50,
-            'l10n_pe_edi_tax_code': '7152', 'tax_group_id': self.igv.tax_group_id.id})
+        # Vía el helper de producción, que busca antes de crear: crearlo a pelo revienta
+        # ("Tax names must be unique!") en cualquier BD que ya tenga el ICBPER — que es
+        # justo lo que deja este mismo helper en cuanto se emite una bolsa una vez.
+        icbper = self.env['account.move']._l10n_pe_ne_ensure_icbper_tax()
         cf = self.env['res.partner'].create({'name': 'VARIOS'})
         move = self.env['account.move'].create({
             'move_type': 'out_invoice', 'partner_id': cf.id, 'invoice_date': '2026-06-20',

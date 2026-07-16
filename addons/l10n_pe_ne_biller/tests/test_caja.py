@@ -114,10 +114,12 @@ class TestCaja(TransactionCase):
         self.Sesion.l10n_pe_ne_abrir_caja({"saldoInicial": 0})
         with self.assertRaisesRegex(UserError, "ingreso o retiro"):
             self.Sesion.l10n_pe_ne_caja_movimiento({"tipo": "otro", "motivo": "x", "monto": 1})
-        with self.assertRaisesRegex(UserError, "necesita un motivo"):
+        with self.assertRaisesRegex(UserError, "al menos 3 caracteres"):
             self.Sesion.l10n_pe_ne_caja_movimiento({"tipo": "ingreso", "motivo": "  ", "monto": 1})
+        # El motivo va con 3+ caracteres a propósito: con uno más corto saltaría la
+        # validación del motivo y este caso nunca llegaría a comprobar el monto.
         with self.assertRaisesRegex(UserError, "mayor a 0"):
-            self.Sesion.l10n_pe_ne_caja_movimiento({"tipo": "ingreso", "motivo": "ok", "monto": 0})
+            self.Sesion.l10n_pe_ne_caja_movimiento({"tipo": "ingreso", "motivo": "caja chica", "monto": 0})
 
     def test_retiro_no_supera_disponible(self):
         # Escenario del reporte: 10 inicial + 323 de ingreso = 333 disponible en efectivo.

@@ -2,6 +2,8 @@ from unittest.mock import MagicMock, patch
 
 from odoo.tests import TransactionCase, tagged
 
+from .common import EnvioSincronoMixin
+
 _TARGET = 'odoo.addons.l10n_pe_ne_biller.models.account_move_biller.requests.post'
 
 
@@ -15,7 +17,7 @@ def _s3_mock(body):
 
 
 @tagged('post_install', '-at_install')
-class TestAsyncPdf(TransactionCase):
+class TestAsyncPdf(EnvioSincronoMixin, TransactionCase):
     """PDF pre-generado por el worker async (pdf_s3_key del item DynamoDB):
     debe quedar etiquetado con la versión del template (description=pdfver:N)
     para que la primera descarga vía API lo SIRVA en vez de descartarlo por el
@@ -24,6 +26,14 @@ class TestAsyncPdf(TransactionCase):
     def setUp(self):
         super().setUp()
         self.env.company.sudo().l10n_pe_ne_api_key = 'test-key'
+        # _l10n_pe_attach_async_pdf reusa el PDF del worker SOLO si no hay nada que el worker
+        # desconozca: con logo del emisor (o dirección del cliente) sale temprano y deja que la
+        # descarga lo regenere. La compañía de una BD sembrada SÍ tiene logo → sin fijarlo, estos
+        # tests medían el camino contrario al que dicen probar y el PDF nunca se adjuntaba.
+        self.env.company.sudo().logo = False
+        # La versión del template vive en un config param (default "1", que es la que estos
+        # tests esperan). Una BD de dev lo tiene en otra versión: se fija para no heredarla.
+        self.env['ir.config_parameter'].sudo().set_param('l10n_pe_ne_biller.pdf_ver', '1')
         igv = self.env['account.tax'].search([
             ('company_id', '=', self.env.company.id), ('type_tax_use', '=', 'sale'),
             ('l10n_pe_edi_tax_code', '=', '1000')], limit=1)

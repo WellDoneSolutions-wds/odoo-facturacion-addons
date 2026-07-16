@@ -31,6 +31,23 @@ class TestGuiaBase(TransactionCase):
 
 
 class TestGuiaNumeracion(TestGuiaBase):
+    """Numeración de la guía. Estos tests afirman correlativos ABSOLUTOS ("T001-1"), así que
+    necesitan series vírgenes: en la compañía base de una BD con guías previas, T001 ya está
+    avanzada y afirmaban el estado de la BD, no el comportamiento. Una compañía propia se las
+    da (la secuencia es por compañía — es justo lo que prueba test_correlativo_por_compania,
+    y por eso ese pasaba mientras los demás fallaban)."""
+
+    def setUp(self):
+        super().setUp()
+        self.company = self.env["res.company"].create(
+            {"name": "GRE Numeracion SAC", "vat": "20999999992"})
+        self.Guia = self.Guia.with_company(self.company)
+
+    def _vals(self, **extra):
+        vals = super()._vals(**extra)
+        vals.setdefault("company_id", self.company.id)
+        return vals
+
     def test_correlativo_por_serie(self):
         g1 = self.Guia.create(self._vals())
         g2 = self.Guia.create(self._vals())

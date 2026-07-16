@@ -4323,6 +4323,29 @@ class AccountMove(models.Model):
                     "La anulación aplica a factura, boleta, nota de crédito y nota de débito."
                 )
             )
+        # Una factura/boleta con NC VIGENTES no se da de baja: la baja anula el documento
+        # COMPLETO y las notas ya acreditaron parte (crédito duplicado), además de dejar
+        # esas NC referenciando un comprobante dado de baja. Primero se anulan las NC,
+        # o se acredita el saldo con otra NC en lugar de la baja.
+        if tipo in ("01", "03"):
+            ncs = self._l10n_pe_ne_nc_previas()
+            if ncs:
+                raise UserError(
+                    _(
+                        "No se puede anular %(doc)s: tiene %(n)d nota(s) de crédito "
+                        "vigente(s) por %(monto)s (%(lista)s). Anularla duplicaría el "
+                        "crédito — anule primero esas notas, o acredite el saldo con "
+                        "una nota de crédito en lugar de la baja."
+                    )
+                    % {
+                        "doc": "%s-%s" % (serie or "", (_corr or "").zfill(8)),
+                        "n": len(ncs),
+                        "monto": "%.2f" % sum(ncs.mapped("amount_total")),
+                        "lista": ", ".join(
+                            "%s-%s" % m._l10n_pe_ne_doc_id() for m in ncs
+                        ),
+                    }
+                )
         # Serie con prefijo B (boleta) / F / S, o numérica: refleja el formato del comprobante emitido.
         if not re.match(r"^([BFS][A-Z0-9]{3}|\d{1,4})$", serie or ""):
             raise UserError(

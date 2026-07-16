@@ -1028,6 +1028,17 @@ class L10nPeNeApi(http.Controller):
             return self._unauth()
         return self._run(lambda: self._move(uid).l10n_pe_ne_create_compra(self._body()))
 
+    @http.route("/ne/api/compras/importar-xml", **_POST)
+    def importar_compra_xml(self, **kw):
+        """Lee el XML de la factura del proveedor y devuelve el payload de la compra para que
+        el usuario lo revise. NO registra: el mapeo de productos necesita a un humano."""
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(
+            lambda: self._move(uid).l10n_pe_ne_importar_compra_xml(self._body())
+        )
+
     @http.route("/ne/api/compras/<int:rec_id>", **_PUT)
     def update_compra(self, rec_id, **kw):
         uid = self._identify()

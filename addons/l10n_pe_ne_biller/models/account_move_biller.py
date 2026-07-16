@@ -3866,6 +3866,129 @@ class AccountMove(models.Model):
         return {"items": items, "total": self.search_count(domain)}
 
     @api.model
+    def l10n_pe_ne_importar_compra_xml(self, payload):
+        """Lee el XML de la factura electrónica del PROVEEDOR y devuelve el payload de una
+        compra, listo para que el usuario lo revise y guarde. NO registra nada.
+
+        El proveedor está obligado a entregar el XML: es el documento fiscal de verdad (el PDF
+        es solo su representación impresa). Leerlo evita teclear —y equivocarse— en el dato
+        que va al Registro de Compras.
+
+        Devuelve, no guarda: el mapeo de productos necesita a un humano (ver abajo) y el
+        usuario debe poder revisar antes de que entre mercadería al kardex.
+        """
+        b64 = (payload or {}).get("xml") or ""
+        try:
+            raw = base64.b64decode(b64)
+        except Exception:
+            raise UserError(_("El archivo no es un XML válido (base64 ilegible)."))
+        return self._l10n_pe_ne_parse_compra_xml(raw)
+
+    @api.model
+    def _l10n_pe_ne_parse_compra_xml(self, raw):
+        """Parseo puro del UBL 2.1 (Invoice/CreditNote) → payload de compra. Sin ORM salvo el
+        match de productos, para poder testearlo con un XML real."""
+        from xml.etree import ElementTree as ET
+
+        try:
+            root = ET.fromstring(raw)
+        except ET.ParseError as e:
+            raise UserError(_("No se pudo leer el XML: %s") % e)
+        # Los tags vienen con namespace; se ignora el prefijo y se busca por nombre local.
+        # Es lo mismo que hace el biller al depurar el XML para el PDF: los namespaces de
+        # SUNAT varían por versión y atarse a ellos rompe con el primer proveedor distinto.
+        def hijos(el, nombre):
+            return [c for c in el if c.tag.rsplit("}", 1)[-1] == nombre] if el is not None else []
+
+        def uno(el, *ruta):
+            cur = el
+            for nombre in ruta:
+                hs = hijos(cur, nombre)
+                if not hs:
+                    return None
+                cur = hs[0]
+            return cur
+
+        def txt(el, *ruta):
+            n = uno(el, *ruta) if ruta else el
+            return (n.text or "").strip() if n is not None and n.text else ""
+
+        if root.tag.rsplit("}", 1)[-1] not in ("Invoice", "CreditNote", "DebitNote"):
+            raise UserError(
+                _("El XML no es un comprobante electrónico (se esperaba Invoice/CreditNote).")
+            )
+        sup = uno(root, "AccountingSupplierParty", "Party")
+        ruc = txt(sup, "PartyIdentification", "ID")
+        razon = txt(sup, "PartyLegalEntity", "RegistrationName") or txt(sup, "PartyName", "Name")
+        if not ruc:
+            raise UserError(_("El XML no trae el RUC del emisor."))
+        doc_id = txt(root, "ID")
+        serie, _sep, numero = doc_id.partition("-")
+        tipo = txt(root, "InvoiceTypeCode") or "01"
+        total = txt(root, "LegalMonetaryTotal", "PayableAmount")
+        igv = ""
+        for tt in hijos(root, "TaxTotal"):
+            igv = txt(tt, "TaxAmount")
+            if igv:
+                break
+
+        lineas = []
+        for ln in hijos(root, "InvoiceLine") + hijos(root, "CreditNoteLine"):
+            item = uno(ln, "Item")
+            cant = txt(ln, "InvoicedQuantity") or txt(ln, "CreditedQuantity")
+            # Precio CON IGV: AlternativeConditionPrice con PriceTypeCode 01 (catálogo 16 de
+            # SUNAT) es el precio unitario que incluye el impuesto — la misma convención que
+            # usa toda la app. cac:Price (sin IGV) NO sirve acá: el detalle se compara contra
+            # el total del documento, que va con IGV.
+            precio = ""
+            for pr in hijos(uno(ln, "PricingReference") or ln, "AlternativeConditionPrice"):
+                if txt(pr, "PriceTypeCode") == "01":
+                    precio = txt(pr, "PriceAmount")
+                    break
+            cod_prov = txt(item, "SellersItemIdentification", "ID")
+            barcode = txt(item, "StandardItemIdentification", "ID")
+            lineas.append({
+                "descripcion": txt(item, "Description"),
+                "cantidad": float(cant or 0),
+                "precioUnitario": float(precio or 0),
+                "codigoProveedor": cod_prov,
+                "barcode": barcode,
+                # El match con NUESTRO catálogo es una propuesta, no un hecho: el proveedor
+                # nombra y codifica los productos a su manera. Sin coincidencia se deja en
+                # None y lo elige el usuario — inventar el mapeo ensuciaría el kardex.
+                "productId": self._l10n_pe_ne_match_producto(barcode, cod_prov),
+            })
+        return {
+            "proveedor": {"tipoDoc": "6", "numDoc": ruc, "razonSocial": razon},
+            "tipoComprobante": tipo,
+            "serie": serie,
+            "numero": numero.lstrip("0") or numero,
+            "fecha": txt(root, "IssueDate"),
+            "total": float(total or 0),
+            "igv": float(igv or 0),
+            "descripcion": "",
+            "lineas": lineas,
+        }
+
+    @api.model
+    def _l10n_pe_ne_match_producto(self, barcode, codigo):
+        """Propone un producto NUESTRO para una línea del XML del proveedor.
+
+        Por código de barras primero (el GTIN es universal: si coincide, es el mismo producto)
+        y por código propio después (más débil: 'P001' puede ser cualquier cosa en otro
+        catálogo). Sin coincidencia devuelve None y decide el usuario."""
+        Product = self.env["product.product"]
+        if barcode:
+            p = Product.search([("barcode", "=", barcode)], limit=1)
+            if p:
+                return p.id
+        if codigo:
+            p = Product.search([("default_code", "=", codigo)], limit=1)
+            if p:
+                return p.id
+        return None
+
+    @api.model
     def _l10n_pe_ne_compra_lineas(self, compra):
         """invoice_line_ids de una compra, desde `lineas` si vienen, o la línea única del total.
 

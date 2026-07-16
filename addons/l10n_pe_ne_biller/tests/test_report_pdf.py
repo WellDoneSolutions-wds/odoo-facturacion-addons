@@ -1,3 +1,4 @@
+import base64
 import io
 import zipfile
 from unittest.mock import patch
@@ -6,6 +7,16 @@ from odoo.tests import TransactionCase, tagged
 from odoo.exceptions import UserError
 
 _TARGET = 'odoo.addons.l10n_pe_ne_biller.models.account_move_biller.requests.post'
+
+
+def _cdr_zip_b64():
+    """Base64 de un zip mínimo, para adjuntar como CDR de anulación. El test solo necesita
+    un payload que dé la vuelta (get_baja_files devuelve el `datas` tal cual), pero se usa
+    un zip de verdad para no mentirle al mimetype del adjunto."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, 'w') as zf:
+        zf.writestr('R-20605145648-RA-1.xml', '<?xml version="1.0"?><ApplicationResponse/>')
+    return base64.b64encode(buf.getvalue()).decode()
 
 
 @tagged('post_install', '-at_install')
@@ -153,10 +164,11 @@ class TestBillerReportPdf(TransactionCase):
         # Sin datos de baja, el dict va vacio (no revienta): contrato minimo.
         self.assertNotIn('cdr', out)
         # Con un CDR de anulacion adjunto, kind='cdr' lo devuelve igual.
+        cdr_b64 = _cdr_zip_b64()
         att = self.env['ir.attachment'].create({
             'name': 'R-20605145648-RA-1.zip', 'res_model': 'account.move',
             'res_id': self.move.id, 'mimetype': 'application/zip',
-            'datas': self.PNG_1X1_B64})
+            'datas': cdr_b64})
         self.move.l10n_pe_ne_baja_cdr = att.id
         out = self.move.l10n_pe_ne_get_baja_files(kind='cdr')
-        self.assertEqual(out.get('cdr'), self.PNG_1X1_B64)
+        self.assertEqual(out.get('cdr'), cdr_b64)

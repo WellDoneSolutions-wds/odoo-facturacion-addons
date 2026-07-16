@@ -101,9 +101,9 @@ class TestBillerAffectation(TransactionCase):
         sus propios campos (codTriIcbper). En CABECERA el ICBPER SÍ suma a sumTotTributos, sumPrecioVenta
         (TaxInclusive) e sumImpVenta, y se emite como su propio TaxSubtotal 7152 — verificado aceptado por
         SUNAT (sin esto: rechazo 3279/3280)."""
-        icbper_tax = self.env['account.tax'].create({
-            'name': 'ICBPER', 'type_tax_use': 'sale', 'amount_type': 'fixed', 'amount': 0.50,
-            'l10n_pe_edi_tax_code': '7152', 'tax_group_id': self.igv.tax_group_id.id})
+        # Vía el helper de producción, que busca antes de crear: crearlo a pelo revienta
+        # ("Tax names must be unique!") en cualquier BD que ya tenga el ICBPER.
+        icbper_tax = self.env['account.move']._l10n_pe_ne_ensure_icbper_tax()
         move = self.env['account.move'].create({
             'move_type': 'out_invoice', 'partner_id': self.partner.id,
             'invoice_date': '2026-06-20', 'l10n_pe_serie': 'F001', 'l10n_pe_correlativo': '1',

@@ -4,6 +4,8 @@ import zipfile
 from unittest.mock import patch
 
 from odoo.tests import TransactionCase, tagged
+
+from .common import EnvioSincronoMixin
 from odoo.exceptions import UserError
 
 _TARGET = 'odoo.addons.l10n_pe_ne_biller.models.account_move_biller.requests.post'
@@ -21,7 +23,7 @@ def _fake_cdr_b64(code='0', desc='La Factura F001-1 ha sido aceptada'):
 
 
 @tagged('post_install', '-at_install')
-class TestBillerEmail(TransactionCase):
+class TestBillerEmail(EnvioSincronoMixin, TransactionCase):
     def setUp(self):
         super().setUp()
         igv = self.env['account.tax'].search([

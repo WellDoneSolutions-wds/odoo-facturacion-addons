@@ -1889,7 +1889,9 @@ class AccountMove(models.Model):
             if isc_rate > 0:
                 # ISC (ad-valorem): se agrega a la línea; el IGV se recalcula sobre valor + ISC.
                 taxes = taxes + self._l10n_pe_ne_ensure_isc_tax(isc_rate)
-            prod = self._l10n_pe_ne_quick_product(ln, tax)
+            # Notas (07/08): solo resolver el producto, nunca crearlo — sus líneas pueden ser
+            # espejo o texto sintético (DICE/DEBE DECIR) que no debe entrar al catálogo.
+            prod = self._l10n_pe_ne_quick_product(ln, tax, create=tipo not in ("07", "08"))
             d = float(ln.get("descuento") or 0)
             disc = round(100.0 * (1 - (1 - d / 100.0) * (1 - g / 100.0)), 6) if g else d
             lvals = {
@@ -1993,23 +1995,43 @@ class AccountMove(models.Model):
         move = self.env["account.move"].create(vals)
         self._l10n_pe_ne_quick_flags(move, payload)
         move.action_post()
-        # Nota de Crédito: no puede acreditar más de lo facturado. Se valida el tope
-        # contra el total del comprobante afectado antes de enviar a SUNAT (respaldo del
-        # front). La NC de importe 0 (motivo 03) pasa; una parcial no puede exceder al
-        # original. (La ND suma a la deuda, así que no lleva tope.)
-        if tipo == "07" and origin is not None and (
-            move.amount_total > (origin.amount_total or 0) + 0.05
-        ):
-            raise UserError(
-                _(
-                    "La nota de crédito (%(nc)s) no puede superar el total del comprobante "
-                    "afectado (%(orig)s)."
+        # Nota de Crédito: no puede acreditar más de lo facturado. Se permiten VARIAS NC
+        # sobre el mismo comprobante, pero el ACUMULADO no puede superar su total: el tope
+        # de esta nota es el saldo pendiente de acreditar (total − NC previas vigentes).
+        # Respaldo del front; la NC de importe 0 (motivo 03) pasa. (La ND suma a la deuda,
+        # así que no lleva tope.)
+        if tipo == "07" and origin is not None:
+            previas = origin._l10n_pe_ne_nc_previas() - move
+            acreditado = sum(previas.mapped("amount_total"))
+            saldo = (origin.amount_total or 0) - acreditado
+            if move.amount_total > saldo + 0.05:
+                if previas:
+                    raise UserError(
+                        _(
+                            "El comprobante afectado ya tiene %(n)d nota(s) de crédito por "
+                            "%(acred)s (%(lista)s); saldo pendiente de acreditar: %(saldo)s. "
+                            "Esta nota (%(nc)s) lo supera."
+                        )
+                        % {
+                            "n": len(previas),
+                            "acred": "%.2f" % acreditado,
+                            "lista": ", ".join(
+                                "%s-%s" % m._l10n_pe_ne_doc_id() for m in previas
+                            ),
+                            "saldo": "%.2f" % saldo,
+                            "nc": "%.2f" % move.amount_total,
+                        }
+                    )
+                raise UserError(
+                    _(
+                        "La nota de crédito (%(nc)s) no puede superar el total del comprobante "
+                        "afectado (%(orig)s)."
+                    )
+                    % {
+                        "nc": "%.2f" % move.amount_total,
+                        "orig": "%.2f" % (origin.amount_total or 0),
+                    }
                 )
-                % {
-                    "nc": "%.2f" % move.amount_total,
-                    "orig": "%.2f" % (origin.amount_total or 0),
-                }
-            )
         # Si la emisión vino de "Convertir a comprobante", vincula el comprobante
         # recién posteado a la cotización de origen y la marca como 'convertida'.
         cotid = payload.get("cotizacionId")
@@ -3029,11 +3051,14 @@ class AccountMove(models.Model):
             "total": sum(moves.mapped("amount_total")),
         }
 
-    def _l10n_pe_ne_quick_product(self, ln, tax=None):
+    def _l10n_pe_ne_quick_product(self, ln, tax=None, create=True):
         """Resuelve el product.product de una línea para que el documento USE un registro de Odoo:
         busca por id, por código (default_code) o por nombre exacto; si no existe y hay datos, lo
         CREA simplificado y lo enlaza (igual que el cliente por vat). Devuelve recordset vacío si la
-        línea no aporta nada por lo que crear (queda como texto libre, compatible hacia atrás)."""
+        línea no aporta nada por lo que crear (queda como texto libre, compatible hacia atrás).
+        Con create=False solo resuelve y NUNCA crea: las líneas de notas (07/08) pueden traer
+        texto sintético (p. ej. "DICE: … DEBE DECIR: …" del motivo 03) que no debe convertirse
+        en producto del catálogo."""
         Product = self.env["product.product"]
         pid = ln.get("productId")
         if pid:
@@ -3050,7 +3075,7 @@ class AccountMove(models.Model):
             found = Product.search([("name", "=", desc)], limit=1)
             if found:
                 return found
-        if not (cod or desc):
+        if not (cod or desc) or not create:
             return Product.browse()
         vals = {
             "name": desc or cod or "PRODUCTO",
@@ -3833,6 +3858,20 @@ class AccountMove(models.Model):
             return items
         return {"items": items, "total": self.search_count(domain)}
 
+    def _l10n_pe_ne_nc_previas(self):
+        """Notas de crédito VIGENTES que afectan este comprobante: posteadas y no
+        rechazadas/anuladas/con error. Las que siguen en cola (por_enviar/en_proceso)
+        también cuentan, para que dos NC simultáneas no acrediten más que el total."""
+        self.ensure_one()
+        return self.env["account.move"].search(
+            [
+                ("move_type", "=", "out_refund"),
+                ("reversed_entry_id", "=", self.id),
+                ("state", "=", "posted"),
+                ("l10n_pe_biller_state", "not in", ("rechazado", "error", "anulado")),
+            ]
+        )
+
     def l10n_pe_ne_comprobante_detalle(self):
         """Detalle completo de un comprobante para la vista de detalle (cabecera +
         líneas + totales por afectación + estado SUNAT). Todo calculado en Odoo."""
@@ -3854,9 +3893,19 @@ class AccountMove(models.Model):
                     "afectacion": afect,
                     "unidad": self._l10n_pe_unit_code(ln),
                     "subtotal": ln.price_subtotal or 0.0,
+                    # El front lo usa para conservar el producto real al espejar una NC
+                    # o al refacturar (post-NC motivo 02).
+                    "productId": ln.product_id.id or None,
                 }
             )
         of, ot, os_, on = self._l10n_pe_ne_ple_origen()
+        # NC previas vigentes (solo aplica a facturas/boletas): el front muestra el saldo
+        # pendiente de acreditar y las notas asociadas al elegir el comprobante a afectar.
+        ncs = (
+            self._l10n_pe_ne_nc_previas()
+            if self.move_type == "out_invoice"
+            else self.env["account.move"]
+        )
         return {
             "id": self.id,
             "tipoDoc": self.l10n_pe_ne_tipo_doc or self._l10n_pe_document_type(),
@@ -3873,6 +3922,18 @@ class AccountMove(models.Model):
             "formaPago": self.l10n_pe_ne_forma_pago or "Contado",
             "docOrigen": ("%s %s-%s" % (ot, os_, on)) if on else "",
             "lineas": lineas,
+            "notasCredito": [
+                {
+                    "id": m.id,
+                    "numero": "%s-%s" % m._l10n_pe_ne_doc_id(),
+                    "total": round(m.amount_total or 0.0, 2),
+                    "estado": m.l10n_pe_biller_state or "",
+                }
+                for m in ncs
+            ],
+            "saldoAcreditable": round(
+                (self.amount_total or 0.0) - sum(ncs.mapped("amount_total")), 2
+            ),
             "totales": {
                 "gravada": round(b["gravado"], 2),
                 "exonerada": round(b["exonerado"], 2),

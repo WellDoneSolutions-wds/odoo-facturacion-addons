@@ -129,3 +129,60 @@ class TestStockEmision(EnvioSincronoMixin, TransactionCase):
                             'cantidad': 4, 'precioUnitario': 100, 'taxCode': '1000'}],
             })
         self.assertEqual(self._stock(), 16, "emitir por la API descuenta 4 de 20")
+
+    # -- rechazo de SUNAT: no descontar dos veces -----------------------------------------
+    def test_rechazo_revierte_el_movimiento(self):
+        self._abastecer(10)
+        m = self._venta(self.bien, 3, corr='9060')
+        m._l10n_pe_ne_mover_stock()
+        self.assertEqual(self._stock(), 7)
+        m.l10n_pe_biller_state = 'rechazado'      # el write lo detecta y revierte
+        self.assertEqual(self._stock(), 10, "un rechazado no existe para SUNAT: el bien vuelve")
+
+    def test_rechazo_revierte_pero_no_borra_el_rastro(self):
+        """Se compensa, no se borra: el kardex es un libro y debe mostrar que hubo intento."""
+        self._abastecer(10)
+        m = self._venta(self.bien, 3, corr='9061')
+        m._l10n_pe_ne_mover_stock()
+        m.l10n_pe_biller_state = 'rechazado'
+        movs = self.env['stock.move'].search([('l10n_pe_ne_move_id', '=', m.id)])
+        self.assertEqual(len(movs), 2, "queda el original y su reversa, no cero")
+        self.assertEqual(len(movs.filtered('l10n_pe_ne_reversa')), 1)
+
+    def test_rechazo_y_reemision_no_descuenta_dos_veces(self):
+        """El escenario real: SUNAT rechaza, se corrige y se emite uno NUEVO. Sin la reversa,
+        el bien salía dos veces del kardex por una sola venta."""
+        self._abastecer(10)
+        rechazada = self._venta(self.bien, 3, corr='9070')
+        rechazada._l10n_pe_ne_mover_stock()
+        rechazada.l10n_pe_biller_state = 'rechazado'
+        # Se corrige y se emite de nuevo (otro comprobante).
+        nueva = self._venta(self.bien, 3, corr='9071')
+        nueva._l10n_pe_ne_mover_stock()
+        self.assertEqual(self._stock(), 7, "una sola venta = un solo descuento")
+
+    def test_revertir_es_idempotente(self):
+        self._abastecer(10)
+        m = self._venta(self.bien, 3, corr='9080')
+        m._l10n_pe_ne_mover_stock()
+        m.l10n_pe_biller_state = 'rechazado'
+        self.assertEqual(self._stock(), 10)
+        m._l10n_pe_ne_revertir_stock()            # a mano, otra vez
+        m.write({'l10n_pe_biller_state': 'rechazado'})   # y de nuevo por el write
+        self.assertEqual(self._stock(), 10, "no repone de más")
+
+    def test_rechazo_sin_movimiento_no_hace_nada(self):
+        """Un rechazado de puro servicio no tiene qué revertir."""
+        m = self._venta(self.servicio, 2, corr='9090')
+        m.l10n_pe_biller_state = 'rechazado'
+        self.assertFalse(self.env['stock.move'].search([('l10n_pe_ne_move_id', '=', m.id)]))
+
+    def test_rechazo_de_nota_de_credito_vuelve_a_sacar(self):
+        """La reversa de una NC (que repone) es una salida: los XOR de la dirección."""
+        self._abastecer(10)
+        nc = self._venta(self.bien, 4, tipo='07', serie='FC01', corr='9095')
+        nc.l10n_pe_ne_tipo_doc = '07'
+        nc._l10n_pe_ne_mover_stock()
+        self.assertEqual(self._stock(), 14, "la NC repuso")
+        nc.l10n_pe_biller_state = 'rechazado'
+        self.assertEqual(self._stock(), 10, "rechazada: lo repuesto se deshace")

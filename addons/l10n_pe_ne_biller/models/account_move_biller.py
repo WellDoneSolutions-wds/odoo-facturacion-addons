@@ -3098,8 +3098,11 @@ class AccountMove(models.Model):
             and (l.quantity or 0) > 0
         )
 
-    def _l10n_pe_ne_mover_stock(self):
+    def _l10n_pe_ne_mover_stock(self, reversa=False):
         """Descuenta (o repone) el stock de las líneas de bien del comprobante.
+
+        `reversa=True` invierte la dirección y marca los movimientos como reversa: lo usa
+        _l10n_pe_ne_revertir_stock cuando SUNAT rechaza.
 
         La factura NO mueve stock en Odoo: los movimientos nacen de un stock.picking, que en
         el flujo estándar viene de un sale.order. Esta app no usa sale.order —emite el
@@ -3137,14 +3140,16 @@ class AccountMove(models.Model):
                 self.name,
             )
             return self.env["stock.move"].browse()
-        devolucion = tipo == "07"
+        # La NC va al revés que la factura; y una reversa va al revés de lo que sea.
+        # Los dos XOR: la reversa de una NC vuelve a ser una salida.
+        entrada = (tipo == "07") != bool(reversa)
         origen, destino = (
-            (clientes, wh.lot_stock_id) if devolucion else (wh.lot_stock_id, clientes)
+            (clientes, wh.lot_stock_id) if entrada else (wh.lot_stock_id, clientes)
         )
         moves = self.env["stock.move"].browse()
         for l in lineas:
             # Sin 'name': stock.move no lo tiene en Odoo 19 (su `reference` se computa).
-            # `origin` es el campo de documento de origen y deja el rastro al comprobante.
+            # `origin` deja el rastro legible; l10n_pe_ne_move_id es el enlace real (por id).
             moves |= self.env["stock.move"].create(
                 {
                     "product_id": l.product_id.id,
@@ -3154,6 +3159,8 @@ class AccountMove(models.Model):
                     "location_dest_id": destino.id,
                     "company_id": self.company_id.id,
                     "origin": self.name or "",
+                    "l10n_pe_ne_move_id": self.id,
+                    "l10n_pe_ne_reversa": reversa,
                 }
             )
         try:
@@ -3169,6 +3176,59 @@ class AccountMove(models.Model):
             _logger.exception("stock: no se pudo mover el stock de %s: %s", self.name, e)
             return self.env["stock.move"].browse()
         return moves
+
+    def _l10n_pe_ne_revertir_stock(self):
+        """Deshace el movimiento de un comprobante que SUNAT rechazó.
+
+        Un rechazado NO existe para SUNAT: hay que corregir y emitir uno NUEVO. Ese nuevo
+        comprobante vuelve a descontar, así que si el rechazado se queda con su movimiento,
+        el bien sale DOS VECES del kardex por una sola venta.
+
+        Se REVIERTE, no se borra: el kardex es un libro: se compensa con el movimiento
+        contrario y queda el rastro de que hubo un intento. Borrar el original escondería que
+        pasó algo, que es justo lo que un inventario permanente no debe hacer.
+
+        Idempotente: si ya se revirtió, no hace nada. Lo llama el write() al detectar la
+        transición a 'rechazado' — por ahí pasan los tres caminos que la fijan (el envío
+        síncrono, el cron de pendientes y el resumen diario de boletas), y también cualquiera
+        que se agregue después.
+        """
+        self.ensure_one()
+        Move = self.env["stock.move"]
+        hechos = Move.search(
+            [
+                ("l10n_pe_ne_move_id", "=", self.id),
+                ("l10n_pe_ne_reversa", "=", False),
+                ("state", "=", "done"),
+            ]
+        )
+        if not hechos:
+            return Move.browse()
+        ya = Move.search_count(
+            [("l10n_pe_ne_move_id", "=", self.id), ("l10n_pe_ne_reversa", "=", True)]
+        )
+        if ya:
+            return Move.browse()
+        return self._l10n_pe_ne_mover_stock(reversa=True)
+
+    def write(self, vals):
+        """Revierte el stock al pasar a 'rechazado'.
+
+        Va en el write y no en cada sitio que fija el estado porque son tres (envío síncrono,
+        cron de pendientes, resumen diario de boletas) y mañana pueden ser cuatro: la
+        invariante no debe depender de que alguien se acuerde de llamar al helper.
+
+        Solo los que ENTRAN a rechazado (los que ya lo estaban no se re-revierten).
+        """
+        revertir = self.browse()
+        if vals.get("l10n_pe_biller_state") == "rechazado":
+            revertir = self.filtered(
+                lambda m: m.l10n_pe_biller_state != "rechazado"
+            )
+        res = super().write(vals)
+        for m in revertir:
+            m._l10n_pe_ne_revertir_stock()
+        return res
 
     def _l10n_pe_ne_quick_product(self, ln, tax=None, create=True, precio_con_igv=True):
         """Resuelve el product.product de una línea para que el documento USE un registro de Odoo:

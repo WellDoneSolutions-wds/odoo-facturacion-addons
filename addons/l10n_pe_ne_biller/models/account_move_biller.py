@@ -3082,6 +3082,29 @@ class AccountMove(models.Model):
             "total": sum(moves.mapped("amount_total")),
         }
 
+    @api.model
+    def _l10n_pe_ne_tipo_producto(self, tipo=None, unidad=None):
+        """Tipo del producto en Odoo: 'consu' (bien) o 'service' (servicio).
+
+        Manda lo que el usuario eligió (`tipo`: "bien"/"servicio"). Si no eligió —el producto
+        se auto-crea al emitir, donde no hay quién responda— se deduce de la UNIDAD, que es la
+        única señal real que tiene la línea: ZZ es la unidad de servicio del catálogo 03 de
+        SUNAT; cualquier otra (NIU, KGM, …) describe algo tangible.
+
+        Antes esto era "service" fijo, lo que además se contradecía con SUNAT: sin unidad se
+        emite NIU (DEFAULT_UNIT_CODE), o sea que al mismo producto se le declaraba BIEN a SUNAT
+        y servicio en Odoo. Ahora ambos dicen lo mismo, y el default coincide con el de Odoo.
+
+        No se toca `is_storable` (llevar stock o no): ese campo solo existe con el módulo
+        `stock` instalado, y hoy no lo está. Es una decisión aparte, por producto.
+        """
+        t = (tipo or "").strip().lower()
+        if t in ("bien", "bienes", "producto", "consu"):
+            return "consu"
+        if t in ("servicio", "servicios", "service"):
+            return "service"
+        return "service" if (unidad or "").strip().upper() == "ZZ" else "consu"
+
     def _l10n_pe_ne_quick_product(self, ln, tax=None, create=True, precio_con_igv=True):
         """Resuelve el product.product de una línea para que el documento USE un registro de Odoo:
         busca por id, por código (default_code) o por nombre exacto; si no existe y hay datos, lo
@@ -3117,9 +3140,10 @@ class AccountMove(models.Model):
             # Valor SIN IGV (ni ISC) del payload de emisión → precio de vitrina CON IGV.
             isc = float(ln.get("isc") or 0)
             precio = round(precio * (1 + isc / 100.0) * (1 + (tax.amount or 0) / 100.0), 4)
+        uni = (ln.get("unidad") or "").strip()
         vals = {
             "name": desc or cod or "PRODUCTO",
-            "type": "service",
+            "type": self._l10n_pe_ne_tipo_producto(ln.get("tipo"), uni),
             "sale_ok": True,
             "list_price": precio,
             # company_id del emisor: aísla el producto por RUC (igual que el cliente).
@@ -3130,7 +3154,6 @@ class AccountMove(models.Model):
         bc = (ln.get("barcode") or "").strip()
         if bc:
             vals["barcode"] = bc
-        uni = (ln.get("unidad") or "").strip()
         if uni:
             vals["l10n_pe_ne_unit_code"] = uni
         if tax:
@@ -3152,6 +3175,9 @@ class AccountMove(models.Model):
             "taxCode": (tax.l10n_pe_edi_tax_code or "1000") if tax else "1000",
             "unidad": p.l10n_pe_ne_unit_code or "",
             "icbper": icbper,
+            # "bien" | "servicio" — el vocabulario del negocio, no el de Odoo (consu/service).
+            # 'combo' no lo usa esta app; si apareciera, se trata como bien (es tangible).
+            "tipo": "servicio" if p.type == "service" else "bien",
         }
 
     def _l10n_pe_ne_partner_dict(self, p):
@@ -3305,6 +3331,7 @@ class AccountMove(models.Model):
                 "barcode": producto.get("barcode"),
                 "precioUnitario": producto.get("precio"),
                 "unidad": producto.get("unidad"),
+                "tipo": producto.get("tipo"),
             },
             tax,
         )
@@ -3327,6 +3354,10 @@ class AccountMove(models.Model):
             vals["barcode"] = (producto.get("barcode") or "").strip() or False
         if "unidad" in producto:
             vals["l10n_pe_ne_unit_code"] = (producto.get("unidad") or "").strip() or False
+        if producto.get("tipo"):
+            # Solo si viene explícito: aquí NO se deduce de la unidad. Cambiar la unidad de un
+            # producto ya clasificado no debe reclasificarlo a su espalda.
+            vals["type"] = self._l10n_pe_ne_tipo_producto(producto["tipo"])
         if producto.get("precio") is not None:
             vals["list_price"] = float(producto.get("precio") or 0)
         if producto.get("taxCode"):
@@ -3562,7 +3593,10 @@ class AccountMove(models.Model):
                 existing.write(vals)
                 actualizados += 1
             else:
-                vals.update({"default_code": cod, "type": "service",
+                # Tipo deducido de la unidad de la fila (ZZ → servicio, resto → bien): el
+                # Excel no trae columna de tipo y la unidad es la señal que sí trae.
+                vals.update({"default_code": cod,
+                             "type": self._l10n_pe_ne_tipo_producto(unidad=unidad),
                              "sale_ok": True, "company_id": self.env.company.id})
                 Product.create(vals)
                 creados += 1

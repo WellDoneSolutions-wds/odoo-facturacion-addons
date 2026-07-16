@@ -125,6 +125,14 @@ class L10nPeNeApi(http.Controller):
     def _user(self, uid):
         return request.env["res.users"].sudo().browse(uid)
 
+    def _puede_anular(self, uid):
+        """La baja ante SUNAT (RA/RC) es irreversible y separa del grupo Emisor: un cajero
+        factura pero no da de baja. El grupo de anulación IMPLICA el de emisor, así que
+        quien lo tiene puede ambas cosas."""
+        return self._user(uid).has_group(
+            "l10n_pe_ne_biller.group_l10n_pe_ne_anulacion"
+        )
+
     def _move(self, uid):
         u = self._user(uid)
         return request.env["account.move"].with_user(uid).with_company(u.company_id)
@@ -319,6 +327,7 @@ class L10nPeNeApi(http.Controller):
                     "company": user.company_id.name,
                     "ruc": user.company_id.vat or "",
                     "isAdmin": user.has_group("base.group_system"),
+                    "puedeAnular": self._puede_anular(uid),
                     "mustChangePassword": user.l10n_pe_ne_must_change_password,
                     "expires": exp.isoformat(),
                 }
@@ -341,6 +350,7 @@ class L10nPeNeApi(http.Controller):
                 "company": user.company_id.name,
                 "ruc": user.company_id.vat or "",
                 "isAdmin": user.has_group("base.group_system"),
+                "puedeAnular": self._puede_anular(uid),
                 "mustChangePassword": user.l10n_pe_ne_must_change_password,
             }
         )
@@ -682,6 +692,11 @@ class L10nPeNeApi(http.Controller):
         uid = self._identify()
         if not uid:
             return self._unauth()
+        if not self._puede_anular(uid):
+            return self._err(
+                "No tienes permiso para anular comprobantes. Pídelo a un administrador.",
+                status=403,
+            )
         return self._run(lambda: self._move(uid).l10n_pe_ne_quick_anular(self._body()))
 
     @http.route("/ne/api/comprobantes/<int:rec_id>/<string:kind>", **_GET)

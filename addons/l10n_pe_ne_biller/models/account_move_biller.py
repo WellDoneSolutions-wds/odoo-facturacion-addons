@@ -1891,7 +1891,10 @@ class AccountMove(models.Model):
                 taxes = taxes + self._l10n_pe_ne_ensure_isc_tax(isc_rate)
             # Notas (07/08): solo resolver el producto, nunca crearlo — sus líneas pueden ser
             # espejo o texto sintético (DICE/DEBE DECIR) que no debe entrar al catálogo.
-            prod = self._l10n_pe_ne_quick_product(ln, tax, create=tipo not in ("07", "08"))
+            # precio_con_igv=False: el payload de emisión trae el valor SIN IGV.
+            prod = self._l10n_pe_ne_quick_product(
+                ln, tax, create=tipo not in ("07", "08"), precio_con_igv=False
+            )
             d = float(ln.get("descuento") or 0)
             disc = round(100.0 * (1 - (1 - d / 100.0) * (1 - g / 100.0)), 6) if g else d
             lvals = {
@@ -3051,14 +3054,18 @@ class AccountMove(models.Model):
             "total": sum(moves.mapped("amount_total")),
         }
 
-    def _l10n_pe_ne_quick_product(self, ln, tax=None, create=True):
+    def _l10n_pe_ne_quick_product(self, ln, tax=None, create=True, precio_con_igv=True):
         """Resuelve el product.product de una línea para que el documento USE un registro de Odoo:
         busca por id, por código (default_code) o por nombre exacto; si no existe y hay datos, lo
         CREA simplificado y lo enlaza (igual que el cliente por vat). Devuelve recordset vacío si la
         línea no aporta nada por lo que crear (queda como texto libre, compatible hacia atrás).
         Con create=False solo resuelve y NUNCA crea: las líneas de notas (07/08) pueden traer
         texto sintético (p. ej. "DICE: … DEBE DECIR: …" del motivo 03) que no debe convertirse
-        en producto del catálogo."""
+        en producto del catálogo.
+        `precio_con_igv`: la convención del catálogo es list_price CON IGV (Productos, POS e
+        import lo tratan como precio de vitrina). El payload de EMISIÓN trae el valor unitario
+        SIN IGV (ni ISC): quick_emit pasa False y al crear se repone el impuesto — sin esto el
+        producto auto-creado quedaba ~15% más barato al revenderlo desde el catálogo."""
         Product = self.env["product.product"]
         pid = ln.get("productId")
         if pid:
@@ -3077,11 +3084,16 @@ class AccountMove(models.Model):
                 return found
         if not (cod or desc) or not create:
             return Product.browse()
+        precio = float(ln.get("precioUnitario") or 0)
+        if not precio_con_igv and tax and (tax.amount or 0) > 0:
+            # Valor SIN IGV (ni ISC) del payload de emisión → precio de vitrina CON IGV.
+            isc = float(ln.get("isc") or 0)
+            precio = round(precio * (1 + isc / 100.0) * (1 + (tax.amount or 0) / 100.0), 4)
         vals = {
             "name": desc or cod or "PRODUCTO",
             "type": "service",
             "sale_ok": True,
-            "list_price": float(ln.get("precioUnitario") or 0),
+            "list_price": precio,
             # company_id del emisor: aísla el producto por RUC (igual que el cliente).
             "company_id": self.env.company.id,
         }

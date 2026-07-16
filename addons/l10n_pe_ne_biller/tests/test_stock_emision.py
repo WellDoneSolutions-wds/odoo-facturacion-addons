@@ -270,3 +270,26 @@ class TestStockEmision(EnvioSincronoMixin, TransactionCase):
         with self.assertRaises(UserError):
             self._compra([{'productId': self.bien.id, 'cantidad': 0, 'precioUnitario': 10}],
                          total=10, numero='5006')
+
+    def test_compra_detalle_debe_cuadrar_con_el_total(self):
+        """El detalle MANDA: la compra se registra por la suma de las líneas. Si el total no
+        cuadra, lo que entra al Registro de Compras no es lo que el usuario cree — se corta."""
+        with self.assertRaises(UserError):
+            self._compra([{'productId': self.bien.id, 'cantidad': 10, 'precioUnitario': 5}],
+                         total=200, numero='5007')   # detalle 50 vs total 200
+
+    def test_compra_que_cuadra_pasa(self):
+        d = self._compra([{'productId': self.bien.id, 'cantidad': 10, 'precioUnitario': 5}],
+                         total=50, numero='5008')
+        self.assertEqual(d['total'], 50)
+
+    def test_compra_tolera_el_centimo(self):
+        """El detalle se teclea a mano: no debe pelear por un céntimo de redondeo."""
+        d = self._compra([{'productId': self.bien.id, 'cantidad': 3, 'precioUnitario': 3.33}],
+                         total=10, numero='5009')    # 9.99 vs 10
+        self.assertTrue(d['id'])
+
+    def test_compra_costo_negativo_rechaza(self):
+        with self.assertRaises(UserError):
+            self._compra([{'productId': self.bien.id, 'cantidad': 1, 'precioUnitario': -5}],
+                         total=-5, numero='5010')

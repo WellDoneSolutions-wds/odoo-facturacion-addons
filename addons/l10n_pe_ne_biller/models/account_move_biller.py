@@ -3885,6 +3885,7 @@ class AccountMove(models.Model):
                 })
             ]
         out = []
+        suma = 0.0
         for ln in lineas:
             # create=False: una compra NO da de alta productos en el catálogo. El proveedor
             # los llama a su manera y crearlos aquí llenaría el catálogo de duplicados; se
@@ -3893,15 +3894,32 @@ class AccountMove(models.Model):
             cant = float(ln.get("cantidad") or 0)
             if cant <= 0:
                 raise UserError(_("Cada línea de la compra necesita una cantidad mayor a 0."))
+            costo = float(ln.get("precioUnitario") or 0)
+            if costo < 0:
+                raise UserError(_("El costo de una línea no puede ser negativo."))
+            suma += cant * costo
             vals = {
                 "name": ln.get("descripcion") or (prod.name if prod else "ITEM"),
                 "quantity": cant,
-                "price_unit": float(ln.get("precioUnitario") or 0),
+                "price_unit": costo,
                 "tax_ids": [(6, 0, [])],
             }
             if prod:
                 vals["product_id"] = prod.id
             out.append((0, 0, vals))
+        # El detalle MANDA: la compra se registra por la suma de las líneas y el `total` del
+        # payload queda ignorado. Si no cuadran, lo que entra al Registro de Compras no es lo
+        # que el usuario cree — un error fiscal. Se corta acá y no solo en el front: el
+        # backend es la autoridad y a /ne/api/compras puede llamar cualquiera.
+        total = float(compra.get("total") or 0)
+        if total and abs(suma - total) > 0.01:
+            raise UserError(
+                _(
+                    "El detalle suma %(suma).2f y el total de la compra dice %(total).2f. "
+                    "Deben coincidir."
+                )
+                % {"suma": suma, "total": total}
+            )
         return out
 
     @api.model

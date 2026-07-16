@@ -3873,6 +3873,22 @@ class AccountMove(models.Model):
                 ("l10n_pe_ne_corr_emit", "ilike", q),
             ]
         moves = self.search(domain, order="id desc", limit=limit, offset=offset or 0)
+        # NC vigentes por comprobante en UNA consulta agrupada: la lista marca las
+        # facturas/boletas acreditadas ("tiene NC") sin una búsqueda por fila. Mismo
+        # criterio de "vigente" que _l10n_pe_ne_nc_previas (las en cola cuentan).
+        nc_por_doc = {}
+        if moves:
+            grupos = self.env["account.move"]._read_group(
+                [
+                    ("move_type", "=", "out_refund"),
+                    ("reversed_entry_id", "in", moves.ids),
+                    ("state", "=", "posted"),
+                    ("l10n_pe_biller_state", "not in", ("rechazado", "error", "anulado")),
+                ],
+                groupby=["reversed_entry_id"],
+                aggregates=["__count", "amount_total:sum"],
+            )
+            nc_por_doc = {rev.id: (count, total or 0.0) for rev, count, total in grupos}
         items = [
             {
                 "id": m.id,
@@ -3891,6 +3907,9 @@ class AccountMove(models.Model):
                 if m.create_date
                 else "",
                 "mensaje": m.l10n_pe_biller_message or "",
+                # Notas de crédito vigentes que afectan este comprobante (0 si no tiene).
+                "ncCount": nc_por_doc.get(m.id, (0, 0.0))[0],
+                "ncTotal": round(nc_por_doc.get(m.id, (0, 0.0))[1], 2),
             }
             for m in moves
         ]

@@ -55,12 +55,19 @@ class L10nPeNeCajaSesion(models.Model):
         return fields.Datetime.context_timestamp(self, dt).strftime("%Y-%m-%d %H:%M")
 
     def _l10n_pe_ne_ventas_sesion(self):
-        """account.move amarrados a la sesión (ventana por create_date, solo 'enviado')."""
+        """account.move amarrados a la sesión (ventana por create_date).
+
+        La caja refleja DINERO FÍSICO: la venta cuenta desde el COBRO, aunque la emisión
+        async siga en cola (por_enviar/en_proceso) — antes se exigía 'enviado' (CDR de
+        SUNAT aplicado por el cron) y el cajero no veía su venta por ~1 minuto, con
+        riesgo de cerrar caja descuadrada. Si la emisión falla en definitiva
+        (rechazado/error/anulado), la venta sale del esperado en vivo: el cajero debe
+        re-emitirla (la nueva sí cuenta) o el descuadre aflora en el cierre."""
         self.ensure_one()
         return self.env["account.move"].search([
             ("move_type", "=", "out_invoice"),
             ("state", "=", "posted"),
-            ("l10n_pe_biller_state", "=", "enviado"),
+            ("l10n_pe_biller_state", "not in", ("rechazado", "error", "anulado")),
             ("company_id", "=", self.company_id.id),
             ("create_date", ">=", self.fecha_apertura),
             ("create_date", "<=", self.fecha_cierre or fields.Datetime.now()),

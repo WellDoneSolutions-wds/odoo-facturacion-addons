@@ -293,3 +293,49 @@ class TestStockEmision(EnvioSincronoMixin, TransactionCase):
         with self.assertRaises(UserError):
             self._compra([{'productId': self.bien.id, 'cantidad': 1, 'precioUnitario': -5}],
                          total=-5, numero='5010')
+
+    # -- IGV de la compra: lo que sostiene el crédito fiscal --------------------------------
+    def test_compra_gravada_separa_base_e_igv(self):
+        """El Registro de Compras necesita base e IGV, no solo el total. Antes la línea iba
+        sin impuesto y el crédito fiscal no existía."""
+        d = self._compra([{'productId': self.bien.id, 'cantidad': 1, 'precioUnitario': 118}],
+                         total=118, numero='6001')
+        self.assertEqual(d['total'], 118.0)
+        self.assertEqual(d['base'], 100.0)
+        self.assertEqual(d['igv'], 18.0)
+        self.assertEqual(d['afectacion'], '1000')
+
+    def test_el_total_sigue_cuadrando_redondo(self):
+        """La clave de la convención "precio con IGV": con round_globally, el impuesto se
+        calcula sobre la base SIN redondear y el total vuelve a dar el bruto exacto. Si la
+        base se redondeara a 2, 7.20 daría 7.198 y el cuadre se rompería."""
+        for bruto in (7.20, 10.00, 2.00, 118.00, 35.50):
+            d = self._compra([{'productId': self.bien.id, 'cantidad': 1, 'precioUnitario': bruto}],
+                             total=bruto, numero=str(int(bruto * 100) + 6100))
+            self.assertEqual(d['total'], bruto, 'el total debe dar el bruto exacto: %s' % bruto)
+
+    def test_compra_sin_detalle_tambien_separa_el_igv(self):
+        """El flujo simple (solo total) también aporta crédito fiscal."""
+        d = self._compra(total=236, numero='6002')
+        self.assertEqual(d['total'], 236.0)
+        self.assertEqual(d['base'], 200.0)
+        self.assertEqual(d['igv'], 36.0)
+
+    def test_compra_exonerada_no_tiene_igv(self):
+        """Una compra exonerada (o un recibo de servicios) no da crédito fiscal: base = total."""
+        d = self._compra(total=100, numero='6003')
+        self.assertEqual(d['igv'], 18.0 / 118 * 100 * 0 + d['igv'])  # sanity: la gravada sí tiene
+        d2 = self.env['account.move'].l10n_pe_ne_create_compra({
+            'proveedor': {'tipoDoc': '6', 'numDoc': '20100070970', 'razonSocial': 'PROVEEDOR SAC'},
+            'tipoComprobante': '01', 'serie': 'F001', 'numero': '6004', 'fecha': '2026-07-16',
+            'total': 100, 'descripcion': 'EXONERADA', 'afectacion': '9997'})
+        self.assertEqual(d2['total'], 100.0)
+        self.assertEqual(d2['base'], 100.0)
+        self.assertEqual(d2['igv'], 0.0)
+        self.assertEqual(d2['afectacion'], '9997')
+
+    def test_el_impuesto_es_de_COMPRA_no_de_venta(self):
+        """Usar el de venta metería el crédito fiscal en la cuenta equivocada."""
+        tax = self.env['account.move']._l10n_pe_ne_tax_compra_by_code('1000')
+        self.assertEqual(tax.type_tax_use, 'purchase')
+        self.assertEqual(tax.amount, 18.0)

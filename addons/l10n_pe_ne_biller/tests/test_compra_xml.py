@@ -35,6 +35,21 @@ XML = '''<?xml version="1.0" encoding="ISO-8859-1"?>
         <cbc:PriceTypeCode listName="Tipo de Precio">01</cbc:PriceTypeCode>
       </cac:AlternativeConditionPrice>
     </cac:PricingReference>
+    <cac:TaxTotal>
+      <cbc:TaxAmount currencyID="PEN">1.10</cbc:TaxAmount>
+      <cac:TaxSubtotal>
+        <cbc:TaxableAmount currencyID="PEN">6.10</cbc:TaxableAmount>
+        <cbc:TaxAmount currencyID="PEN">1.10</cbc:TaxAmount>
+        <cac:TaxCategory>
+          <cbc:Percent>18.00</cbc:Percent>
+          <cbc:TaxExemptionReasonCode listName="Afectacion del IGV">10</cbc:TaxExemptionReasonCode>
+          <cac:TaxScheme>
+            <cbc:ID schemeID="UN/ECE 5153" schemeName="Codigo de tributos">1000</cbc:ID>
+            <cbc:Name>IGV</cbc:Name>
+          </cac:TaxScheme>
+        </cac:TaxCategory>
+      </cac:TaxSubtotal>
+    </cac:TaxTotal>
     <cac:Item>
       <cbc:Description>DESARMADOR PLANO</cbc:Description>
       <cac:SellersItemIdentification><cbc:ID>P001</cbc:ID></cac:SellersItemIdentification>
@@ -127,3 +142,14 @@ class TestCompraXml(TransactionCase):
         d = self.env['account.move'].l10n_pe_ne_importar_compra_xml(
             {'xml': base64.b64encode(XML.encode('utf-8')).decode()})
         self.assertEqual(d['serie'], 'F001')
+
+    def test_lee_la_afectacion_del_xml(self):
+        """Se LEE del TaxScheme/ID (catálogo 05), no se deduce del IGV: asumir 'gravado' en
+        una factura exonerada le inventaría al usuario un crédito fiscal que no tiene."""
+        self.assertEqual(self._parse()['afectacion'], '1000')
+
+    def test_afectacion_exonerada_no_se_confunde_con_gravada(self):
+        xml = XML.replace(
+            '<cbc:ID schemeID="UN/ECE 5153" schemeName="Codigo de tributos">1000</cbc:ID>',
+            '<cbc:ID schemeID="UN/ECE 5153" schemeName="Codigo de tributos">9997</cbc:ID>')
+        self.assertEqual(self._parse(xml)['afectacion'], '9997')

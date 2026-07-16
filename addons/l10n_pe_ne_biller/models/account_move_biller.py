@@ -3827,6 +3827,18 @@ class AccountMove(models.Model):
             "proveedor": self.partner_id.name or "",
             "ruc": self.partner_id.vat or "",
             "total": self.amount_total or 0.0,
+            # Base e IGV separados: es lo que pide el Registro de Compras y lo que sostiene el
+            # crédito fiscal. Antes la compra iba sin impuesto y solo se guardaba el total.
+            # Redondeado a la moneda: la resta en float da 1.1000000000000005 y ese ruido
+            # llegaría tal cual a la pantalla.
+            "base": self.amount_untaxed or 0.0,
+            "igv": float_round(
+                (self.amount_total or 0.0) - (self.amount_untaxed or 0.0),
+                precision_rounding=self.currency_id.rounding or 0.01,
+            ),
+            "afectacion": (
+                self.invoice_line_ids[:1].tax_ids[:1].l10n_pe_edi_tax_code or "1000"
+            ) if self.invoice_line_ids[:1].tax_ids[:1] else "9998",
             "moneda": self.currency_id.name or "PEN",
             "estado": self.state,
             # Descripción = nombre de la línea (para prefill al editar; la línea de
@@ -3958,6 +3970,14 @@ class AccountMove(models.Model):
                 # None y lo elige el usuario — inventar el mapeo ensuciaría el kardex.
                 "productId": self._l10n_pe_ne_match_producto(barcode, cod_prov),
             })
+        # Afectación: se LEE del XML (TaxScheme/ID, catálogo 05 de la primera línea), no se
+        # deduce del IGV. Asumir "gravado" en una factura exonerada le inventaría al usuario
+        # un crédito fiscal que no tiene — un error fiscal, no una imprecisión.
+        afect = ""
+        primera = (hijos(root, "InvoiceLine") + hijos(root, "CreditNoteLine"))[:1]
+        if primera:
+            st = uno(primera[0], "TaxTotal", "TaxSubtotal")
+            afect = txt(st, "TaxCategory", "TaxScheme", "ID")
         return {
             "proveedor": {"tipoDoc": "6", "numDoc": ruc, "razonSocial": razon},
             "tipoComprobante": tipo,
@@ -3966,6 +3986,7 @@ class AccountMove(models.Model):
             "fecha": txt(root, "IssueDate"),
             "total": float(total or 0),
             "igv": float(igv or 0),
+            "afectacion": afect or ("1000" if float(igv or 0) > 0 else "9998"),
             "descripcion": "",
             "lineas": lineas,
         }
@@ -3989,6 +4010,33 @@ class AccountMove(models.Model):
         return None
 
     @api.model
+    def _l10n_pe_ne_tax_compra_by_code(self, code):
+        """account.tax de COMPRA por código cat-05; default 1000 (IGV gravado).
+
+        Existe aparte del de venta porque el crédito fiscal se imputa con impuestos de
+        compra: usar el de venta metería el IGV en la cuenta equivocada. La localización ya
+        trae los cuatro (IGV 18%, 0% Exo, 0% Ina, 0% Exp)."""
+        return self.env["account.tax"].search(
+            [
+                ("company_id", "=", self.env.company.id),
+                ("type_tax_use", "=", "purchase"),
+                ("l10n_pe_edi_tax_code", "=", code or "1000"),
+            ],
+            limit=1,
+        )
+
+    @api.model
+    def _l10n_pe_ne_base_sin_igv(self, bruto, tax):
+        """Precio CON IGV → base SIN IGV, que es lo que espera `price_unit` con un impuesto
+        tax_excluded (la convención de esta app: el usuario ve y teclea precios con IGV).
+
+        No se redondea a 2: con `round_globally` en la compañía, Odoo calcula el impuesto
+        sobre la base sin redondear y el total vuelve a dar el bruto redondo. Redondear acá
+        rompería justo eso (118 → base 100.00 ✓, pero 7.20 → 6.10 y el total daría 7.198)."""
+        rate = (tax.amount or 0) if tax else 0
+        return (bruto or 0) / (1 + rate / 100.0) if rate else (bruto or 0)
+
+    @api.model
     def _l10n_pe_ne_compra_lineas(self, compra):
         """invoice_line_ids de una compra, desde `lineas` si vienen, o la línea única del total.
 
@@ -3996,6 +4044,12 @@ class AccountMove(models.Model):
         servicios), y el flujo de "solo el total" existe para registrar el crédito fiscal sin
         inventariar nada. Quien necesita kardex, detalla; el resto sigue como siempre.
         Solo las líneas con producto pueden mover stock (ver _l10n_pe_ne_lineas_con_stock)."""
+        # Afectación del documento (cat-05): 1000 gravado por defecto — es la compra normal.
+        # Va a nivel documento y no por línea: una factura de compra suele ser toda gravada o
+        # toda no gravada (un recibo de servicios, un RH). El caso mixto necesita afectación
+        # por línea y es otra iteración; hoy no hay dato para adivinarlo.
+        tax = self._l10n_pe_ne_tax_compra_by_code(compra.get("afectacion"))
+        tax_ids = [(6, 0, tax.ids if tax else [])]
         lineas = compra.get("lineas") or []
         if not lineas:
             total = float(compra.get("total") or 0)
@@ -4003,8 +4057,11 @@ class AccountMove(models.Model):
                 (0, 0, {
                     "name": compra.get("descripcion") or "COMPRA",
                     "quantity": 1,
-                    "price_unit": total,
-                    "tax_ids": [(6, 0, [])],
+                    # El total va CON IGV: se guarda la base y Odoo repone el impuesto, así
+                    # el Registro de Compras tiene base e IGV separados (antes iba sin
+                    # impuesto y el crédito fiscal no existía).
+                    "price_unit": self._l10n_pe_ne_base_sin_igv(total, tax),
+                    "tax_ids": tax_ids,
                 })
             ]
         out = []
@@ -4024,8 +4081,11 @@ class AccountMove(models.Model):
             vals = {
                 "name": ln.get("descripcion") or (prod.name if prod else "ITEM"),
                 "quantity": cant,
-                "price_unit": costo,
-                "tax_ids": [(6, 0, [])],
+                # `costo` viene CON IGV (la convención de la app y lo que trae el XML del
+                # proveedor en AlternativeConditionPrice); se guarda la base y Odoo repone
+                # el impuesto. La suma para el cuadre sigue siendo sobre el bruto.
+                "price_unit": self._l10n_pe_ne_base_sin_igv(costo, tax),
+                "tax_ids": tax_ids,
             }
             if prod:
                 vals["product_id"] = prod.id

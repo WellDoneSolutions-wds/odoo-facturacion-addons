@@ -2789,6 +2789,177 @@ class AccountMove(models.Model):
             "total": sum(moves.mapped("amount_total")),
         }
 
+    # ------------------------------------------------------------- PLE 8.1 (compras)
+    #
+    # ⚠ LA ESTRUCTURA DE ESTE FORMATO ESTÁ PENDIENTE DE VALIDACIÓN CONTABLE.
+    #
+    # Los anexos de SUNAT con el layout del 8.1 (RS 286-2009 anexo 2, y sus modificatorias)
+    # se publican como PDF ESCANEADO: no hay de dónde extraerlo de forma fiable. Lo de abajo
+    # espeja las convenciones del 14.1 de este mismo addon —que sí está en producción— y el
+    # orden de campos que documenta SUNAT para el registro de compras, pero NADIE lo verificó
+    # contra la norma vigente.
+    #
+    # Cada campo va NUMERADO a propósito, para que un contador pueda auditarlo uno por uno y
+    # decir "el 14 no es ese" sin leer Python.
+    #
+    # El modo de fallo es benigno: el validador del PLE de SUNAT revisa la estructura, así que
+    # un layout corrido se RECHAZA al subirlo — no entra mal en silencio. Aun así, que nadie
+    # lo presente sin que su contador lo confirme primero.
+
+    def _l10n_pe_ne_ple_compra_breakdown(self):
+        """Desglose de una compra por afectación. Espeja _l10n_pe_ne_ple_breakdown (ventas),
+        pero el registro de compras separa la base gravada por su DESTINO (a operaciones
+        gravadas / mixtas / no gravadas), no por el tipo de tributo.
+
+        Hoy todo va al destino "gravadas" (campo 14): es el caso de un negocio que vende
+        gravado, que es el de esta app. Prorratear a operaciones no gravadas exige saber a qué
+        se destina cada compra, dato que no se pide en ningún lado — sería inventarlo."""
+        self.ensure_one()
+        gravado = exonerado = inafecto = igv = 0.0
+        for ln in self.invoice_line_ids:
+            codes = ln.tax_ids.mapped("l10n_pe_edi_tax_code")
+            base = ln.price_subtotal or 0.0
+            if "1000" in codes:
+                gravado += base
+            elif "9997" in codes:
+                exonerado += base
+            else:
+                inafecto += base
+        igv = (self.amount_total or 0.0) - (self.amount_untaxed or 0.0)
+        rnd = self.currency_id.rounding or 0.01
+        return {
+            "gravado": float_round(gravado, precision_rounding=rnd),
+            "exonerado": float_round(exonerado, precision_rounding=rnd),
+            "inafecto": float_round(inafecto, precision_rounding=rnd),
+            "igv": float_round(igv, precision_rounding=rnd),
+            "total": self.amount_total or 0.0,
+        }
+
+    def _l10n_pe_ne_ple_compra_linea(self, periodo8, cuo):
+        """Una línea del PLE 8.1. Campos numerados: son POSICIONALES y separados por '|', así
+        que un campo de más o de menos corre todos los siguientes."""
+        self.ensure_one()
+        num = self._l10n_pe_ne_ple_num
+        b = self._l10n_pe_ne_ple_compra_breakdown()
+        doc = self.l10n_latam_document_number or self.ref or ""
+        serie, _sep, corr = doc.partition("-")
+        tipo = (
+            self.l10n_latam_document_type_id.code
+            if self.l10n_latam_document_type_id
+            else "01"
+        )
+        fecha = self.invoice_date.strftime("%d/%m/%Y") if self.invoice_date else ""
+        moneda = self.currency_id.name or "PEN"
+        # Tipo de documento del proveedor (tabla 2): 6 = RUC. Sin RUC no hay crédito fiscal,
+        # así que el caso normal de este registro es 6.
+        ndoc = (self.partner_id.vat or "").strip()
+        tdoc = "6" if len(ndoc) == 11 else ("1" if ndoc else "0")
+        campos = [
+            periodo8,  # 1  Periodo (AAAAMM00)
+            str(self.id),  # 2  CUO (único por operación)
+            "",  # 3  Nro correlativo del asiento (solo estados 8/9)
+            fecha,  # 4  Fecha de emisión del comprobante
+            "",  # 5  Fecha de vencimiento o pago
+            tipo,  # 6  Tipo de comprobante (tabla 10)
+            serie,  # 7  Serie del comprobante
+            "",  # 8  Año de emisión de la DUA/DSI (solo importaciones)
+            corr,  # 9  Número del comprobante
+            "",  # 10 Número final (rango) / DUA
+            tdoc,  # 11 Tipo de documento del proveedor (tabla 2)
+            ndoc,  # 12 Número de documento del proveedor
+            (self.partner_id.name or "").upper(),  # 13 Razón social del proveedor
+            num(b["gravado"]),  # 14 Base imponible destinada a operaciones GRAVADAS
+            num(b["igv"]),  # 15 IGV/IPM de 14
+            "0.00",  # 16 Base destinada a operaciones gravadas Y no gravadas
+            "0.00",  # 17 IGV/IPM de 16
+            "0.00",  # 18 Base destinada a operaciones NO gravadas
+            "0.00",  # 19 IGV/IPM de 18
+            num(b["exonerado"] + b["inafecto"]),  # 20 Valor de adquisiciones no gravadas
+            "0.00",  # 21 ISC
+            "0.00",  # 22 ICBPER
+            "0.00",  # 23 Otros tributos y cargos
+            num(b["total"]),  # 24 Importe total
+            "",  # 25 Código de la moneda (tabla 4) — ver nota abajo
+            "",  # 26 Tipo de cambio
+            "",  # 27 Fecha de emisión del comprobante modificado
+            "",  # 28 Tipo del comprobante modificado
+            "",  # 29 Serie del comprobante modificado
+            "",  # 30 Número del comprobante modificado
+            "",  # 31 Fecha de la constancia de detracción
+            "",  # 32 Número de la constancia de detracción
+            "",  # 33 Marca del comprobante sujeto a retención
+            "",  # 34 Clasificación de bienes y servicios
+            "",  # 35 Identificación del contrato o proyecto
+            "",  # 36 Error tipo 1
+            "",  # 37 Error tipo 9
+            "",  # 38 Errores tipo 4
+            "",  # 39 Indicador de comprobante de pago cancelado con medio de pago
+            "1",  # 40 Estado (1 = registro que corresponde al periodo)
+        ]
+        # Moneda y tipo de cambio: se llenan acá y no en la lista para no repetir el cálculo.
+        campos[24] = moneda
+        campos[25] = (
+            "1.000"
+            if moneda == "PEN"
+            else "%.3f"
+            % (1.0 / (self.currency_id.with_context(date=self.invoice_date).rate or 1.0))
+        )
+        return "|".join(campos) + "|"
+
+    @api.model
+    def _l10n_pe_ne_compras_periodo(self, periodo):
+        """Compras posteadas del periodo YYYYMM, ordenadas. Aislado por compañía.
+        Espeja _l10n_pe_ne_ventas_periodo, con move_type de proveedor."""
+        import calendar
+
+        periodo = (periodo or "").strip()
+        if len(periodo) != 6 or not periodo.isdigit():
+            raise UserError(_("Periodo inválido. Usa YYYYMM (p.ej. 202606)."))
+        year, month = int(periodo[:4]), int(periodo[4:6])
+        if not (1 <= month <= 12):
+            raise UserError(_("Mes inválido en el periodo."))
+        last = calendar.monthrange(year, month)[1]
+        d0 = fields.Date.to_date("%04d-%02d-01" % (year, month))
+        d1 = fields.Date.to_date("%04d-%02d-%02d" % (year, month, last))
+        return self.search(
+            [
+                ("move_type", "in", ("in_invoice", "in_refund")),
+                ("state", "=", "posted"),
+                ("invoice_date", ">=", d0),
+                ("invoice_date", "<=", d1),
+            ],
+            order="invoice_date, id",
+        )
+
+    @api.model
+    def l10n_pe_ne_ple_compras(self, periodo):
+        """PLE 8.1 (Registro de Compras) del periodo YYYYMM. Devuelve
+        {filename, contentB64, count, periodo, total}. Espeja l10n_pe_ne_ple_ventas.
+
+        ⚠ Estructura pendiente de validación contable (ver la nota del bloque)."""
+        import base64
+
+        periodo = (periodo or "").strip()
+        moves = self._l10n_pe_ne_compras_periodo(periodo)
+        periodo8 = periodo + "00"
+        lines = [
+            m._l10n_pe_ne_ple_compra_linea(periodo8, i) for i, m in enumerate(moves, 1)
+        ]
+        content = ("\r\n".join(lines) + "\r\n") if lines else ""
+        ruc = (self.env.company.vat or "").strip()
+        ind_cont = "1" if lines else "0"
+        # Mismo patrón que el 14.1, cambiando el código del libro: 140100 → 080100.
+        filename = "LE%s%s00080100%s11.txt" % (ruc, periodo, "1" + ind_cont)
+        return {
+            "filename": filename,
+            "contentB64": base64.b64encode(content.encode("latin-1", "replace")).decode(
+                "ascii"
+            ),
+            "count": len(lines),
+            "periodo": periodo,
+            "total": sum(moves.mapped("amount_total")),
+        }
+
     @api.model
     def l10n_pe_ne_dashboard(self, periodo=None):
         """Datos del dashboard de ventas del periodo (YYYYMM, default mes actual):

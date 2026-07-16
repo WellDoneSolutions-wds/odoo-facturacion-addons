@@ -583,6 +583,20 @@ class L10nPeNeApi(http.Controller):
         except Exception as e:  # noqa: BLE001
             return self._fail(e)
 
+    @http.route("/ne/api/reportes/ple-compras", **_GET)
+    def ple_compras(self, periodo=None, **kw):
+        """PLE 8.1 (Registro de Compras) del periodo YYYYMM. Devuelve
+        {filename, contentB64, count, total} — el txt que el contador sube a SUNAT.
+
+        ⚠ Estructura pendiente de validación contable (ver la nota en el modelo)."""
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        try:
+            return self._json(self._move(uid).l10n_pe_ne_ple_compras(periodo))
+        except Exception as e:  # noqa: BLE001
+            return self._fail(e)
+
     @http.route("/ne/api/reportes/rvie-reemplazo", **_GET)
     def rvie_reemplazo(self, periodo=None, **kw):
         """SIRE RVIE — archivo de reemplazo de la propuesta (ZIP) del periodo YYYYMM."""

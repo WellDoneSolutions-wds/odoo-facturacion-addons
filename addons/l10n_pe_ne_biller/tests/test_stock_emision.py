@@ -186,3 +186,35 @@ class TestStockEmision(EnvioSincronoMixin, TransactionCase):
         self.assertEqual(self._stock(), 14, "la NC repuso")
         nc.l10n_pe_biller_state = 'rechazado'
         self.assertEqual(self._stock(), 10, "rechazada: lo repuesto se deshace")
+
+    # -- llevaStock: lo que ACTIVA todo lo de arriba --------------------------------------
+    def test_crear_producto_con_lleva_stock(self):
+        """is_storable va en False por defecto en Odoo: sin mandarlo explícito, NINGÚN
+        producto movería stock nunca y todo lo demás sería letra muerta."""
+        Move = self.env['account.move']
+        con = Move.l10n_pe_ne_create_producto(
+            {'descripcion': 'BIEN CON STOCK API', 'precio': 10, 'llevaStock': True})
+        self.assertTrue(con['llevaStock'])
+        sin = Move.l10n_pe_ne_create_producto(
+            {'descripcion': 'BIEN SIN STOCK API', 'precio': 10})
+        self.assertFalse(sin['llevaStock'], "sin pedirlo, no lleva stock")
+
+    def test_activar_stock_a_un_producto_existente(self):
+        """El camino del backfill: un producto ya creado pasa a llevar existencias."""
+        Move = self.env['account.move']
+        p = Move.l10n_pe_ne_create_producto({'descripcion': 'RECLASIFICA STOCK', 'precio': 10})
+        self.assertFalse(p['llevaStock'])
+        out = Move.l10n_pe_ne_update_producto({'id': p['id'], 'llevaStock': True})
+        self.assertTrue(out['llevaStock'])
+
+    def test_el_dict_expone_las_existencias(self):
+        self._abastecer(6)
+        d = self.env['account.move']._l10n_pe_ne_product_dict(self.bien)
+        self.assertTrue(d['llevaStock'])
+        self.assertEqual(d['stock'], 6)
+
+    def test_servicio_no_reporta_stock(self):
+        """Un servicio no tiene existencias: 0 es 'no aplica', no 'se agotó'."""
+        d = self.env['account.move']._l10n_pe_ne_product_dict(self.servicio)
+        self.assertFalse(d['llevaStock'])
+        self.assertEqual(d['stock'], 0)

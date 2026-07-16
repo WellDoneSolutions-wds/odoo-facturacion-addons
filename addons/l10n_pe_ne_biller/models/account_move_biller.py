@@ -3270,6 +3270,10 @@ class AccountMove(models.Model):
             "type": "service",
             "sale_ok": True,
             "list_price": precio,
+            # is_storable va en False por defecto en Odoo: sin decirlo explícito, el producto
+            # NO llevaría existencias y nunca movería stock. El auto-creado al emitir se queda
+            # sin stock a propósito (nadie eligió); el catálogo lo manda por llevaStock.
+            "is_storable": bool(ln.get("llevaStock")),
             # company_id del emisor: aísla el producto por RUC (igual que el cliente).
             "company_id": self.env.company.id,
         }
@@ -3300,6 +3304,12 @@ class AccountMove(models.Model):
             "taxCode": (tax.l10n_pe_edi_tax_code or "1000") if tax else "1000",
             "unidad": p.l10n_pe_ne_unit_code or "",
             "icbper": icbper,
+            # ¿Se le llevan existencias? (Odoo: is_storable). Va en False por defecto, así que
+            # SIN esto ningún producto movería stock nunca: es lo que activa _l10n_pe_ne_mover_stock.
+            "llevaStock": bool(p.is_storable),
+            # Existencias actuales. Solo tiene sentido si llevaStock; si no, va en 0 y la UI
+            # muestra un guion (no es "cero unidades", es "no aplica").
+            "stock": p.qty_available if p.is_storable else 0.0,
         }
 
     def _l10n_pe_ne_partner_dict(self, p):
@@ -3453,6 +3463,7 @@ class AccountMove(models.Model):
                 "barcode": producto.get("barcode"),
                 "precioUnitario": producto.get("precio"),
                 "unidad": producto.get("unidad"),
+                "llevaStock": producto.get("llevaStock"),
             },
             tax,
         )
@@ -3475,6 +3486,8 @@ class AccountMove(models.Model):
             vals["barcode"] = (producto.get("barcode") or "").strip() or False
         if "unidad" in producto:
             vals["l10n_pe_ne_unit_code"] = (producto.get("unidad") or "").strip() or False
+        if "llevaStock" in producto:
+            vals["is_storable"] = bool(producto.get("llevaStock"))
         if producto.get("precio") is not None:
             vals["list_price"] = float(producto.get("precio") or 0)
         if producto.get("taxCode"):

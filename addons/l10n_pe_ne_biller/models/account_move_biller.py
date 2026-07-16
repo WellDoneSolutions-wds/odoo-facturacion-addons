@@ -541,6 +541,12 @@ class AccountMove(models.Model):
         copy=False,
         help="Código SUNAT del motivo de la nota de crédito (cat. 09) o débito (cat. 10).",
     )
+    l10n_pe_motivo_desc = fields.Char(
+        string="Motivo/sustento NC/ND",
+        copy=False,
+        help="Motivo o sustento (texto libre) de la nota. Si se omite, se usa la "
+             "descripción del catálogo correspondiente al código de motivo.",
+    )
     l10n_pe_biller_xml = fields.Many2one(
         "ir.attachment", string="XML UBL firmado", copy=False
     )
@@ -1126,7 +1132,8 @@ class AccountMove(models.Model):
             "01" if dt == "07" else "02"
         )
         if dt == "08":
-            cabecera["desMotivo"] = ND_MOTIVO_DESC.get(
+            # Sustento libre si el usuario lo escribió; si no, descripción del catálogo.
+            cabecera["desMotivo"] = (self.l10n_pe_motivo_desc or "").strip() or ND_MOTIVO_DESC.get(
                 cabecera["codMotivo"], "Aumento en el valor"
             )
         req = {
@@ -1964,6 +1971,11 @@ class AccountMove(models.Model):
             vals["l10n_pe_motivo_code"] = str(
                 payload.get("motivo") or ("01" if tipo == "07" else "02")
             )
+            # Motivo/sustento (texto libre): si el front lo envía se usa como desMotivo;
+            # si no, _l10n_pe_build_note_request cae a la descripción del catálogo.
+            sustento = (payload.get("sustento") or "").strip()
+            if sustento:
+                vals["l10n_pe_motivo_desc"] = sustento[:250]
             if tipo == "07":
                 vals["reversed_entry_id"] = origin.id
             else:

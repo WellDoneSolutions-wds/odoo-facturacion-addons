@@ -947,6 +947,15 @@ class L10nPeNeApi(http.Controller):
             lambda: self._move(uid).l10n_pe_ne_create_producto(self._body())
         )
 
+    @http.route("/ne/api/negocio/margen", **_GET)
+    def negocio_margen(self, **kw):
+        """Margen de venta por defecto del negocio (%), para precargar el cálculo del precio
+        cuando se crea un producto desde una compra."""
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._json({"margen": self._move(uid)._l10n_pe_ne_margen_default()})
+
     @http.route("/ne/api/productos/revisar-tipos", **_GET)
     def revisar_tipos(self, **kw):
         """Productos que quedaron como servicio por el default viejo y parecen bienes.

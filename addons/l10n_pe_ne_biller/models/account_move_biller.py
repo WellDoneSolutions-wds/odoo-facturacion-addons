@@ -1310,12 +1310,63 @@ class AccountMove(models.Model):
             self.l10n_pe_biller_message = _(
                 "Aceptado por SUNAT — CDR ResponseCode 0. %s"
             ) % (desc or "")
+            # Automatización (opt-in): al aceptarse, enviar el comprobante (XML + PDF + CDR) al
+            # correo del cliente. Gateado por config para no mandar correos sin querer; nunca
+            # rompe la emisión (un fallo de correo se loguea y sigue).
+            if self.env["ir.config_parameter"].sudo().get_param(
+                "l10n_pe_ne_biller.email_on_accept", ""
+            ).strip().lower() in ("1", "true"):
+                try:
+                    self._l10n_pe_ne_email_comprobante()
+                except Exception as e:  # noqa: BLE001
+                    _logger.warning("email comprobante %s: %s", self.name, e)
         elif code:
             self.l10n_pe_biller_message = _(
                 "CDR de SUNAT (ResponseCode %s). %s"
             ) % (code, desc or "")
         else:
             self.l10n_pe_biller_message = _("Aceptado por el facturador (HTTP 200).")
+
+    def _l10n_pe_ne_email_comprobante(self):
+        """Envía el comprobante aceptado (XML firmado + PDF A4 + CDR) al correo del cliente.
+        Automatiza la entrega manual. No-op si el cliente no tiene correo; nunca lanza (el
+        llamador lo envuelve, pero igual usamos send sin excepción)."""
+        self.ensure_one()
+        email = (self.partner_id.email or "").strip()
+        if not email:
+            _logger.info("email comprobante %s: cliente sin correo, se omite", self.name)
+            return False
+        atts = self.env["ir.attachment"]
+        if self.l10n_pe_biller_xml:
+            atts |= self.l10n_pe_biller_xml
+        try:
+            pdf = self._l10n_pe_get_pdf_attachment(formato="A4")
+            if pdf:
+                atts |= pdf
+        except Exception:  # noqa: BLE001 — el PDF es deseable pero no bloquea el correo
+            pass
+        if self.l10n_pe_biller_cdr:
+            atts |= self.l10n_pe_biller_cdr
+        serie, corr = self._l10n_pe_serie_correlativo()
+        num = "%s-%s" % (serie, corr)
+        subject = _("Comprobante electrónico %s") % num
+        body = _(
+            "<p>Estimado cliente,</p>"
+            "<p>Adjuntamos su comprobante electrónico <b>%(num)s</b> emitido por "
+            "<b>%(emisor)s</b> y aceptado por SUNAT.</p>"
+            "<p>Se incluyen el XML firmado, la representación impresa (PDF) y el CDR.</p>"
+        ) % {"num": num, "emisor": self.company_id.name or ""}
+        mail = self.env["mail.mail"].sudo().create({
+            "subject": subject,
+            "body_html": body,
+            "email_to": email,
+            "email_from": self.company_id.email or self.env.user.email_formatted,
+            "attachment_ids": [(6, 0, atts.ids)],
+            "auto_delete": False,
+        })
+        mail.send(raise_exception=False)
+        _logger.info("email comprobante %s enviado a %s (%d adjuntos)", num, email, len(atts))
+        return True
 
     def _l10n_pe_apply_signed(self, firma):
         """Modo instantáneo: aplica el resultado de la FIRMA (sin enviar a SUNAT). Adjunta el

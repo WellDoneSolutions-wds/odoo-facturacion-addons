@@ -2519,9 +2519,14 @@ class AccountMove(models.Model):
 
     @api.model
     def l10n_pe_ne_buscar_distrito(self, q=None, limit=20):
-        """Busca distritos (ubigeo) por nombre o código para el selector de dirección."""
+        """Busca distritos (ubigeo) por nombre, código, provincia o departamento — así el
+        selector llena el ubigeo automáticamente sin tipear los 6 dígitos (escribes 'Miraflores'
+        o 'Arequipa' y sale el distrito con su código)."""
         q = (q or "").strip()
-        dom = ["|", ("name", "ilike", q), ("code", "ilike", q)] if q else []
+        dom = (["|", "|", "|",
+                ("name", "ilike", q), ("code", "ilike", q),
+                ("city_id.name", "ilike", q), ("city_id.state_id.name", "ilike", q)]
+               if q else [])
         recs = self.env["l10n_pe.res.city.district"].search(dom, limit=limit)
         return [
             {

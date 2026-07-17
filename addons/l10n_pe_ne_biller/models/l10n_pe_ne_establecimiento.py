@@ -132,20 +132,32 @@ class L10nPeNeEstablecimiento(models.Model):
         if not distrito_id:
             raise UserError(_('Indica el distrito.'))
         distrito = self._l10n_pe_ne_resolver_distrito(distrito_id)
-        vals = {'parent_id': parent.id, 'type': 'delivery',
+        # company_id explícito: sin él el hijo queda company_id=False = visible/editable por
+        # TODOS los tenants (la regla multi-company nativa deja pasar los sin compañía). Mismo
+        # motivo por el que el partner padre lo fija (ver account_move_biller _quick_partner).
+        vals = {'parent_id': parent.id, 'type': 'delivery', 'company_id': self.env.company.id,
                 'name': parent.name or _('Dirección'), 'street': direccion}
         self._l10n_pe_ne_aplicar_distrito(vals, distrito)
         child = self.env['res.partner'].create(vals)
         return self._l10n_pe_ne_direccion_dict(child, child.type, child.id)
 
+    def _l10n_pe_ne_direccion_hija(self, partner_id, addr_id):
+        """Resuelve una dirección hija SIEMPRE a través de su padre (aislado por compañía por
+        la record rule nativa) y filtrando por tipo. Así un tenant no puede editar/archivar una
+        dirección de otro por id (los hijos podrían tener company_id=False heredado/antiguo)."""
+        parent = self.env['res.partner'].browse(int(partner_id or 0)).exists()
+        child = parent and parent.child_ids.filtered(
+            lambda c: c.id == int(addr_id or 0) and c.type in ('delivery', 'other'))
+        if not child:
+            raise UserError(_('Dirección no encontrada.'))
+        return child
+
     @api.model
-    def l10n_pe_ne_editar_direccion(self, addr_id, payload):
+    def l10n_pe_ne_editar_direccion(self, partner_id, addr_id, payload):
         """Edita una dirección hija existente (dirección y/o distrito). No permite tocar
         la dirección principal (el partner mismo): esa se edita desde la ficha del cliente."""
         payload = payload or {}
-        child = self.env['res.partner'].browse(int(addr_id or 0)).exists()
-        if not child or not child.parent_id:
-            raise UserError(_('Dirección no encontrada.'))
+        child = self._l10n_pe_ne_direccion_hija(partner_id, addr_id)
         vals = {}
         if 'direccion' in payload:
             direccion = (payload.get('direccion') or '').strip()
@@ -161,11 +173,9 @@ class L10nPeNeEstablecimiento(models.Model):
         return self._l10n_pe_ne_direccion_dict(child, child.type, child.id)
 
     @api.model
-    def l10n_pe_ne_eliminar_direccion(self, addr_id):
+    def l10n_pe_ne_eliminar_direccion(self, partner_id, addr_id):
         """Archiva (active=False) la dirección hija: unlink está bloqueado por ACL
         para el emisor, así que 'eliminar' aquí siempre es archivar."""
-        child = self.env['res.partner'].browse(int(addr_id or 0)).exists()
-        if not child or not child.parent_id:
-            raise UserError(_('Dirección no encontrada.'))
+        child = self._l10n_pe_ne_direccion_hija(partner_id, addr_id)
         child.active = False
         return {'ok': True, 'modo': 'eliminado'}

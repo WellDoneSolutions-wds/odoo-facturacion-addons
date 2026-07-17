@@ -879,7 +879,7 @@ class L10nPeNeApi(http.Controller):
         if not uid:
             return self._unauth()
         return self._run(
-            lambda: self._estab(uid).l10n_pe_ne_editar_direccion(addr_id, self._body())
+            lambda: self._estab(uid).l10n_pe_ne_editar_direccion(partner_id, addr_id, self._body())
         )
 
     @http.route("/ne/api/clientes/<int:partner_id>/direcciones/<int:addr_id>", **_DEL)
@@ -889,7 +889,7 @@ class L10nPeNeApi(http.Controller):
         if not uid:
             return self._unauth()
         return self._run(
-            lambda: self._estab(uid).l10n_pe_ne_eliminar_direccion(addr_id)
+            lambda: self._estab(uid).l10n_pe_ne_eliminar_direccion(partner_id, addr_id)
         )
 
     # ------------------------------------------------ clientes: lookup externo

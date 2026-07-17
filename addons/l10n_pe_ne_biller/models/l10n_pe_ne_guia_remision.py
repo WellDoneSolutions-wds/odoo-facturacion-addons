@@ -646,6 +646,12 @@ class L10nPeNeGuiaRemision(models.Model):
             'proveedor': c.proveedor_id.name if c.proveedor_id else '',
             'comprobanteId': c.comprobante_id.id if c.comprobante_id else None,
             'comprobanteIds': c.comprobante_ids.ids,
+            # Sibling con número (serie-correlativo) para que el front no tenga que resolver
+            # cada id de comprobanteIds con una consulta aparte (mata el N+1 de la SPA).
+            # comprobanteIds se mantiene tal cual (frozen) — esto es un agregado, no un
+            # reemplazo.
+            'comprobantes': [{'id': m.id, 'numero': c._l10n_pe_ne_comprobante_numero(m)}
+                             for m in (c.comprobante_ids or c.comprobante_id)],
             'indTransbordo': c.ind_transbordo, 'indM1L': c.ind_m1l,
             'indRetornoEnvases': c.ind_retorno_envases, 'indRetornoVacio': c.ind_retorno_vacio,
             'fechaEntregaTransportista': c.fecha_entrega_transportista.strftime('%Y-%m-%d')
@@ -740,6 +746,12 @@ class L10nPeNeGuiaRemision(models.Model):
                 prod = self.env['product.product'].browse(int(it['productId'])).exists()
                 if prod and not desc:
                     desc = prod.display_name
+            # Una guía traslada bienes, no servicios (main introdujo bien/servicio en el
+            # producto — ver `_l10n_pe_ne_tipo_producto` en account_move_biller.py). Se
+            # valida acá, al capturar la línea, para no descubrirlo recién al emitir.
+            if prod and prod.type == 'service':
+                raise UserError(_('"%s" es un servicio — una guía de remisión solo traslada bienes.')
+                                % prod.display_name)
             if not desc:
                 raise UserError(_('Cada bien necesita una descripción (o un producto).'))
             vals.append((0, 0, {
@@ -785,8 +797,11 @@ class L10nPeNeGuiaRemision(models.Model):
             vals['fecha_emision'] = payload['fecha']
         if payload.get('fechaInicioTraslado'):
             vals['fecha_inicio_traslado'] = payload['fechaInicioTraslado']
-        if payload.get('fechaEntregaTransportista'):
-            vals['fecha_entrega_transportista'] = payload['fechaEntregaTransportista']
+        if 'fechaEntregaTransportista' in payload:
+            # Partial-PUT: la SPA en modalidad privada manda '' para BORRAR una fecha ya
+            # guardada (antes solo se seteaba cuando venía truthy, y no había forma de
+            # limpiarla). Clave ausente = no tocar (el contrato del resto del método).
+            vals['fecha_entrega_transportista'] = payload.get('fechaEntregaTransportista') or False
         if 'transportistaId' in payload:
             vals['transportista_id'] = int(payload['transportistaId']) if payload.get('transportistaId') else False
         if 'proveedorId' in payload:

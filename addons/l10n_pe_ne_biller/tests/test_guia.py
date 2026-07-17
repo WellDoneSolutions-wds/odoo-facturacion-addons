@@ -459,3 +459,60 @@ class TestGuiaWizard(TestGuiaBase):
         g = self.Guia.create(self._vals(comprobante_ids=[(6, 0, [move.id])]))
         with self.assertRaisesRegex(UserError, 'no ha sido emitido'):
             g._l10n_pe_ne_validar()
+
+    # --------------------------------------- servicios no se trasladan (post-merge A1)
+    def test_servicio_no_se_traslada(self):
+        # main introdujo bien/servicio en el producto (type: 'consu'/'service'); una guía
+        # solo traslada bienes, así que un servicio en items debe rechazarse al capturar.
+        servicio = self.env['product.product'].create({
+            'name': 'ASESORIA GRE TEST', 'type': 'service'})
+        payload = {
+            'destinatarioId': self.cliente.id,
+            'items': [{'productId': servicio.id, 'cantidad': 1}],
+        }
+        with self.assertRaisesRegex(UserError, 'servicio'):
+            self.Guia.l10n_pe_ne_quick_guia(payload)
+
+    # ------------------------------- clear-on-empty fecha_entrega_transportista (A2)
+    def test_update_fecha_entrega_transportista_vacia_la_limpia(self):
+        t = self.env['res.partner'].create({'name': 'Transp GRE A2', 'vat': '20100190797'})
+        g = self.Guia.create(self._vals(
+            modalidad_traslado='01', transportista_id=t.id,
+            fecha_entrega_transportista='2026-07-10'))
+        self.assertTrue(g.fecha_entrega_transportista)
+        self.Guia.l10n_pe_ne_update_guia({'id': g.id, 'fechaEntregaTransportista': ''})
+        self.assertFalse(g.fecha_entrega_transportista)
+
+    def test_update_sin_la_clave_no_toca_fecha_entrega_transportista(self):
+        t = self.env['res.partner'].create({'name': 'Transp GRE A2b', 'vat': '20100190797'})
+        g = self.Guia.create(self._vals(
+            modalidad_traslado='01', transportista_id=t.id,
+            fecha_entrega_transportista='2026-07-10'))
+        # Partial-PUT: p.ej. PreviewGuia manda solo obsGuia — el resto debe quedar intacto.
+        self.Guia.l10n_pe_ne_update_guia({'id': g.id, 'obsGuia': 'nota'})
+        self.assertEqual(str(g.fecha_entrega_transportista), '2026-07-10')
+
+    # --------------------------------------- detalle con números de comprobantes (A3)
+    def test_detalle_incluye_comprobantes_con_numero(self):
+        igv = self.env['account.tax'].search([
+            ('company_id', '=', self.env.company.id), ('type_tax_use', '=', 'sale'),
+            ('l10n_pe_edi_tax_code', '=', '1000')], limit=1)
+        ruc_type = self.env['l10n_latam.identification.type'].search(
+            [('l10n_pe_vat_code', '=', '6')], limit=1)
+        partner = self.env['res.partner'].create({
+            'name': 'CLIENTE GRE DETALLE', 'vat': '20605145648',
+            'l10n_latam_identification_type_id': ruc_type.id})
+        move = self.env['account.move'].create({
+            'move_type': 'out_invoice', 'partner_id': partner.id, 'invoice_date': '2026-06-19',
+            'l10n_pe_serie': 'F001', 'l10n_pe_correlativo': '77',
+            'invoice_line_ids': [(0, 0, {'product_id': self.producto.id, 'quantity': 1.0,
+                                         'price_unit': 7.20, 'tax_ids': [(6, 0, igv.ids)]})]})
+        move.action_post()
+        g = self.Guia.create(self._vals(comprobante_ids=[(6, 0, [move.id])]))
+        detalle = g.l10n_pe_ne_guia_detalle()
+        self.assertIn('comprobantes', detalle)
+        self.assertIn('comprobanteIds', detalle)  # frozen: sigue ahí, sin tocar
+        self.assertEqual(
+            detalle['comprobantes'],
+            [{'id': move.id, 'numero': g._l10n_pe_ne_comprobante_numero(move)}])
+        self.assertTrue(detalle['comprobantes'][0]['numero'])

@@ -3879,6 +3879,7 @@ class AccountMove(models.Model):
             "email": p.email or "",
             "telefono": p.phone or "",
             "direccion": p.street or "",
+            "exceptuadoPercepcion": p.l10n_pe_ne_exceptuado_percepcion,
         }
 
     def _l10n_pe_ne_ident_type(self, tipoDoc):
@@ -3901,6 +3902,7 @@ class AccountMove(models.Model):
             ("email", "email"),
             ("telefono", "phone"),
             ("direccion", "street"),
+            ("exceptuadoPercepcion", "l10n_pe_ne_exceptuado_percepcion"),
         ):
             if key in c:
                 vals[field] = c.get(key) or False

@@ -136,6 +136,20 @@ class AccountMoveLine(models.Model):
         copy=False,
         help="Código de producto SUNAT (UNSPSC, catálogo 25) de la línea, si aplica.",
     )
+    # Lote/serie de una línea de COMPRA. El lote entra con la mercadería, así que se captura
+    # en la compra y viaja con la línea hasta que _l10n_pe_ne_mover_stock_compra crea el
+    # movimiento. En la VENTA no se pide: Odoo reserva y asigna el lote solo, por su
+    # estrategia de salida (lo que vence antes sale primero). Verificado.
+    l10n_pe_ne_lote = fields.Char(
+        string="Lote / serie",
+        copy=False,
+        help="Número de lote o serie de la mercadería que ingresa por esta línea.",
+    )
+    l10n_pe_ne_vence = fields.Date(
+        string="Vencimiento del lote",
+        copy=False,
+        help="Fecha de vencimiento del lote que ingresa por esta línea.",
+    )
 
 
 class AccountMove(models.Model):
@@ -561,6 +575,14 @@ class AccountMove(models.Model):
     l10n_pe_ne_biller_filename = fields.Char(string="Nombre de archivo del facturador", copy=False)
     l10n_pe_ne_biller_canal = fields.Char(string="Canal SUNAT (GEM/OTROS_CPE)", copy=False)
     l10n_pe_ne_envio_intentos = fields.Integer(string="Intentos de envío a SUNAT", default=0, copy=False)
+    l10n_pe_ne_stock_aviso = fields.Char(
+        string="Aviso de inventario",
+        copy=False,
+        readonly=True,
+        help="Por qué no se pudo mover el inventario de este documento. El comprobante es "
+        "válido igual: el stock nunca lo tumba. Vacío = el movimiento se hizo.",
+    )
+
     # Resumen Diario de boletas (RC) idempotente: al enviar se guarda el TICKET; el poll usa el
     # ticket (no re-envía → no duplica). Correlativo/fecha del RC al que pertenece la boleta.
     l10n_pe_ne_rc_ticket = fields.Char(string="Ticket del Resumen Diario", copy=False)
@@ -3258,6 +3280,21 @@ class AccountMove(models.Model):
         }
 
     @api.model
+    def _l10n_pe_ne_rastreo_producto(self, rastreo):
+        """Rastreo en Odoo: 'lot' | 'serial' | 'none'. La API habla el vocabulario del
+        negocio ("lote"/"serie"), no el de Odoo.
+
+        Solo tiene sentido con existencias: Odoo no rastrea lo que no cuenta. Y el rastreo
+        NO se decide solo — es del producto: la misma caja de paracetamol necesita lote y un
+        tornillo no."""
+        r = (rastreo or "").strip().lower()
+        if r in ("lote", "lot"):
+            return "lot"
+        if r in ("serie", "serial", "imei"):
+            return "serial"
+        return "none"
+
+    @api.model
     def _l10n_pe_ne_tipo_producto(self, tipo=None, unidad=None):
         """Tipo del producto en Odoo: 'consu' (bien) o 'service' (servicio).
 
@@ -3346,16 +3383,48 @@ class AccountMove(models.Model):
         )
         return self._l10n_pe_ne_stock_aplicar(lineas, origen, destino, reversa=reversa)
 
-    def _l10n_pe_ne_stock_aplicar(self, lineas, origen, destino, reversa=False):
+    def _l10n_pe_ne_lote_de(self, linea):
+        """stock.lot de una línea de compra, creándolo si hace falta. None si el producto no
+        se rastrea o la línea no trae lote.
+
+        Solo la ENTRADA define el lote. En la salida no se pide: Odoo lo asigna al reservar,
+        por su estrategia de salida — con vencimiento, lo que caduca antes sale primero, que
+        es justo lo que una farmacia necesita. Verificado contra Odoo 19."""
+        prod = linea.product_id
+        if not prod or prod.tracking == "none":
+            return None
+        nombre = (linea.l10n_pe_ne_lote or "").strip()
+        if not nombre:
+            return None
+        Lot = self.env["stock.lot"]
+        lote = Lot.search(
+            [("name", "=", nombre), ("product_id", "=", prod.id),
+             ("company_id", "=", self.company_id.id)], limit=1)
+        if not lote:
+            vals = {"name": nombre, "product_id": prod.id, "company_id": self.company_id.id}
+            lote = Lot.create(vals)
+        # El vencimiento se escribe aparte: el campo lo agrega product_expiry y solo tiene
+        # sentido si el producto lo usa. Se pisa solo si la línea trae uno.
+        if linea.l10n_pe_ne_vence and prod.use_expiration_date:
+            lote.expiration_date = linea.l10n_pe_ne_vence
+        return lote
+
+    def _l10n_pe_ne_stock_aplicar(self, lineas, origen, destino, reversa=False, con_lote=False):
         """Motor común: crea y valida los movimientos de `lineas` entre dos ubicaciones.
 
         Lo comparten la venta (existencias → cliente), la devolución por NC, la reversa de un
         rechazo y la compra (proveedor → existencias). Lo único que cambia entre ellas son las
         dos ubicaciones y el sentido; la mecánica —y el "nunca bloquear"— es la misma.
+
+        `con_lote`: la ENTRADA asigna el lote que trae la línea. La salida no lo necesita —
+        Odoo lo asigna al reservar.
         """
         self.ensure_one()
         moves = self.env["stock.move"].browse()
+        lotes = {}
         for l in lineas:
+            if con_lote:
+                lotes[l.id] = self._l10n_pe_ne_lote_de(l)
             # Sin 'name': stock.move no lo tiene en Odoo 19 (su `reference` se computa).
             # `origin` deja el rastro legible; l10n_pe_ne_move_id es el enlace real (por id).
             moves |= self.env["stock.move"].create(
@@ -3374,16 +3443,58 @@ class AccountMove(models.Model):
         try:
             moves._action_confirm()
             moves._action_assign()
-            for m in moves:
+            for m, l in zip(moves, lineas):
+                lote = lotes.get(l.id)
+                if lote:
+                    # Entrada de un producto rastreado: el lote va en la LÍNEA del movimiento
+                    # (stock.move_line), no en el move. Sin esto Odoo lanza "debe proporcionar
+                    # un número de serie o lote" y la mercadería no entraría.
+                    if not m.move_line_ids:
+                        m.move_line_ids = [(0, 0, {
+                            "product_id": m.product_id.id,
+                            "location_id": m.location_id.id,
+                            "location_dest_id": m.location_dest_id.id,
+                            "company_id": m.company_id.id,
+                        })]
+                    m.move_line_ids.write({"lot_id": lote.id})
                 # quantity explícito: sin esto _action_done mueve solo lo reservado, y sin
                 # existencias no reserva nada → la salida quedaría en 0 y el kardex mentiría.
                 m.quantity = m.product_uom_qty
                 m.picked = True
             moves._action_done()
         except Exception as e:  # noqa: BLE001 — el documento ya existe: el stock no lo tumba
+            # Se traga a propósito: el comprobante ya es válido ante SUNAT y no puede caerse
+            # porque el inventario no cuadre. Pero se deja RASTRO en el documento, no solo en
+            # el log: un movimiento que no ocurre y nadie ve es un kardex mintiendo en
+            # silencio. El caso típico es un producto rastreado sin existencias en ningún
+            # lote — ahí Odoo no puede inventar de dónde sale.
             _logger.exception("stock: no se pudo mover el stock de %s: %s", self.name, e)
+            self.l10n_pe_ne_stock_aviso = (
+                _("No se pudo mover el inventario de este documento: %s") % e
+            )[:500]
             return self.env["stock.move"].browse()
+        self.l10n_pe_ne_stock_aviso = False
         return moves
+
+    @api.model
+    def _l10n_pe_ne_asegurar_fefo(self, wh):
+        """Pone la ubicación de existencias en FEFO: sale primero lo que vence antes.
+
+        El default de Odoo es FIFO —sale lo que entró primero—, y para lo que caduca eso está
+        MAL: comprobado con dos lotes (uno vence 2026, otro 2028), la venta se llevó el de
+        2028 y dejó el de 2026 pudriéndose en el almacén. En una farmacia eso es plata tirada
+        y riesgo sanitario.
+
+        FEFO no perjudica a lo que no vence: sin fecha de caducidad, Odoo cae de vuelta al
+        orden de entrada. Por eso se pone en la ubicación y no producto por producto.
+
+        Idempotente: si ya está, no toca nada. Se llama al ingresar mercadería porque es
+        cuando la ubicación empieza a importar — no hay un lugar mejor sin un asistente de
+        configuración, que esta app no tiene."""
+        fefo = self.env.ref("product_expiry.removal_fefo", raise_if_not_found=False)
+        loc = wh.lot_stock_id if wh else None
+        if fefo and loc and not loc.removal_strategy_id:
+            loc.sudo().removal_strategy_id = fefo.id
 
     def _l10n_pe_ne_mover_stock_compra(self):
         """Entrada de mercadería por una compra: proveedor → existencias.
@@ -3413,7 +3524,13 @@ class AccountMove(models.Model):
                 self.name,
             )
             return self.env["stock.move"].browse()
-        return self._l10n_pe_ne_stock_aplicar(lineas, proveedores, wh.lot_stock_id)
+        # La mercadería que entra decide cómo saldrá: FEFO para que lo que vence antes se
+        # venda primero (el default de Odoo, FIFO, dejaría caducar el lote más viejo).
+        self._l10n_pe_ne_asegurar_fefo(wh)
+        # con_lote: la entrada es la única que define el lote (la salida lo asigna Odoo).
+        return self._l10n_pe_ne_stock_aplicar(
+            lineas, proveedores, wh.lot_stock_id, con_lote=True
+        )
 
     def _l10n_pe_ne_revertir_stock(self):
         """Deshace el movimiento de un comprobante que SUNAT rechazó.
@@ -3513,6 +3630,9 @@ class AccountMove(models.Model):
             # NO llevaría existencias y nunca movería stock. El auto-creado al emitir se queda
             # sin stock a propósito (nadie eligió); el catálogo lo manda por llevaStock.
             "is_storable": bool(ln.get("llevaStock")),
+            "tracking": self._l10n_pe_ne_rastreo_producto(ln.get("rastreo")),
+            # use_expiration_date lo agrega product_expiry; solo tiene sentido con rastreo.
+            "use_expiration_date": bool(ln.get("vence")),
             # company_id del emisor: aísla el producto por RUC (igual que el cliente).
             "company_id": self.env.company.id,
         }
@@ -3551,6 +3671,11 @@ class AccountMove(models.Model):
             # Existencias actuales. Solo tiene sentido si llevaStock; si no, va en 0 y la UI
             # muestra un guion (no es "cero unidades", es "no aplica").
             "stock": p.qty_available if p.is_storable else 0.0,
+            # Rastreo por lote o serie (Odoo: tracking). "lote" agrupa unidades (farmacia,
+            # alimentos); "serie" es un número por unidad (celulares, equipos).
+            "rastreo": {"lot": "lote", "serial": "serie"}.get(p.tracking, "ninguno"),
+            # ¿Los lotes llevan vencimiento? Solo aplica con rastreo por lote/serie.
+            "vence": bool(p.use_expiration_date),
         }
 
     def _l10n_pe_ne_partner_dict(self, p):
@@ -3706,6 +3831,8 @@ class AccountMove(models.Model):
                 "unidad": producto.get("unidad"),
                 "tipo": producto.get("tipo"),
                 "llevaStock": producto.get("llevaStock"),
+                "rastreo": producto.get("rastreo"),
+                "vence": producto.get("vence"),
             },
             tax,
         )
@@ -3734,6 +3861,10 @@ class AccountMove(models.Model):
             vals["type"] = self._l10n_pe_ne_tipo_producto(producto["tipo"])
         if "llevaStock" in producto:
             vals["is_storable"] = bool(producto.get("llevaStock"))
+        if "rastreo" in producto:
+            vals["tracking"] = self._l10n_pe_ne_rastreo_producto(producto.get("rastreo"))
+        if "vence" in producto:
+            vals["use_expiration_date"] = bool(producto.get("vence"))
         if producto.get("precio") is not None:
             vals["list_price"] = float(producto.get("precio") or 0)
         if producto.get("taxCode"):
@@ -4257,6 +4388,9 @@ class AccountMove(models.Model):
                 # el impuesto. La suma para el cuadre sigue siendo sobre el bruto.
                 "price_unit": self._l10n_pe_ne_base_sin_igv(costo, tax),
                 "tax_ids": tax_ids,
+                # El lote entra con la mercadería: viaja con la línea hasta el movimiento.
+                "l10n_pe_ne_lote": (ln.get("lote") or "").strip() or False,
+                "l10n_pe_ne_vence": ln.get("vence") or False,
             }
             if prod:
                 vals["product_id"] = prod.id

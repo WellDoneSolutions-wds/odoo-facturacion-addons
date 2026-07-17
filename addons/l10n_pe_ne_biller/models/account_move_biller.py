@@ -4115,6 +4115,64 @@ class AccountMove(models.Model):
                 "contentB64": base64.b64encode(buf.getvalue()).decode("ascii")}
 
     @api.model
+    def l10n_pe_ne_revisar_tipos(self, payload=None):
+        """Propone reclasificar los productos que quedaron como SERVICIO por el default viejo.
+
+        Hasta hace poco todo producto nacía con type='service' —estuviera bien o no—, así que
+        un catálogo existente tiene tornillos declarados como servicios. Y un servicio no
+        lleva stock en Odoo: mientras no se corrijan, esos productos no mueven inventario.
+
+        PROPONE, no decide. La deducción usa la misma regla que la creación
+        (_l10n_pe_ne_tipo_producto: ZZ → servicio, el resto → bien), pero acá puede
+        equivocarse: el formulario trae NIU por defecto, así que una consultora que no lo
+        cambió tiene servicios con NIU y saldrían propuestos como bienes. Por eso se devuelve
+        la lista para que la revise un humano y se aplica solo lo que confirme —
+        `l10n_pe_ne_aplicar_tipos` recibe los ids elegidos, no un "aplicar todo".
+
+        No propone nada sobre `llevaStock`: llevar inventario es una decisión del negocio y
+        no hay señal ninguna que la delate. Se activa producto por producto.
+        """
+        Product = self.env["product.product"]
+        # Solo los 'service': un 'consu' ya fue clasificado (por el usuario o por la regla).
+        sospechosos = Product.search(
+            [("type", "=", "service"), ("company_id", "in", (False, self.env.company.id))],
+            order="name",
+        )
+        propuestas = []
+        for p in sospechosos:
+            uni = p.l10n_pe_ne_unit_code or ""
+            propuesto = self._l10n_pe_ne_tipo_producto(None, uni)
+            if propuesto != "service":
+                propuestas.append({
+                    "id": p.id,
+                    "descripcion": p.name or "",
+                    "codigo": p.default_code or "",
+                    # Sin unidad no significa "servicio": a SUNAT se le declara NIU por
+                    # defecto (DEFAULT_UNIT_CODE), o sea un bien. Se muestra para que el
+                    # usuario juzgue con el mismo dato que usó la regla.
+                    "unidad": uni,
+                    "tipoPropuesto": "bien",
+                })
+        return {
+            "propuestas": propuestas,
+            "total": len(propuestas),
+            "revisados": len(sospechosos),
+        }
+
+    @api.model
+    def l10n_pe_ne_aplicar_tipos(self, payload):
+        """Aplica la reclasificación SOLO a los ids que el usuario confirmó.
+        payload = {ids: [...], tipo: "bien"|"servicio"}."""
+        payload = payload or {}
+        ids = [int(i) for i in (payload.get("ids") or [])]
+        if not ids:
+            return {"actualizados": 0}
+        tipo = self._l10n_pe_ne_tipo_producto(payload.get("tipo") or "bien")
+        prods = self.env["product.product"].browse(ids).exists()
+        prods.write({"type": tipo})
+        return {"actualizados": len(prods)}
+
+    @api.model
     def l10n_pe_ne_importar_productos(self, payload):
         """Importa/actualiza productos desde el xlsx de la plantilla. payload = {contentB64, commit}.
         UPSERT por CÓDIGO. commit=False → solo valida y devuelve el reporte (dry-run, no escribe);

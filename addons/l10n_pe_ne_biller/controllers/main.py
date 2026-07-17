@@ -947,6 +947,23 @@ class L10nPeNeApi(http.Controller):
             lambda: self._move(uid).l10n_pe_ne_create_producto(self._body())
         )
 
+    @http.route("/ne/api/productos/revisar-tipos", **_GET)
+    def revisar_tipos(self, **kw):
+        """Productos que quedaron como servicio por el default viejo y parecen bienes.
+        PROPONE: no cambia nada. Aplicar es otra llamada, con los ids que el usuario elija."""
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(lambda: self._move(uid).l10n_pe_ne_revisar_tipos(self._body() if False else None))
+
+    @http.route("/ne/api/productos/aplicar-tipos", **_POST)
+    def aplicar_tipos(self, **kw):
+        """Reclasifica SOLO los ids confirmados por el usuario."""
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(lambda: self._move(uid).l10n_pe_ne_aplicar_tipos(self._body()))
+
     @http.route("/ne/api/productos/plantilla", **_GET)
     def productos_plantilla(self, **kw):
         """Descarga la plantilla xlsx para importar productos."""

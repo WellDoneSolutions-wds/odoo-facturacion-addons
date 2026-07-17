@@ -66,3 +66,52 @@ class TestProductoTipo(TransactionCase):
             {'descripcion': 'BIEN ESTABLE TIPO TEST', 'precio': 10, 'tipo': 'bien'})
         out = self.Move.l10n_pe_ne_update_producto({'id': p['id'], 'unidad': 'ZZ'})
         self.assertEqual(out['tipo'], 'bien')
+
+    # -- backfill: los que quedaron mal por el default viejo -------------------------------
+    def test_propone_los_servicios_que_parecen_bienes(self):
+        """Hasta hace poco TODO producto nacía como servicio, así que un catálogo existente
+        tiene tornillos declarados como servicios — y un servicio no lleva stock."""
+        mal = self.env['product.product'].create({
+            'name': 'MARTILLO MAL CLASIFICADO', 'type': 'service', 'l10n_pe_ne_unit_code': 'NIU'})
+        r = self.Move.l10n_pe_ne_revisar_tipos()
+        ids = [p['id'] for p in r['propuestas']]
+        self.assertIn(mal.id, ids)
+        prop = [p for p in r['propuestas'] if p['id'] == mal.id][0]
+        self.assertEqual(prop['tipoPropuesto'], 'bien')
+        self.assertEqual(prop['unidad'], 'NIU')
+
+    def test_no_propone_tocar_un_servicio_de_verdad(self):
+        """Unidad ZZ es la del catálogo de servicios: ese se queda como está."""
+        serv = self.env['product.product'].create({
+            'name': 'CONSULTORIA BIEN CLASIFICADA', 'type': 'service', 'l10n_pe_ne_unit_code': 'ZZ'})
+        r = self.Move.l10n_pe_ne_revisar_tipos()
+        self.assertNotIn(serv.id, [p['id'] for p in r['propuestas']])
+
+    def test_no_propone_tocar_lo_ya_clasificado(self):
+        bien = self.env['product.product'].create({'name': 'YA ES BIEN', 'type': 'consu'})
+        r = self.Move.l10n_pe_ne_revisar_tipos()
+        self.assertNotIn(bien.id, [p['id'] for p in r['propuestas']])
+
+    def test_revisar_no_cambia_nada(self):
+        """PROPONE, no decide: la regla puede equivocarse (el form trae NIU por defecto, así
+        que una consultora que no lo cambió tendría servicios propuestos como bienes)."""
+        mal = self.env['product.product'].create({
+            'name': 'NO ME TOQUES TODAVIA', 'type': 'service', 'l10n_pe_ne_unit_code': 'NIU'})
+        self.Move.l10n_pe_ne_revisar_tipos()
+        mal.invalidate_recordset()
+        self.assertEqual(mal.type, 'service', 'revisar no debe escribir nada')
+
+    def test_aplica_solo_los_confirmados(self):
+        """El usuario elige: se aplica a los ids que mandó, no a toda la propuesta."""
+        a = self.env['product.product'].create({
+            'name': 'RECLASIFICA A', 'type': 'service', 'l10n_pe_ne_unit_code': 'NIU'})
+        b = self.env['product.product'].create({
+            'name': 'RECLASIFICA B', 'type': 'service', 'l10n_pe_ne_unit_code': 'NIU'})
+        out = self.Move.l10n_pe_ne_aplicar_tipos({'ids': [a.id], 'tipo': 'bien'})
+        self.assertEqual(out['actualizados'], 1)
+        a.invalidate_recordset(); b.invalidate_recordset()
+        self.assertEqual(a.type, 'consu')
+        self.assertEqual(b.type, 'service', 'el que no se confirmó no se toca')
+
+    def test_aplicar_sin_ids_no_hace_nada(self):
+        self.assertEqual(self.Move.l10n_pe_ne_aplicar_tipos({'ids': []})['actualizados'], 0)

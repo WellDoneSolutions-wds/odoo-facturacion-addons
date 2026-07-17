@@ -11,6 +11,8 @@ from odoo import fields
 from odoo.exceptions import AccessError, UserError
 from odoo.tests import HttpCase, TransactionCase, tagged
 
+from .common import EnvioSincronoMixin
+
 # Patch donde se USA requests.post (dentro del módulo del modelo base), igual que test_send.py.
 _TARGET = "odoo.addons.l10n_pe_ne_biller.models.account_move_biller.requests.post"
 _HEADERS = ["venta", "tipo", "serie", "fecha", "tipo doc cliente", "num doc cliente",
@@ -38,7 +40,7 @@ def _resp(code, text, headers=None):
 
 
 @tagged("post_install", "-at_install")
-class TestMasivo(TransactionCase):
+class TestMasivo(EnvioSincronoMixin, TransactionCase):
     def setUp(self):
         super().setUp()
         self.Lote = self.env["l10n_pe_ne.lote"]

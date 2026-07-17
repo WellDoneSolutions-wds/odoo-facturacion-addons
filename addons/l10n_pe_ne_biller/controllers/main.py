@@ -125,6 +125,14 @@ class L10nPeNeApi(http.Controller):
     def _user(self, uid):
         return request.env["res.users"].sudo().browse(uid)
 
+    def _puede_anular(self, uid):
+        """La baja ante SUNAT (RA/RC) es irreversible y separa del grupo Emisor: un cajero
+        factura pero no da de baja. El grupo de anulación IMPLICA el de emisor, así que
+        quien lo tiene puede ambas cosas."""
+        return self._user(uid).has_group(
+            "l10n_pe_ne_biller.group_l10n_pe_ne_anulacion"
+        )
+
     def _move(self, uid):
         u = self._user(uid)
         return request.env["account.move"].with_user(uid).with_company(u.company_id)
@@ -327,6 +335,7 @@ class L10nPeNeApi(http.Controller):
                     "company": user.company_id.name,
                     "ruc": user.company_id.vat or "",
                     "isAdmin": user.has_group("base.group_system"),
+                    "puedeAnular": self._puede_anular(uid),
                     "mustChangePassword": user.l10n_pe_ne_must_change_password,
                     "expires": exp.isoformat(),
                 }
@@ -349,6 +358,7 @@ class L10nPeNeApi(http.Controller):
                 "company": user.company_id.name,
                 "ruc": user.company_id.vat or "",
                 "isAdmin": user.has_group("base.group_system"),
+                "puedeAnular": self._puede_anular(uid),
                 "mustChangePassword": user.l10n_pe_ne_must_change_password,
             }
         )
@@ -581,6 +591,33 @@ class L10nPeNeApi(http.Controller):
         except Exception as e:  # noqa: BLE001
             return self._fail(e)
 
+    @http.route("/ne/api/reportes/ple-compras", **_GET)
+    def ple_compras(self, periodo=None, **kw):
+        """PLE 8.1 (Registro de Compras) del periodo YYYYMM. Devuelve
+        {filename, contentB64, count, total} — el txt que el contador sube a SUNAT.
+
+        ⚠ Estructura pendiente de validación contable (ver la nota en el modelo)."""
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        try:
+            return self._json(self._move(uid).l10n_pe_ne_ple_compras(periodo))
+        except Exception as e:  # noqa: BLE001
+            return self._fail(e)
+
+    @http.route("/ne/api/reportes/ple-inventario", **_GET)
+    def ple_inventario(self, periodo=None, **kw):
+        """PLE 12.1 (Inventario Permanente en Unidades Físicas) del periodo YYYYMM.
+
+        ⚠ Estructura pendiente de validación contable (ver la nota en el modelo)."""
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        try:
+            return self._json(self._move(uid).l10n_pe_ne_ple_inventario(periodo))
+        except Exception as e:  # noqa: BLE001
+            return self._fail(e)
+
     @http.route("/ne/api/reportes/rvie-reemplazo", **_GET)
     def rvie_reemplazo(self, periodo=None, **kw):
         """SIRE RVIE — archivo de reemplazo de la propuesta (ZIP) del periodo YYYYMM."""
@@ -690,6 +727,11 @@ class L10nPeNeApi(http.Controller):
         uid = self._identify()
         if not uid:
             return self._unauth()
+        if not self._puede_anular(uid):
+            return self._err(
+                "No tienes permiso para anular comprobantes. Pídelo a un administrador.",
+                status=403,
+            )
         return self._run(lambda: self._move(uid).l10n_pe_ne_quick_anular(self._body()))
 
     @http.route("/ne/api/comprobantes/<int:rec_id>/<string:kind>", **_GET)
@@ -925,6 +967,32 @@ class L10nPeNeApi(http.Controller):
             lambda: self._move(uid).l10n_pe_ne_create_producto(self._body())
         )
 
+    @http.route("/ne/api/negocio/margen", **_GET)
+    def negocio_margen(self, **kw):
+        """Margen de venta por defecto del negocio (%), para precargar el cálculo del precio
+        cuando se crea un producto desde una compra."""
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._json({"margen": self._move(uid)._l10n_pe_ne_margen_default()})
+
+    @http.route("/ne/api/productos/revisar-tipos", **_GET)
+    def revisar_tipos(self, **kw):
+        """Productos que quedaron como servicio por el default viejo y parecen bienes.
+        PROPONE: no cambia nada. Aplicar es otra llamada, con los ids que el usuario elija."""
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(lambda: self._move(uid).l10n_pe_ne_revisar_tipos(self._body() if False else None))
+
+    @http.route("/ne/api/productos/aplicar-tipos", **_POST)
+    def aplicar_tipos(self, **kw):
+        """Reclasifica SOLO los ids confirmados por el usuario."""
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(lambda: self._move(uid).l10n_pe_ne_aplicar_tipos(self._body()))
+
     @http.route("/ne/api/productos/plantilla", **_GET)
     def productos_plantilla(self, **kw):
         """Descarga la plantilla xlsx para importar productos."""
@@ -1032,6 +1100,17 @@ class L10nPeNeApi(http.Controller):
         if not uid:
             return self._unauth()
         return self._run(lambda: self._move(uid).l10n_pe_ne_create_compra(self._body()))
+
+    @http.route("/ne/api/compras/importar-xml", **_POST)
+    def importar_compra_xml(self, **kw):
+        """Lee el XML de la factura del proveedor y devuelve el payload de la compra para que
+        el usuario lo revise. NO registra: el mapeo de productos necesita a un humano."""
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(
+            lambda: self._move(uid).l10n_pe_ne_importar_compra_xml(self._body())
+        )
 
     @http.route("/ne/api/compras/<int:rec_id>", **_PUT)
     def update_compra(self, rec_id, **kw):

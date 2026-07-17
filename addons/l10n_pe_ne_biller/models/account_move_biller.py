@@ -136,6 +136,20 @@ class AccountMoveLine(models.Model):
         copy=False,
         help="Código de producto SUNAT (UNSPSC, catálogo 25) de la línea, si aplica.",
     )
+    # Lote/serie de una línea de COMPRA. El lote entra con la mercadería, así que se captura
+    # en la compra y viaja con la línea hasta que _l10n_pe_ne_mover_stock_compra crea el
+    # movimiento. En la VENTA no se pide: Odoo reserva y asigna el lote solo, por su
+    # estrategia de salida (lo que vence antes sale primero). Verificado.
+    l10n_pe_ne_lote = fields.Char(
+        string="Lote / serie",
+        copy=False,
+        help="Número de lote o serie de la mercadería que ingresa por esta línea.",
+    )
+    l10n_pe_ne_vence = fields.Date(
+        string="Vencimiento del lote",
+        copy=False,
+        help="Fecha de vencimiento del lote que ingresa por esta línea.",
+    )
 
 
 class AccountMove(models.Model):
@@ -541,6 +555,12 @@ class AccountMove(models.Model):
         copy=False,
         help="Código SUNAT del motivo de la nota de crédito (cat. 09) o débito (cat. 10).",
     )
+    l10n_pe_motivo_desc = fields.Char(
+        string="Motivo/sustento NC/ND",
+        copy=False,
+        help="Motivo o sustento (texto libre) de la nota. Si se omite, se usa la "
+             "descripción del catálogo correspondiente al código de motivo.",
+    )
     l10n_pe_biller_xml = fields.Many2one(
         "ir.attachment", string="XML UBL firmado", copy=False
     )
@@ -555,6 +575,14 @@ class AccountMove(models.Model):
     l10n_pe_ne_biller_filename = fields.Char(string="Nombre de archivo del facturador", copy=False)
     l10n_pe_ne_biller_canal = fields.Char(string="Canal SUNAT (GEM/OTROS_CPE)", copy=False)
     l10n_pe_ne_envio_intentos = fields.Integer(string="Intentos de envío a SUNAT", default=0, copy=False)
+    l10n_pe_ne_stock_aviso = fields.Char(
+        string="Aviso de inventario",
+        copy=False,
+        readonly=True,
+        help="Por qué no se pudo mover el inventario de este documento. El comprobante es "
+        "válido igual: el stock nunca lo tumba. Vacío = el movimiento se hizo.",
+    )
+
     # Resumen Diario de boletas (RC) idempotente: al enviar se guarda el TICKET; el poll usa el
     # ticket (no re-envía → no duplica). Correlativo/fecha del RC al que pertenece la boleta.
     l10n_pe_ne_rc_ticket = fields.Char(string="Ticket del Resumen Diario", copy=False)
@@ -1126,7 +1154,8 @@ class AccountMove(models.Model):
             "01" if dt == "07" else "02"
         )
         if dt == "08":
-            cabecera["desMotivo"] = ND_MOTIVO_DESC.get(
+            # Sustento libre si el usuario lo escribió; si no, descripción del catálogo.
+            cabecera["desMotivo"] = (self.l10n_pe_motivo_desc or "").strip() or ND_MOTIVO_DESC.get(
                 cabecera["codMotivo"], "Aumento en el valor"
             )
         req = {
@@ -1863,6 +1892,7 @@ class AccountMove(models.Model):
             origin = self._l10n_pe_ne_quick_origin(
                 payload.get("docAfectado") or payload.get("afectado")
             )
+            origin._l10n_pe_check_afectable_con_nota()
         if origin is not None:
             partner = origin.partner_id
         else:
@@ -1882,7 +1912,12 @@ class AccountMove(models.Model):
             if isc_rate > 0:
                 # ISC (ad-valorem): se agrega a la línea; el IGV se recalcula sobre valor + ISC.
                 taxes = taxes + self._l10n_pe_ne_ensure_isc_tax(isc_rate)
-            prod = self._l10n_pe_ne_quick_product(ln, tax)
+            # Notas (07/08): solo resolver el producto, nunca crearlo — sus líneas pueden ser
+            # espejo o texto sintético (DICE/DEBE DECIR) que no debe entrar al catálogo.
+            # precio_con_igv=False: el payload de emisión trae el valor SIN IGV.
+            prod = self._l10n_pe_ne_quick_product(
+                ln, tax, create=tipo not in ("07", "08"), precio_con_igv=False
+            )
             d = float(ln.get("descuento") or 0)
             disc = round(100.0 * (1 - (1 - d / 100.0) * (1 - g / 100.0)), 6) if g else d
             lvals = {
@@ -1964,6 +1999,11 @@ class AccountMove(models.Model):
             vals["l10n_pe_motivo_code"] = str(
                 payload.get("motivo") or ("01" if tipo == "07" else "02")
             )
+            # Motivo/sustento (texto libre): si el front lo envía se usa como desMotivo;
+            # si no, _l10n_pe_build_note_request cae a la descripción del catálogo.
+            sustento = (payload.get("sustento") or "").strip()
+            if sustento:
+                vals["l10n_pe_motivo_desc"] = sustento[:250]
             if tipo == "07":
                 vals["reversed_entry_id"] = origin.id
             else:
@@ -1981,23 +2021,47 @@ class AccountMove(models.Model):
         move = self.env["account.move"].create(vals)
         self._l10n_pe_ne_quick_flags(move, payload)
         move.action_post()
-        # Nota de Crédito: no puede acreditar más de lo facturado. Se valida el tope
-        # contra el total del comprobante afectado antes de enviar a SUNAT (respaldo del
-        # front). La NC de importe 0 (motivo 03) pasa; una parcial no puede exceder al
-        # original. (La ND suma a la deuda, así que no lleva tope.)
-        if tipo == "07" and origin is not None and (
-            move.amount_total > (origin.amount_total or 0) + 0.05
-        ):
-            raise UserError(
-                _(
-                    "La nota de crédito (%(nc)s) no puede superar el total del comprobante "
-                    "afectado (%(orig)s)."
+        # Stock: el bien sale (o vuelve, si es NC) cuando la venta existe en Odoo, no cuando
+        # SUNAT responde — la mercadería ya cambió de manos. Va después del post y antes de
+        # enviar: si SUNAT rechaza, el movimiento se corrige con la NC, igual que el importe.
+        move._l10n_pe_ne_mover_stock()
+        # Nota de Crédito: no puede acreditar más de lo facturado. Se permiten VARIAS NC
+        # sobre el mismo comprobante, pero el ACUMULADO no puede superar su total: el tope
+        # de esta nota es el saldo pendiente de acreditar (total − NC previas vigentes).
+        # Respaldo del front; la NC de importe 0 (motivo 03) pasa. (La ND suma a la deuda,
+        # así que no lleva tope.)
+        if tipo == "07" and origin is not None:
+            previas = origin._l10n_pe_ne_nc_previas() - move
+            acreditado = sum(previas.mapped("amount_total"))
+            saldo = (origin.amount_total or 0) - acreditado
+            if move.amount_total > saldo + 0.05:
+                if previas:
+                    raise UserError(
+                        _(
+                            "El comprobante afectado ya tiene %(n)d nota(s) de crédito por "
+                            "%(acred)s (%(lista)s); saldo pendiente de acreditar: %(saldo)s. "
+                            "Esta nota (%(nc)s) lo supera."
+                        )
+                        % {
+                            "n": len(previas),
+                            "acred": "%.2f" % acreditado,
+                            "lista": ", ".join(
+                                "%s-%s" % m._l10n_pe_ne_doc_id() for m in previas
+                            ),
+                            "saldo": "%.2f" % saldo,
+                            "nc": "%.2f" % move.amount_total,
+                        }
+                    )
+                raise UserError(
+                    _(
+                        "La nota de crédito (%(nc)s) no puede superar el total del comprobante "
+                        "afectado (%(orig)s)."
+                    )
+                    % {
+                        "nc": "%.2f" % move.amount_total,
+                        "orig": "%.2f" % (origin.amount_total or 0),
+                    }
                 )
-                % {
-                    "nc": "%.2f" % move.amount_total,
-                    "orig": "%.2f" % (origin.amount_total or 0),
-                }
-            )
         # Si la emisión vino de "Convertir a comprobante", vincula el comprobante
         # recién posteado a la cotización de origen y la marca como 'convertida'.
         cotid = payload.get("cotizacionId")
@@ -2093,6 +2157,33 @@ class AccountMove(models.Model):
                 "No se encontró el documento afectado (envía docAfectado.id o serie+correlativo)."
             )
         )
+
+    def _l10n_pe_check_afectable_con_nota(self):
+        """Una NC/ND solo puede emitirse sobre una factura o una boleta: SUNAT rechaza la
+        referencia a otra nota. La guarda va en el call site de la emisión y no dentro de
+        _l10n_pe_ne_quick_origin porque ese helper lo comparte la anulación, que SÍ acepta
+        notas (una NC se anula comunicando su baja)."""
+        self.ensure_one()
+        tipo = self.l10n_pe_ne_tipo_doc or self._l10n_pe_document_type()
+        if tipo not in ("01", "03"):
+            docname = {
+                "07": _("Nota de Crédito"),
+                "08": _("Nota de Débito"),
+            }.get(tipo, tipo)
+            raise UserError(
+                _(
+                    "Una nota de crédito o débito solo puede emitirse sobre una factura o una "
+                    "boleta; el documento afectado (%(doc)s %(serie)s-%(corr)s) es una nota. "
+                    "Para anularla, comunique su baja."
+                )
+                % {
+                    "doc": docname,
+                    "serie": self.l10n_pe_ne_serie_emit
+                    or self._l10n_pe_serie_correlativo()[0],
+                    "corr": self.l10n_pe_ne_corr_emit
+                    or self._l10n_pe_serie_correlativo()[1],
+                }
+            )
 
     @api.model
     def l10n_pe_ne_quick_anular(self, payload):
@@ -2720,6 +2811,305 @@ class AccountMove(models.Model):
             "total": sum(moves.mapped("amount_total")),
         }
 
+    # ------------------------------------------------------------- PLE 8.1 (compras)
+    #
+    # ⚠ LA ESTRUCTURA DE ESTE FORMATO ESTÁ PENDIENTE DE VALIDACIÓN CONTABLE.
+    #
+    # Los anexos de SUNAT con el layout del 8.1 (RS 286-2009 anexo 2, y sus modificatorias)
+    # se publican como PDF ESCANEADO: no hay de dónde extraerlo de forma fiable. Lo de abajo
+    # espeja las convenciones del 14.1 de este mismo addon —que sí está en producción— y el
+    # orden de campos que documenta SUNAT para el registro de compras, pero NADIE lo verificó
+    # contra la norma vigente.
+    #
+    # Cada campo va NUMERADO a propósito, para que un contador pueda auditarlo uno por uno y
+    # decir "el 14 no es ese" sin leer Python.
+    #
+    # El modo de fallo es benigno: el validador del PLE de SUNAT revisa la estructura, así que
+    # un layout corrido se RECHAZA al subirlo — no entra mal en silencio. Aun así, que nadie
+    # lo presente sin que su contador lo confirme primero.
+
+    def _l10n_pe_ne_ple_compra_breakdown(self):
+        """Desglose de una compra por afectación. Espeja _l10n_pe_ne_ple_breakdown (ventas),
+        pero el registro de compras separa la base gravada por su DESTINO (a operaciones
+        gravadas / mixtas / no gravadas), no por el tipo de tributo.
+
+        Hoy todo va al destino "gravadas" (campo 14): es el caso de un negocio que vende
+        gravado, que es el de esta app. Prorratear a operaciones no gravadas exige saber a qué
+        se destina cada compra, dato que no se pide en ningún lado — sería inventarlo."""
+        self.ensure_one()
+        gravado = exonerado = inafecto = igv = 0.0
+        for ln in self.invoice_line_ids:
+            codes = ln.tax_ids.mapped("l10n_pe_edi_tax_code")
+            base = ln.price_subtotal or 0.0
+            if "1000" in codes:
+                gravado += base
+            elif "9997" in codes:
+                exonerado += base
+            else:
+                inafecto += base
+        igv = (self.amount_total or 0.0) - (self.amount_untaxed or 0.0)
+        rnd = self.currency_id.rounding or 0.01
+        return {
+            "gravado": float_round(gravado, precision_rounding=rnd),
+            "exonerado": float_round(exonerado, precision_rounding=rnd),
+            "inafecto": float_round(inafecto, precision_rounding=rnd),
+            "igv": float_round(igv, precision_rounding=rnd),
+            "total": self.amount_total or 0.0,
+        }
+
+    def _l10n_pe_ne_ple_compra_linea(self, periodo8, cuo):
+        """Una línea del PLE 8.1. Campos numerados: son POSICIONALES y separados por '|', así
+        que un campo de más o de menos corre todos los siguientes."""
+        self.ensure_one()
+        num = self._l10n_pe_ne_ple_num
+        b = self._l10n_pe_ne_ple_compra_breakdown()
+        doc = self.l10n_latam_document_number or self.ref or ""
+        serie, _sep, corr = doc.partition("-")
+        tipo = (
+            self.l10n_latam_document_type_id.code
+            if self.l10n_latam_document_type_id
+            else "01"
+        )
+        fecha = self.invoice_date.strftime("%d/%m/%Y") if self.invoice_date else ""
+        moneda = self.currency_id.name or "PEN"
+        # Tipo de documento del proveedor (tabla 2): 6 = RUC. Sin RUC no hay crédito fiscal,
+        # así que el caso normal de este registro es 6.
+        ndoc = (self.partner_id.vat or "").strip()
+        tdoc = "6" if len(ndoc) == 11 else ("1" if ndoc else "0")
+        campos = [
+            periodo8,  # 1  Periodo (AAAAMM00)
+            str(self.id),  # 2  CUO (único por operación)
+            "",  # 3  Nro correlativo del asiento (solo estados 8/9)
+            fecha,  # 4  Fecha de emisión del comprobante
+            "",  # 5  Fecha de vencimiento o pago
+            tipo,  # 6  Tipo de comprobante (tabla 10)
+            serie,  # 7  Serie del comprobante
+            "",  # 8  Año de emisión de la DUA/DSI (solo importaciones)
+            corr,  # 9  Número del comprobante
+            "",  # 10 Número final (rango) / DUA
+            tdoc,  # 11 Tipo de documento del proveedor (tabla 2)
+            ndoc,  # 12 Número de documento del proveedor
+            (self.partner_id.name or "").upper(),  # 13 Razón social del proveedor
+            num(b["gravado"]),  # 14 Base imponible destinada a operaciones GRAVADAS
+            num(b["igv"]),  # 15 IGV/IPM de 14
+            "0.00",  # 16 Base destinada a operaciones gravadas Y no gravadas
+            "0.00",  # 17 IGV/IPM de 16
+            "0.00",  # 18 Base destinada a operaciones NO gravadas
+            "0.00",  # 19 IGV/IPM de 18
+            num(b["exonerado"] + b["inafecto"]),  # 20 Valor de adquisiciones no gravadas
+            "0.00",  # 21 ISC
+            "0.00",  # 22 ICBPER
+            "0.00",  # 23 Otros tributos y cargos
+            num(b["total"]),  # 24 Importe total
+            "",  # 25 Código de la moneda (tabla 4) — ver nota abajo
+            "",  # 26 Tipo de cambio
+            "",  # 27 Fecha de emisión del comprobante modificado
+            "",  # 28 Tipo del comprobante modificado
+            "",  # 29 Serie del comprobante modificado
+            "",  # 30 Número del comprobante modificado
+            "",  # 31 Fecha de la constancia de detracción
+            "",  # 32 Número de la constancia de detracción
+            "",  # 33 Marca del comprobante sujeto a retención
+            "",  # 34 Clasificación de bienes y servicios
+            "",  # 35 Identificación del contrato o proyecto
+            "",  # 36 Error tipo 1
+            "",  # 37 Error tipo 9
+            "",  # 38 Errores tipo 4
+            "",  # 39 Indicador de comprobante de pago cancelado con medio de pago
+            "1",  # 40 Estado (1 = registro que corresponde al periodo)
+        ]
+        # Moneda y tipo de cambio: se llenan acá y no en la lista para no repetir el cálculo.
+        campos[24] = moneda
+        campos[25] = (
+            "1.000"
+            if moneda == "PEN"
+            else "%.3f"
+            % (1.0 / (self.currency_id.with_context(date=self.invoice_date).rate or 1.0))
+        )
+        return "|".join(campos) + "|"
+
+    @api.model
+    def _l10n_pe_ne_compras_periodo(self, periodo):
+        """Compras posteadas del periodo YYYYMM, ordenadas. Aislado por compañía.
+        Espeja _l10n_pe_ne_ventas_periodo, con move_type de proveedor."""
+        import calendar
+
+        periodo = (periodo or "").strip()
+        if len(periodo) != 6 or not periodo.isdigit():
+            raise UserError(_("Periodo inválido. Usa YYYYMM (p.ej. 202606)."))
+        year, month = int(periodo[:4]), int(periodo[4:6])
+        if not (1 <= month <= 12):
+            raise UserError(_("Mes inválido en el periodo."))
+        last = calendar.monthrange(year, month)[1]
+        d0 = fields.Date.to_date("%04d-%02d-01" % (year, month))
+        d1 = fields.Date.to_date("%04d-%02d-%02d" % (year, month, last))
+        return self.search(
+            [
+                ("move_type", "in", ("in_invoice", "in_refund")),
+                ("state", "=", "posted"),
+                ("invoice_date", ">=", d0),
+                ("invoice_date", "<=", d1),
+            ],
+            order="invoice_date, id",
+        )
+
+    @api.model
+    def l10n_pe_ne_ple_compras(self, periodo):
+        """PLE 8.1 (Registro de Compras) del periodo YYYYMM. Devuelve
+        {filename, contentB64, count, periodo, total}. Espeja l10n_pe_ne_ple_ventas.
+
+        ⚠ Estructura pendiente de validación contable (ver la nota del bloque)."""
+        import base64
+
+        periodo = (periodo or "").strip()
+        moves = self._l10n_pe_ne_compras_periodo(periodo)
+        periodo8 = periodo + "00"
+        lines = [
+            m._l10n_pe_ne_ple_compra_linea(periodo8, i) for i, m in enumerate(moves, 1)
+        ]
+        content = ("\r\n".join(lines) + "\r\n") if lines else ""
+        ruc = (self.env.company.vat or "").strip()
+        ind_cont = "1" if lines else "0"
+        # Mismo patrón que el 14.1, cambiando el código del libro: 140100 → 080100.
+        filename = "LE%s%s00080100%s11.txt" % (ruc, periodo, "1" + ind_cont)
+        return {
+            "filename": filename,
+            "contentB64": base64.b64encode(content.encode("latin-1", "replace")).decode(
+                "ascii"
+            ),
+            "count": len(lines),
+            "periodo": periodo,
+            "total": sum(moves.mapped("amount_total")),
+        }
+
+    # ------------------------------------- PLE 12.1 (inventario en unidades físicas)
+    #
+    # ⚠ ESTRUCTURA PENDIENTE DE VALIDACIÓN CONTABLE, igual que el 8.1: los anexos de SUNAT
+    # con el layout se publican como PDF escaneado. Cada campo va numerado para auditarlo.
+    #
+    # Se hace el de UNIDADES FÍSICAS y NO el valorizado, y no por comodidad: el valorizado
+    # exige el costo de cada movimiento, y con la valorización en `periodic` —el default de
+    # Odoo, el que esta app deja puesto— `stock.move.value` y `price_unit` salen en CERO.
+    # Verificado sobre los movimientos reales de la BD. Inventar ese costo (p. ej. usando el
+    # precio de lista) sería declararle a SUNAT un número que no salió de ningún lado.
+    # Para el valorizado hay que pasar la compañía a valorización perpetua, que cambia los
+    # asientos contables: es una decisión del contador, no un efecto colateral de un reporte.
+
+    @api.model
+    def _l10n_pe_ne_kardex_periodo(self, periodo):
+        """Movimientos de inventario del periodo YYYYMM, ordenados. Solo los que cruzan la
+        frontera del almacén (entradas y salidas reales); los internos no son del kardex."""
+        import calendar
+
+        periodo = (periodo or "").strip()
+        if len(periodo) != 6 or not periodo.isdigit():
+            raise UserError(_("Periodo inválido. Usa YYYYMM (p.ej. 202606)."))
+        year, month = int(periodo[:4]), int(periodo[4:6])
+        if not (1 <= month <= 12):
+            raise UserError(_("Mes inválido en el periodo."))
+        last = calendar.monthrange(year, month)[1]
+        return self.env["stock.move.line"].search(
+            [
+                ("state", "=", "done"),
+                ("company_id", "=", self.env.company.id),
+                ("date", ">=", "%04d-%02d-01 00:00:00" % (year, month)),
+                ("date", "<=", "%04d-%02d-%02d 23:59:59" % (year, month, last)),
+                ("product_id.is_storable", "=", True),
+                # Solo lo que entra o sale del almacén: un traslado interno no es del kardex.
+                "|",
+                ("location_id.usage", "in", ("supplier", "customer", "inventory")),
+                ("location_dest_id.usage", "in", ("supplier", "customer", "inventory")),
+            ],
+            order="date, id",
+        )
+
+    @api.model
+    def _l10n_pe_ne_kardex_linea(self, ml, periodo8, cuo, saldo):
+        """Una línea del PLE 12.1. Campos POSICIONALES separados por '|'."""
+        num = self._l10n_pe_ne_ple_num
+        entra = ml.location_dest_id.usage == "internal"
+        cant = abs(ml.quantity or 0)
+        doc = ml.move_id.l10n_pe_ne_move_id
+        if doc and doc.move_type in ("out_invoice", "out_refund"):
+            # VENTA: la serie/correlativo salen del mismo helper que usa la emisión y la
+            # baja. Partir l10n_latam_document_number por "-" no sirve: en una venta ese
+            # campo trae solo el número, y la serie terminaba llevándose el correlativo.
+            serie = doc.l10n_pe_ne_serie_emit or doc._l10n_pe_serie_correlativo()[0]
+            corr = doc.l10n_pe_ne_corr_emit or doc._l10n_pe_serie_correlativo()[1]
+            tipo = doc.l10n_pe_ne_tipo_doc or doc._l10n_pe_document_type()
+            fecha = doc.invoice_date.strftime("%d/%m/%Y") if doc.invoice_date else ""
+        elif doc:
+            # COMPRA: acá el documento es del proveedor y sí viene como "F001-00095001".
+            serie, _sep, corr = (doc.l10n_latam_document_number or doc.ref or "").partition("-")
+            tipo = (
+                doc.l10n_latam_document_type_id.code
+                if doc.l10n_latam_document_type_id
+                else "01"
+            )
+            fecha = doc.invoice_date.strftime("%d/%m/%Y") if doc.invoice_date else ""
+        else:
+            # Ajuste de inventario: no nace de un comprobante. Tipo 00 = "otros" (tabla 10).
+            serie, corr, tipo = "", "", "00"
+            fecha = ml.date.strftime("%d/%m/%Y") if ml.date else ""
+        p = ml.product_id
+        campos = [
+            periodo8,  # 1  Periodo (AAAAMM00)
+            str(ml.id),  # 2  CUO (único por movimiento)
+            "",  # 3  Nro correlativo del asiento
+            fecha,  # 4  Fecha de emisión del documento
+            tipo,  # 5  Tipo de documento (tabla 10)
+            serie,  # 6  Serie del documento
+            corr,  # 7  Número del documento
+            "01" if entra else "02",  # 8  Tipo de operación (tabla 12): 01 entrada, 02 salida
+            p.default_code or "",  # 9  Código de la existencia
+            "01",  # 10 Tipo de existencia (tabla 5): 01 mercadería
+            (p.name or "")[:100],  # 11 Descripción de la existencia
+            p.l10n_pe_ne_unit_code or "NIU",  # 12 Unidad de medida (tabla 6)
+            "",  # 13 Método de valuación (solo en el valorizado)
+            num(cant) if entra else "0.00",  # 14 Entradas — cantidad
+            "0.00" if entra else num(cant),  # 15 Salidas — cantidad
+            num(saldo),  # 16 Saldo final — cantidad
+            "1",  # 17 Estado (1 = del periodo)
+        ]
+        return "|".join(campos) + "|"
+
+    @api.model
+    def l10n_pe_ne_ple_inventario(self, periodo):
+        """PLE 12.1 (Registro de Inventario Permanente en Unidades Físicas) del periodo.
+
+        ⚠ Estructura pendiente de validación contable (ver la nota del bloque)."""
+        import base64
+        from collections import defaultdict
+
+        periodo = (periodo or "").strip()
+        lineas_ml = self._l10n_pe_ne_kardex_periodo(periodo)
+        periodo8 = periodo + "00"
+        # El saldo se arrastra POR PRODUCTO en el orden de los movimientos: es lo que hace
+        # legible un kardex — cada renglón muestra con cuánto quedó esa existencia.
+        saldos = defaultdict(float)
+        lines = []
+        for i, ml in enumerate(lineas_ml, 1):
+            entra = ml.location_dest_id.usage == "internal"
+            cant = abs(ml.quantity or 0)
+            saldos[ml.product_id.id] += cant if entra else -cant
+            lines.append(
+                self._l10n_pe_ne_kardex_linea(ml, periodo8, i, saldos[ml.product_id.id])
+            )
+        content = ("\r\n".join(lines) + "\r\n") if lines else ""
+        ruc = (self.env.company.vat or "").strip()
+        ind_cont = "1" if lines else "0"
+        # Mismo patrón que el 14.1/8.1, con el código del libro 120100.
+        filename = "LE%s%s00120100%s11.txt" % (ruc, periodo, "1" + ind_cont)
+        return {
+            "filename": filename,
+            "contentB64": base64.b64encode(content.encode("latin-1", "replace")).decode(
+                "ascii"
+            ),
+            "count": len(lines),
+            "periodo": periodo,
+            "total": 0.0,
+        }
+
     @api.model
     def l10n_pe_ne_dashboard(self, periodo=None):
         """Datos del dashboard de ventas del periodo (YYYYMM, default mes actual):
@@ -3017,12 +3407,371 @@ class AccountMove(models.Model):
             "total": sum(moves.mapped("amount_total")),
         }
 
-    def _l10n_pe_ne_quick_product(self, ln, tax=None):
+    @api.model
+    def _l10n_pe_ne_margen_default(self):
+        """Margen por defecto del negocio, en %. Configurable en caliente sin redeploy.
+        30% es un punto de partida razonable para el retail peruano, no una verdad: cada
+        negocio lo ajusta, y cada producto puede tener el suyo."""
+        raw = self.env["ir.config_parameter"].sudo().get_param(
+            "l10n_pe_ne.margen_default", "30"
+        )
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            return 30.0
+
+    @api.model
+    def _l10n_pe_ne_precio_con_margen(self, costo, margen):
+        """Costo → precio de venta, ambos CON IGV.
+
+        El margen se aplica sobre el bruto porque toda la app trabaja con precios de vitrina:
+        así el número que sale es el que va en la etiqueta, sin desarmar el impuesto para
+        pensar el negocio. Redondea a 2: es un precio, no una base imponible.
+
+        `margen=None` usa el default del negocio; `margen=0` es un margen de CERO (vender al
+        costo) y se respeta. Se distingue con `is None` a propósito: en Python 0 == False, y
+        un `if not margen` convertiría el 0% en el default — el producto de promoción saldría
+        30% más caro sin que nadie lo pidiera.
+
+        El campo del producto es Float y no distingue "sin margen" de "0%": su 0 significa
+        "usa el default", y quien llama lo traduce a None."""
+        c = float(costo or 0)
+        m = self._l10n_pe_ne_margen_default() if margen is None else float(margen)
+        return round(c * (1 + m / 100.0), 2)
+
+    @api.model
+    def _l10n_pe_ne_rastreo_producto(self, rastreo):
+        """Rastreo en Odoo: 'lot' | 'serial' | 'none'. La API habla el vocabulario del
+        negocio ("lote"/"serie"), no el de Odoo.
+
+        Solo tiene sentido con existencias: Odoo no rastrea lo que no cuenta. Y el rastreo
+        NO se decide solo — es del producto: la misma caja de paracetamol necesita lote y un
+        tornillo no."""
+        r = (rastreo or "").strip().lower()
+        if r in ("lote", "lot"):
+            return "lot"
+        if r in ("serie", "serial", "imei"):
+            return "serial"
+        return "none"
+
+    @api.model
+    def _l10n_pe_ne_tipo_producto(self, tipo=None, unidad=None):
+        """Tipo del producto en Odoo: 'consu' (bien) o 'service' (servicio).
+
+        Manda lo que el usuario eligió (`tipo`: "bien"/"servicio"). Si no eligió —el producto
+        se auto-crea al emitir, donde no hay quién responda— se deduce de la UNIDAD, que es la
+        única señal real que tiene la línea: ZZ es la unidad de servicio del catálogo 03 de
+        SUNAT; cualquier otra (NIU, KGM, …) describe algo tangible.
+
+        Antes esto era "service" fijo, lo que además se contradecía con SUNAT: sin unidad se
+        emite NIU (DEFAULT_UNIT_CODE), o sea que al mismo producto se le declaraba BIEN a SUNAT
+        y servicio en Odoo. Ahora ambos dicen lo mismo, y el default coincide con el de Odoo.
+
+        No se toca `is_storable` (llevar stock o no): ese campo solo existe con el módulo
+        `stock` instalado, y hoy no lo está. Es una decisión aparte, por producto.
+        """
+        t = (tipo or "").strip().lower()
+        if t in ("bien", "bienes", "producto", "consu"):
+            return "consu"
+        if t in ("servicio", "servicios", "service"):
+            return "service"
+        return "service" if (unidad or "").strip().upper() == "ZZ" else "consu"
+    def _l10n_pe_ne_lineas_con_stock(self):
+        """Líneas del comprobante cuyo producto lleva existencias. En Odoo 19 eso es
+        type='consu' Y is_storable=True: 'consu' solo dice que es tangible; el booleano decide
+        si se rastrea. Un servicio nunca mueve stock."""
+        self.ensure_one()
+        return self.invoice_line_ids.filtered(
+            lambda l: l.product_id
+            and l.product_id.type == "consu"
+            and l.product_id.is_storable
+            and (l.quantity or 0) > 0
+        )
+
+    def _l10n_pe_ne_mover_stock(self, reversa=False):
+        """Descuenta (o repone) el stock de las líneas de bien del comprobante.
+
+        `reversa=True` invierte la dirección y marca los movimientos como reversa: lo usa
+        _l10n_pe_ne_revertir_stock cuando SUNAT rechaza.
+
+        La factura NO mueve stock en Odoo: los movimientos nacen de un stock.picking, que en
+        el flujo estándar viene de un sale.order. Esta app no usa sale.order —emite el
+        account.move directo— así que el movimiento se crea aquí, igual que hace el POS de
+        Odoo (pos_order._create_order_picking() corre aparte de _generate_pos_order_invoice()).
+
+        Dirección según el documento:
+          * 01/03 (factura/boleta) → SALIDA: existencias → cliente.
+          * 07 (nota de crédito)   → ENTRADA: cliente → existencias. Sin esto, anular una
+            venta dejaría el stock descontado para siempre y el kardex se iría en falso.
+          * 08 (nota de débito)    → nada: es un cargo (mora, penalidad), no mueve bienes.
+
+        NUNCA bloquea la venta: si no hay existencias el movimiento igual se hace y el stock
+        queda negativo — coherente con la caja, que tampoco bloquea. Un negativo es una señal
+        visible de que falta un ajuste, y es preferible a impedirle vender a quien tiene el
+        producto en la mano. Los fallos se tragan a propósito: el comprobante ya es válido
+        ante SUNAT y no puede caerse porque el inventario no cuadre.
+        """
+        self.ensure_one()
+        # Solo documentos de VENTA. _l10n_pe_document_type() no distingue: para un `in_invoice`
+        # (una compra) devuelve '03', así que sin esta guarda una compra entraría por acá y
+        # SACARÍA el stock en vez de meterlo. La compra va por _l10n_pe_ne_mover_stock_compra.
+        if self.move_type not in ("out_invoice", "out_refund"):
+            return self.env["stock.move"].browse()
+        tipo = self.l10n_pe_ne_tipo_doc or self._l10n_pe_document_type()
+        if tipo not in ("01", "03", "07"):
+            return self.env["stock.move"].browse()
+        lineas = self._l10n_pe_ne_lineas_con_stock()
+        if not lineas:
+            return self.env["stock.move"].browse()
+        wh = self.env["stock.warehouse"].search(
+            [("company_id", "=", self.company_id.id)], limit=1
+        )
+        clientes = self.env.ref(
+            "stock.stock_location_customers", raise_if_not_found=False
+        )
+        if not wh or not clientes:
+            _logger.warning(
+                "stock: sin almacén o ubicación de clientes para %s; no se mueve stock",
+                self.name,
+            )
+            return self.env["stock.move"].browse()
+        # La NC va al revés que la factura; y una reversa va al revés de lo que sea.
+        # Los dos XOR: la reversa de una NC vuelve a ser una salida.
+        entrada = (tipo == "07") != bool(reversa)
+        origen, destino = (
+            (clientes, wh.lot_stock_id) if entrada else (wh.lot_stock_id, clientes)
+        )
+        return self._l10n_pe_ne_stock_aplicar(lineas, origen, destino, reversa=reversa)
+
+    def _l10n_pe_ne_lote_de(self, linea):
+        """stock.lot de una línea de compra, creándolo si hace falta. None si el producto no
+        se rastrea o la línea no trae lote.
+
+        Solo la ENTRADA define el lote. En la salida no se pide: Odoo lo asigna al reservar,
+        por su estrategia de salida — con vencimiento, lo que caduca antes sale primero, que
+        es justo lo que una farmacia necesita. Verificado contra Odoo 19."""
+        prod = linea.product_id
+        if not prod or prod.tracking == "none":
+            return None
+        nombre = (linea.l10n_pe_ne_lote or "").strip()
+        if not nombre:
+            return None
+        Lot = self.env["stock.lot"]
+        lote = Lot.search(
+            [("name", "=", nombre), ("product_id", "=", prod.id),
+             ("company_id", "=", self.company_id.id)], limit=1)
+        if not lote:
+            vals = {"name": nombre, "product_id": prod.id, "company_id": self.company_id.id}
+            lote = Lot.create(vals)
+        # El vencimiento se escribe aparte: el campo lo agrega product_expiry y solo tiene
+        # sentido si el producto lo usa. Se pisa solo si la línea trae uno.
+        if linea.l10n_pe_ne_vence and prod.use_expiration_date:
+            lote.expiration_date = linea.l10n_pe_ne_vence
+        return lote
+
+    def _l10n_pe_ne_stock_aplicar(self, lineas, origen, destino, reversa=False, con_lote=False):
+        """Motor común: crea y valida los movimientos de `lineas` entre dos ubicaciones.
+
+        Lo comparten la venta (existencias → cliente), la devolución por NC, la reversa de un
+        rechazo y la compra (proveedor → existencias). Lo único que cambia entre ellas son las
+        dos ubicaciones y el sentido; la mecánica —y el "nunca bloquear"— es la misma.
+
+        `con_lote`: la ENTRADA asigna el lote que trae la línea. La salida no lo necesita —
+        Odoo lo asigna al reservar.
+        """
+        self.ensure_one()
+        moves = self.env["stock.move"].browse()
+        lotes = {}
+        for l in lineas:
+            if con_lote:
+                lotes[l.id] = self._l10n_pe_ne_lote_de(l)
+            # Sin 'name': stock.move no lo tiene en Odoo 19 (su `reference` se computa).
+            # `origin` deja el rastro legible; l10n_pe_ne_move_id es el enlace real (por id).
+            moves |= self.env["stock.move"].create(
+                {
+                    "product_id": l.product_id.id,
+                    "product_uom_qty": abs(l.quantity),
+                    "product_uom": l.product_uom_id.id,
+                    "location_id": origen.id,
+                    "location_dest_id": destino.id,
+                    "company_id": self.company_id.id,
+                    "origin": self.name or "",
+                    "l10n_pe_ne_move_id": self.id,
+                    "l10n_pe_ne_reversa": reversa,
+                }
+            )
+        try:
+            moves._action_confirm()
+            moves._action_assign()
+            for m, l in zip(moves, lineas):
+                lote = lotes.get(l.id)
+                if lote:
+                    # Entrada de un producto rastreado: el lote va en la LÍNEA del movimiento
+                    # (stock.move_line), no en el move. Sin esto Odoo lanza "debe proporcionar
+                    # un número de serie o lote" y la mercadería no entraría.
+                    if not m.move_line_ids:
+                        m.move_line_ids = [(0, 0, {
+                            "product_id": m.product_id.id,
+                            "location_id": m.location_id.id,
+                            "location_dest_id": m.location_dest_id.id,
+                            "company_id": m.company_id.id,
+                        })]
+                    m.move_line_ids.write({"lot_id": lote.id})
+                # quantity explícito: sin esto _action_done mueve solo lo reservado, y sin
+                # existencias no reserva nada → la salida quedaría en 0 y el kardex mentiría.
+                m.quantity = m.product_uom_qty
+                m.picked = True
+            moves._action_done()
+            # La fecha del movimiento es la del DOCUMENTO, no la de cuando se registró.
+            # Odoo pone `date` = ahora al validar; sin corregirlo, una compra de marzo
+            # cargada en julio caería en el kardex de julio y el libro del periodo saldría
+            # mal. Se escribe después de _action_done porque antes lo pisa él.
+            if self.invoice_date:
+                moves.write({"date": self.invoice_date})
+                moves.move_line_ids.write({"date": self.invoice_date})
+        except Exception as e:  # noqa: BLE001 — el documento ya existe: el stock no lo tumba
+            # Se traga a propósito: el comprobante ya es válido ante SUNAT y no puede caerse
+            # porque el inventario no cuadre. Pero se deja RASTRO en el documento, no solo en
+            # el log: un movimiento que no ocurre y nadie ve es un kardex mintiendo en
+            # silencio. El caso típico es un producto rastreado sin existencias en ningún
+            # lote — ahí Odoo no puede inventar de dónde sale.
+            _logger.exception("stock: no se pudo mover el stock de %s: %s", self.name, e)
+            self.l10n_pe_ne_stock_aviso = (
+                _("No se pudo mover el inventario de este documento: %s") % e
+            )[:500]
+            return self.env["stock.move"].browse()
+        self.l10n_pe_ne_stock_aviso = False
+        return moves
+
+    @api.model
+    def _l10n_pe_ne_asegurar_fefo(self, wh):
+        """Pone la ubicación de existencias en FEFO: sale primero lo que vence antes.
+
+        El default de Odoo es FIFO —sale lo que entró primero—, y para lo que caduca eso está
+        MAL: comprobado con dos lotes (uno vence 2026, otro 2028), la venta se llevó el de
+        2028 y dejó el de 2026 pudriéndose en el almacén. En una farmacia eso es plata tirada
+        y riesgo sanitario.
+
+        FEFO no perjudica a lo que no vence: sin fecha de caducidad, Odoo cae de vuelta al
+        orden de entrada. Por eso se pone en la ubicación y no producto por producto.
+
+        Idempotente: si ya está, no toca nada. Se llama al ingresar mercadería porque es
+        cuando la ubicación empieza a importar — no hay un lugar mejor sin un asistente de
+        configuración, que esta app no tiene."""
+        fefo = self.env.ref("product_expiry.removal_fefo", raise_if_not_found=False)
+        loc = wh.lot_stock_id if wh else None
+        if fefo and loc and not loc.removal_strategy_id:
+            loc.sudo().removal_strategy_id = fefo.id
+
+    def _l10n_pe_ne_mover_stock_compra(self):
+        """Entrada de mercadería por una compra: proveedor → existencias.
+
+        Es la otra mitad del kardex. Sin esto solo hay salidas y todo negocio deriva a
+        negativo: un inventario permanente es entradas MENOS salidas.
+
+        Va aparte de _l10n_pe_ne_mover_stock y no reusa su dirección a propósito: aquella
+        deduce el sentido de _l10n_pe_document_type(), que para un `in_invoice` devuelve '03'
+        — o sea que trataría la compra como una boleta y SACARÍA el stock en vez de meterlo.
+        """
+        self.ensure_one()
+        if self.move_type != "in_invoice":
+            return self.env["stock.move"].browse()
+        lineas = self._l10n_pe_ne_lineas_con_stock()
+        if not lineas:
+            return self.env["stock.move"].browse()
+        wh = self.env["stock.warehouse"].search(
+            [("company_id", "=", self.company_id.id)], limit=1
+        )
+        proveedores = self.env.ref(
+            "stock.stock_location_suppliers", raise_if_not_found=False
+        )
+        if not wh or not proveedores:
+            _logger.warning(
+                "stock: sin almacén o ubicación de proveedores para %s; no entra mercadería",
+                self.name,
+            )
+            return self.env["stock.move"].browse()
+        # La mercadería que entra decide cómo saldrá: FEFO para que lo que vence antes se
+        # venda primero (el default de Odoo, FIFO, dejaría caducar el lote más viejo).
+        self._l10n_pe_ne_asegurar_fefo(wh)
+        # con_lote: la entrada es la única que define el lote (la salida lo asigna Odoo).
+        return self._l10n_pe_ne_stock_aplicar(
+            lineas, proveedores, wh.lot_stock_id, con_lote=True
+        )
+
+    def _l10n_pe_ne_revertir_stock(self):
+        """Deshace el movimiento de un comprobante que SUNAT rechazó.
+
+        Un rechazado NO existe para SUNAT: hay que corregir y emitir uno NUEVO. Ese nuevo
+        comprobante vuelve a descontar, así que si el rechazado se queda con su movimiento,
+        el bien sale DOS VECES del kardex por una sola venta.
+
+        Se REVIERTE, no se borra: el kardex es un libro: se compensa con el movimiento
+        contrario y queda el rastro de que hubo un intento. Borrar el original escondería que
+        pasó algo, que es justo lo que un inventario permanente no debe hacer.
+
+        Idempotente: si ya se revirtió, no hace nada. Lo llama el write() al detectar la
+        transición a 'rechazado' — por ahí pasan los tres caminos que la fijan (el envío
+        síncrono, el cron de pendientes y el resumen diario de boletas), y también cualquiera
+        que se agregue después.
+        """
+        self.ensure_one()
+        Move = self.env["stock.move"]
+        hechos = Move.search(
+            [
+                ("l10n_pe_ne_move_id", "=", self.id),
+                ("l10n_pe_ne_reversa", "=", False),
+                ("state", "=", "done"),
+            ]
+        )
+        if not hechos:
+            return Move.browse()
+        ya = Move.search_count(
+            [("l10n_pe_ne_move_id", "=", self.id), ("l10n_pe_ne_reversa", "=", True)]
+        )
+        if ya:
+            return Move.browse()
+        return self._l10n_pe_ne_mover_stock(reversa=True)
+
+    def write(self, vals):
+        """Revierte el stock al pasar a 'rechazado'.
+
+        Va en el write y no en cada sitio que fija el estado porque son tres (envío síncrono,
+        cron de pendientes, resumen diario de boletas) y mañana pueden ser cuatro: la
+        invariante no debe depender de que alguien se acuerde de llamar al helper.
+
+        Solo los que ENTRAN a rechazado (los que ya lo estaban no se re-revierten).
+        """
+        revertir = self.browse()
+        if vals.get("l10n_pe_biller_state") == "rechazado":
+            revertir = self.filtered(
+                lambda m: m.l10n_pe_biller_state != "rechazado"
+            )
+        res = super().write(vals)
+        for m in revertir:
+            m._l10n_pe_ne_revertir_stock()
+        return res
+
+    def _l10n_pe_ne_quick_product(self, ln, tax=None, create=True, precio_con_igv=True):
         """Resuelve el product.product de una línea para que el documento USE un registro de Odoo:
         busca por id, por código (default_code) o por nombre exacto; si no existe y hay datos, lo
         CREA simplificado y lo enlaza (igual que el cliente por vat). Devuelve recordset vacío si la
-        línea no aporta nada por lo que crear (queda como texto libre, compatible hacia atrás)."""
+        línea no aporta nada por lo que crear (queda como texto libre, compatible hacia atrás).
+        Con create=False solo resuelve y NUNCA crea: las líneas de notas (07/08) pueden traer
+        texto sintético (p. ej. "DICE: … DEBE DECIR: …" del motivo 03) que no debe convertirse
+        en producto del catálogo.
+        `precio_con_igv`: la convención del catálogo es list_price CON IGV (Productos, POS e
+        import lo tratan como precio de vitrina). El payload de EMISIÓN trae el valor unitario
+        SIN IGV (ni ISC): quick_emit pasa False y al crear se repone el impuesto — sin esto el
+        producto auto-creado quedaba ~15% más barato al revenderlo desde el catálogo."""
         Product = self.env["product.product"]
+        # `conceptoLibre`: el usuario dijo que esto NO es un producto, sino el detalle de un
+        # servicio, distinto en cada comprobante ("POR EL SERVICIO DE TRANSPORTE LIMA-JULIACA …
+        # DAM NRO. …"). No hay nada que resolver ni que crear, y se respeta al pie de la letra:
+        # engancharlo a uno del catálogo que se llame igual movería su stock, que es justo lo
+        # que el usuario dijo que no era. Uno por factura, además, volvería basura el catálogo.
+        if ln.get("conceptoLibre"):
+            return Product.browse()
         pid = ln.get("productId")
         if pid:
             prod = Product.browse(int(pid)).exists()
@@ -3038,22 +3787,40 @@ class AccountMove(models.Model):
             found = Product.search([("name", "=", desc)], limit=1)
             if found:
                 return found
-        if not (cod or desc):
+        if not (cod or desc) or not create:
             return Product.browse()
+        precio = float(ln.get("precioUnitario") or 0)
+        if not precio_con_igv and tax and (tax.amount or 0) > 0:
+            # Valor SIN IGV (ni ISC) del payload de emisión → precio de vitrina CON IGV.
+            isc = float(ln.get("isc") or 0)
+            precio = round(precio * (1 + isc / 100.0) * (1 + (tax.amount or 0) / 100.0), 4)
+        uni = (ln.get("unidad") or "").strip()
         vals = {
             "name": desc or cod or "PRODUCTO",
-            "type": "service",
+            "type": self._l10n_pe_ne_tipo_producto(ln.get("tipo"), uni),
             "sale_ok": True,
-            "list_price": float(ln.get("precioUnitario") or 0),
+            "list_price": precio,
+            # is_storable va en False por defecto en Odoo: sin decirlo explícito, el producto
+            # NO llevaría existencias y nunca movería stock. El auto-creado al emitir se queda
+            # sin stock a propósito (nadie eligió); el catálogo lo manda por llevaStock.
+            "is_storable": bool(ln.get("llevaStock")),
+            "tracking": self._l10n_pe_ne_rastreo_producto(ln.get("rastreo")),
+            # use_expiration_date lo agrega product_expiry; solo tiene sentido con rastreo.
+            "use_expiration_date": bool(ln.get("vence")),
+            "l10n_pe_ne_margen": float(ln.get("margen") or 0),
             # company_id del emisor: aísla el producto por RUC (igual que el cliente).
             "company_id": self.env.company.id,
         }
+        # Costo: solo lo trae quien lo conoce (crear desde una línea de compra sabe cuánto se
+        # pagó). Al emitir no viene, y ahí no se toca: el costo de venta no es el de compra.
+        costo = float(ln.get("costo") or 0)
+        if costo > 0:
+            vals["standard_price"] = costo
         if cod:
             vals["default_code"] = cod
         bc = (ln.get("barcode") or "").strip()
         if bc:
             vals["barcode"] = bc
-        uni = (ln.get("unidad") or "").strip()
         if uni:
             vals["l10n_pe_ne_unit_code"] = uni
         if tax:
@@ -3075,6 +3842,24 @@ class AccountMove(models.Model):
             "taxCode": (tax.l10n_pe_edi_tax_code or "1000") if tax else "1000",
             "unidad": p.l10n_pe_ne_unit_code or "",
             "icbper": icbper,
+            # "bien" | "servicio" — el vocabulario del negocio, no el de Odoo (consu/service).
+            # 'combo' no lo usa esta app; si apareciera, se trata como bien (es tangible).
+            "tipo": "servicio" if p.type == "service" else "bien",
+            # ¿Se le llevan existencias? (Odoo: is_storable). Va en False por defecto, así que
+            # SIN esto ningún producto movería stock nunca: es lo que activa _l10n_pe_ne_mover_stock.
+            "llevaStock": bool(p.is_storable),
+            # Existencias actuales. Solo tiene sentido si llevaStock; si no, va en 0 y la UI
+            # muestra un guion (no es "cero unidades", es "no aplica").
+            "stock": p.qty_available if p.is_storable else 0.0,
+            # Costo (con IGV) y margen: lo que hace falta para proponer el precio de venta
+            # cuando una compra trae un costo distinto.
+            "costo": p.standard_price or 0.0,
+            "margen": p.l10n_pe_ne_margen or 0.0,
+            # Rastreo por lote o serie (Odoo: tracking). "lote" agrupa unidades (farmacia,
+            # alimentos); "serie" es un número por unidad (celulares, equipos).
+            "rastreo": {"lot": "lote", "serial": "serie"}.get(p.tracking, "ninguno"),
+            # ¿Los lotes llevan vencimiento? Solo aplica con rastreo por lote/serie.
+            "vence": bool(p.use_expiration_date),
         }
 
     def _l10n_pe_ne_partner_dict(self, p):
@@ -3228,6 +4013,12 @@ class AccountMove(models.Model):
                 "barcode": producto.get("barcode"),
                 "precioUnitario": producto.get("precio"),
                 "unidad": producto.get("unidad"),
+                "tipo": producto.get("tipo"),
+                "llevaStock": producto.get("llevaStock"),
+                "rastreo": producto.get("rastreo"),
+                "vence": producto.get("vence"),
+                "margen": producto.get("margen"),
+                "costo": producto.get("costo"),
             },
             tax,
         )
@@ -3250,6 +4041,20 @@ class AccountMove(models.Model):
             vals["barcode"] = (producto.get("barcode") or "").strip() or False
         if "unidad" in producto:
             vals["l10n_pe_ne_unit_code"] = (producto.get("unidad") or "").strip() or False
+        if producto.get("tipo"):
+            # Solo si viene explícito: aquí NO se deduce de la unidad. Cambiar la unidad de un
+            # producto ya clasificado no debe reclasificarlo a su espalda.
+            vals["type"] = self._l10n_pe_ne_tipo_producto(producto["tipo"])
+        if "llevaStock" in producto:
+            vals["is_storable"] = bool(producto.get("llevaStock"))
+        if "rastreo" in producto:
+            vals["tracking"] = self._l10n_pe_ne_rastreo_producto(producto.get("rastreo"))
+        if producto.get("margen") is not None:
+            vals["l10n_pe_ne_margen"] = float(producto.get("margen") or 0)
+        if producto.get("costo") is not None:
+            vals["standard_price"] = float(producto.get("costo") or 0)
+        if "vence" in producto:
+            vals["use_expiration_date"] = bool(producto.get("vence"))
         if producto.get("precio") is not None:
             vals["list_price"] = float(producto.get("precio") or 0)
         if producto.get("taxCode"):
@@ -3363,6 +4168,64 @@ class AccountMove(models.Model):
         wb.close()
         return {"filename": "plantilla-productos-chaskifact.xlsx",
                 "contentB64": base64.b64encode(buf.getvalue()).decode("ascii")}
+
+    @api.model
+    def l10n_pe_ne_revisar_tipos(self, payload=None):
+        """Propone reclasificar los productos que quedaron como SERVICIO por el default viejo.
+
+        Hasta hace poco todo producto nacía con type='service' —estuviera bien o no—, así que
+        un catálogo existente tiene tornillos declarados como servicios. Y un servicio no
+        lleva stock en Odoo: mientras no se corrijan, esos productos no mueven inventario.
+
+        PROPONE, no decide. La deducción usa la misma regla que la creación
+        (_l10n_pe_ne_tipo_producto: ZZ → servicio, el resto → bien), pero acá puede
+        equivocarse: el formulario trae NIU por defecto, así que una consultora que no lo
+        cambió tiene servicios con NIU y saldrían propuestos como bienes. Por eso se devuelve
+        la lista para que la revise un humano y se aplica solo lo que confirme —
+        `l10n_pe_ne_aplicar_tipos` recibe los ids elegidos, no un "aplicar todo".
+
+        No propone nada sobre `llevaStock`: llevar inventario es una decisión del negocio y
+        no hay señal ninguna que la delate. Se activa producto por producto.
+        """
+        Product = self.env["product.product"]
+        # Solo los 'service': un 'consu' ya fue clasificado (por el usuario o por la regla).
+        sospechosos = Product.search(
+            [("type", "=", "service"), ("company_id", "in", (False, self.env.company.id))],
+            order="name",
+        )
+        propuestas = []
+        for p in sospechosos:
+            uni = p.l10n_pe_ne_unit_code or ""
+            propuesto = self._l10n_pe_ne_tipo_producto(None, uni)
+            if propuesto != "service":
+                propuestas.append({
+                    "id": p.id,
+                    "descripcion": p.name or "",
+                    "codigo": p.default_code or "",
+                    # Sin unidad no significa "servicio": a SUNAT se le declara NIU por
+                    # defecto (DEFAULT_UNIT_CODE), o sea un bien. Se muestra para que el
+                    # usuario juzgue con el mismo dato que usó la regla.
+                    "unidad": uni,
+                    "tipoPropuesto": "bien",
+                })
+        return {
+            "propuestas": propuestas,
+            "total": len(propuestas),
+            "revisados": len(sospechosos),
+        }
+
+    @api.model
+    def l10n_pe_ne_aplicar_tipos(self, payload):
+        """Aplica la reclasificación SOLO a los ids que el usuario confirmó.
+        payload = {ids: [...], tipo: "bien"|"servicio"}."""
+        payload = payload or {}
+        ids = [int(i) for i in (payload.get("ids") or [])]
+        if not ids:
+            return {"actualizados": 0}
+        tipo = self._l10n_pe_ne_tipo_producto(payload.get("tipo") or "bien")
+        prods = self.env["product.product"].browse(ids).exists()
+        prods.write({"type": tipo})
+        return {"actualizados": len(prods)}
 
     @api.model
     def l10n_pe_ne_importar_productos(self, payload):
@@ -3485,7 +4348,10 @@ class AccountMove(models.Model):
                 existing.write(vals)
                 actualizados += 1
             else:
-                vals.update({"default_code": cod, "type": "service",
+                # Tipo deducido de la unidad de la fila (ZZ → servicio, resto → bien): el
+                # Excel no trae columna de tipo y la unidad es la señal que sí trae.
+                vals.update({"default_code": cod,
+                             "type": self._l10n_pe_ne_tipo_producto(unidad=unidad),
                              "sale_ok": True, "company_id": self.env.company.id})
                 Product.create(vals)
                 creados += 1
@@ -3511,6 +4377,18 @@ class AccountMove(models.Model):
             "proveedor": self.partner_id.name or "",
             "ruc": self.partner_id.vat or "",
             "total": self.amount_total or 0.0,
+            # Base e IGV separados: es lo que pide el Registro de Compras y lo que sostiene el
+            # crédito fiscal. Antes la compra iba sin impuesto y solo se guardaba el total.
+            # Redondeado a la moneda: la resta en float da 1.1000000000000005 y ese ruido
+            # llegaría tal cual a la pantalla.
+            "base": self.amount_untaxed or 0.0,
+            "igv": float_round(
+                (self.amount_total or 0.0) - (self.amount_untaxed or 0.0),
+                precision_rounding=self.currency_id.rounding or 0.01,
+            ),
+            "afectacion": (
+                self.invoice_line_ids[:1].tax_ids[:1].l10n_pe_edi_tax_code or "1000"
+            ) if self.invoice_line_ids[:1].tax_ids[:1] else "9998",
             "moneda": self.currency_id.name or "PEN",
             "estado": self.state,
             # Descripción = nombre de la línea (para prefill al editar; la línea de
@@ -3550,11 +4428,252 @@ class AccountMove(models.Model):
         return {"items": items, "total": self.search_count(domain)}
 
     @api.model
+    def l10n_pe_ne_importar_compra_xml(self, payload):
+        """Lee el XML de la factura electrónica del PROVEEDOR y devuelve el payload de una
+        compra, listo para que el usuario lo revise y guarde. NO registra nada.
+
+        El proveedor está obligado a entregar el XML: es el documento fiscal de verdad (el PDF
+        es solo su representación impresa). Leerlo evita teclear —y equivocarse— en el dato
+        que va al Registro de Compras.
+
+        Devuelve, no guarda: el mapeo de productos necesita a un humano (ver abajo) y el
+        usuario debe poder revisar antes de que entre mercadería al kardex.
+        """
+        b64 = (payload or {}).get("xml") or ""
+        try:
+            raw = base64.b64decode(b64)
+        except Exception:
+            raise UserError(_("El archivo no es un XML válido (base64 ilegible)."))
+        return self._l10n_pe_ne_parse_compra_xml(raw)
+
+    @api.model
+    def _l10n_pe_ne_parse_compra_xml(self, raw):
+        """Parseo puro del UBL 2.1 (Invoice/CreditNote) → payload de compra. Sin ORM salvo el
+        match de productos, para poder testearlo con un XML real."""
+        from xml.etree import ElementTree as ET
+
+        try:
+            root = ET.fromstring(raw)
+        except ET.ParseError as e:
+            raise UserError(_("No se pudo leer el XML: %s") % e)
+        # Los tags vienen con namespace; se ignora el prefijo y se busca por nombre local.
+        # Es lo mismo que hace el biller al depurar el XML para el PDF: los namespaces de
+        # SUNAT varían por versión y atarse a ellos rompe con el primer proveedor distinto.
+        def hijos(el, nombre):
+            return [c for c in el if c.tag.rsplit("}", 1)[-1] == nombre] if el is not None else []
+
+        def uno(el, *ruta):
+            cur = el
+            for nombre in ruta:
+                hs = hijos(cur, nombre)
+                if not hs:
+                    return None
+                cur = hs[0]
+            return cur
+
+        def txt(el, *ruta):
+            n = uno(el, *ruta) if ruta else el
+            return (n.text or "").strip() if n is not None and n.text else ""
+
+        if root.tag.rsplit("}", 1)[-1] not in ("Invoice", "CreditNote", "DebitNote"):
+            raise UserError(
+                _("El XML no es un comprobante electrónico (se esperaba Invoice/CreditNote).")
+            )
+        sup = uno(root, "AccountingSupplierParty", "Party")
+        ruc = txt(sup, "PartyIdentification", "ID")
+        razon = txt(sup, "PartyLegalEntity", "RegistrationName") or txt(sup, "PartyName", "Name")
+        if not ruc:
+            raise UserError(_("El XML no trae el RUC del emisor."))
+        doc_id = txt(root, "ID")
+        serie, _sep, numero = doc_id.partition("-")
+        tipo = txt(root, "InvoiceTypeCode") or "01"
+        total = txt(root, "LegalMonetaryTotal", "PayableAmount")
+        igv = ""
+        for tt in hijos(root, "TaxTotal"):
+            igv = txt(tt, "TaxAmount")
+            if igv:
+                break
+
+        lineas = []
+        for ln in hijos(root, "InvoiceLine") + hijos(root, "CreditNoteLine"):
+            item = uno(ln, "Item")
+            cant = txt(ln, "InvoicedQuantity") or txt(ln, "CreditedQuantity")
+            # Precio CON IGV: AlternativeConditionPrice con PriceTypeCode 01 (catálogo 16 de
+            # SUNAT) es el precio unitario que incluye el impuesto — la misma convención que
+            # usa toda la app. cac:Price (sin IGV) NO sirve acá: el detalle se compara contra
+            # el total del documento, que va con IGV.
+            precio = ""
+            for pr in hijos(uno(ln, "PricingReference") or ln, "AlternativeConditionPrice"):
+                if txt(pr, "PriceTypeCode") == "01":
+                    precio = txt(pr, "PriceAmount")
+                    break
+            cod_prov = txt(item, "SellersItemIdentification", "ID")
+            barcode = txt(item, "StandardItemIdentification", "ID")
+            lineas.append({
+                "descripcion": txt(item, "Description"),
+                "cantidad": float(cant or 0),
+                "precioUnitario": float(precio or 0),
+                "codigoProveedor": cod_prov,
+                "barcode": barcode,
+                # El match con NUESTRO catálogo es una propuesta, no un hecho: el proveedor
+                # nombra y codifica los productos a su manera. Sin coincidencia se deja en
+                # None y lo elige el usuario — inventar el mapeo ensuciaría el kardex.
+                "productId": self._l10n_pe_ne_match_producto(barcode, cod_prov),
+            })
+        # Afectación: se LEE del XML (TaxScheme/ID, catálogo 05 de la primera línea), no se
+        # deduce del IGV. Asumir "gravado" en una factura exonerada le inventaría al usuario
+        # un crédito fiscal que no tiene — un error fiscal, no una imprecisión.
+        afect = ""
+        primera = (hijos(root, "InvoiceLine") + hijos(root, "CreditNoteLine"))[:1]
+        if primera:
+            st = uno(primera[0], "TaxTotal", "TaxSubtotal")
+            afect = txt(st, "TaxCategory", "TaxScheme", "ID")
+        return {
+            "proveedor": {"tipoDoc": "6", "numDoc": ruc, "razonSocial": razon},
+            "tipoComprobante": tipo,
+            "serie": serie,
+            "numero": numero.lstrip("0") or numero,
+            "fecha": txt(root, "IssueDate"),
+            "total": float(total or 0),
+            "igv": float(igv or 0),
+            "afectacion": afect or ("1000" if float(igv or 0) > 0 else "9998"),
+            "descripcion": "",
+            "lineas": lineas,
+        }
+
+    @api.model
+    def _l10n_pe_ne_match_producto(self, barcode, codigo):
+        """Propone un producto NUESTRO para una línea del XML del proveedor.
+
+        Por código de barras primero (el GTIN es universal: si coincide, es el mismo producto)
+        y por código propio después (más débil: 'P001' puede ser cualquier cosa en otro
+        catálogo). Sin coincidencia devuelve None y decide el usuario."""
+        Product = self.env["product.product"]
+        if barcode:
+            p = Product.search([("barcode", "=", barcode)], limit=1)
+            if p:
+                return p.id
+        if codigo:
+            p = Product.search([("default_code", "=", codigo)], limit=1)
+            if p:
+                return p.id
+        return None
+
+    @api.model
+    def _l10n_pe_ne_tax_compra_by_code(self, code):
+        """account.tax de COMPRA por código cat-05; default 1000 (IGV gravado).
+
+        Existe aparte del de venta porque el crédito fiscal se imputa con impuestos de
+        compra: usar el de venta metería el IGV en la cuenta equivocada. La localización ya
+        trae los cuatro (IGV 18%, 0% Exo, 0% Ina, 0% Exp)."""
+        return self.env["account.tax"].search(
+            [
+                ("company_id", "=", self.env.company.id),
+                ("type_tax_use", "=", "purchase"),
+                ("l10n_pe_edi_tax_code", "=", code or "1000"),
+            ],
+            limit=1,
+        )
+
+    @api.model
+    def _l10n_pe_ne_base_sin_igv(self, bruto, tax):
+        """Precio CON IGV → base SIN IGV, que es lo que espera `price_unit` con un impuesto
+        tax_excluded (la convención de esta app: el usuario ve y teclea precios con IGV).
+
+        No se redondea a 2: con `round_globally` en la compañía, Odoo calcula el impuesto
+        sobre la base sin redondear y el total vuelve a dar el bruto redondo. Redondear acá
+        rompería justo eso (118 → base 100.00 ✓, pero 7.20 → 6.10 y el total daría 7.198)."""
+        rate = (tax.amount or 0) if tax else 0
+        return (bruto or 0) / (1 + rate / 100.0) if rate else (bruto or 0)
+
+    @api.model
+    def _l10n_pe_ne_compra_lineas(self, compra):
+        """invoice_line_ids de una compra, desde `lineas` si vienen, o la línea única del total.
+
+        El detalle es OPCIONAL a propósito: no toda compra es mercadería (luz, alquiler,
+        servicios), y el flujo de "solo el total" existe para registrar el crédito fiscal sin
+        inventariar nada. Quien necesita kardex, detalla; el resto sigue como siempre.
+        Solo las líneas con producto pueden mover stock (ver _l10n_pe_ne_lineas_con_stock)."""
+        # Afectación del documento (cat-05): 1000 gravado por defecto — es la compra normal.
+        # Va a nivel documento y no por línea: una factura de compra suele ser toda gravada o
+        # toda no gravada (un recibo de servicios, un RH). El caso mixto necesita afectación
+        # por línea y es otra iteración; hoy no hay dato para adivinarlo.
+        tax = self._l10n_pe_ne_tax_compra_by_code(compra.get("afectacion"))
+        tax_ids = [(6, 0, tax.ids if tax else [])]
+        lineas = compra.get("lineas") or []
+        if not lineas:
+            total = float(compra.get("total") or 0)
+            return [
+                (0, 0, {
+                    "name": compra.get("descripcion") or "COMPRA",
+                    "quantity": 1,
+                    # El total va CON IGV: se guarda la base y Odoo repone el impuesto, así
+                    # el Registro de Compras tiene base e IGV separados (antes iba sin
+                    # impuesto y el crédito fiscal no existía).
+                    "price_unit": self._l10n_pe_ne_base_sin_igv(total, tax),
+                    "tax_ids": tax_ids,
+                })
+            ]
+        out = []
+        suma = 0.0
+        for ln in lineas:
+            # create=False: una compra NO da de alta productos en el catálogo. El proveedor
+            # los llama a su manera y crearlos aquí llenaría el catálogo de duplicados; se
+            # elige uno existente desde la UI. Sin producto, la línea es solo un importe.
+            prod = self._l10n_pe_ne_quick_product(ln, create=False)
+            cant = float(ln.get("cantidad") or 0)
+            if cant <= 0:
+                raise UserError(_("Cada línea de la compra necesita una cantidad mayor a 0."))
+            costo = float(ln.get("precioUnitario") or 0)
+            if costo < 0:
+                raise UserError(_("El costo de una línea no puede ser negativo."))
+            suma += cant * costo
+            # El costo de compra se guarda SIEMPRE: es un hecho del documento, no una
+            # opinión — es lo que se pagó. El precio de VENTA solo se toca si el usuario lo
+            # pidió (actualizarPrecio), porque cambiarlo solo movería la etiqueta de la
+            # vitrina sin que nadie se entere.
+            if prod and costo > 0:
+                prod.sudo().standard_price = costo
+                if ln.get("actualizarPrecio"):
+                    prod.sudo().list_price = self._l10n_pe_ne_precio_con_margen(
+                        costo, prod.l10n_pe_ne_margen or None
+                    )
+            vals = {
+                "name": ln.get("descripcion") or (prod.name if prod else "ITEM"),
+                "quantity": cant,
+                # `costo` viene CON IGV (la convención de la app y lo que trae el XML del
+                # proveedor en AlternativeConditionPrice); se guarda la base y Odoo repone
+                # el impuesto. La suma para el cuadre sigue siendo sobre el bruto.
+                "price_unit": self._l10n_pe_ne_base_sin_igv(costo, tax),
+                "tax_ids": tax_ids,
+                # El lote entra con la mercadería: viaja con la línea hasta el movimiento.
+                "l10n_pe_ne_lote": (ln.get("lote") or "").strip() or False,
+                "l10n_pe_ne_vence": ln.get("vence") or False,
+            }
+            if prod:
+                vals["product_id"] = prod.id
+            out.append((0, 0, vals))
+        # El detalle MANDA: la compra se registra por la suma de las líneas y el `total` del
+        # payload queda ignorado. Si no cuadran, lo que entra al Registro de Compras no es lo
+        # que el usuario cree — un error fiscal. Se corta acá y no solo en el front: el
+        # backend es la autoridad y a /ne/api/compras puede llamar cualquiera.
+        total = float(compra.get("total") or 0)
+        if total and abs(suma - total) > 0.01:
+            raise UserError(
+                _(
+                    "El detalle suma %(suma).2f y el total de la compra dice %(total).2f. "
+                    "Deben coincidir."
+                )
+                % {"suma": suma, "total": total}
+            )
+        return out
+
+    @api.model
     def l10n_pe_ne_create_compra(self, compra):
         """Registra una compra (factura de proveedor). payload: {proveedor:{numDoc,
         razonSocial,tipoDoc}, tipoComprobante(cat.10), serie, numero, fecha, total,
-        descripcion, moneda}. Registro simple (línea = total); el IGV/crédito fiscal
-        detallado queda para una iteración posterior."""
+        descripcion, moneda, lineas?}. Sin `lineas` es el registro simple de siempre
+        (línea = total); con `lineas` se detalla por producto y la mercadería ENTRA al stock."""
         compra = compra or {}
         prov = self._l10n_pe_ne_quick_partner(compra.get("proveedor") or {})
         if not prov.supplier_rank:
@@ -3580,18 +4699,7 @@ class AccountMove(models.Model):
             "invoice_date": compra.get("fecha") or fields.Date.context_today(self),
             "ref": doc_num,
             "l10n_latam_document_number": doc_num,
-            "invoice_line_ids": [
-                (
-                    0,
-                    0,
-                    {
-                        "name": compra.get("descripcion") or "COMPRA",
-                        "quantity": 1,
-                        "price_unit": total,
-                        "tax_ids": [(6, 0, [])],
-                    },
-                )
-            ],
+            "invoice_line_ids": self._l10n_pe_ne_compra_lineas(compra),
         }
         moneda = self._l10n_pe_ne_quick_currency(compra.get("moneda"))
         if moneda:
@@ -3607,6 +4715,9 @@ class AccountMove(models.Model):
             vals["l10n_latam_document_type_id"] = dt.id
         move = self.create(vals)
         move.action_post()
+        # La otra mitad del kardex: la mercadería detallada ENTRA al stock. Sin líneas con
+        # producto no mueve nada, así que la compra "solo total" de siempre no cambia.
+        move._l10n_pe_ne_mover_stock_compra()
         return move._l10n_pe_ne_compra_dict()
 
     @api.model
@@ -3796,6 +4907,22 @@ class AccountMove(models.Model):
                 ("l10n_pe_ne_corr_emit", "ilike", q),
             ]
         moves = self.search(domain, order="id desc", limit=limit, offset=offset or 0)
+        # NC vigentes por comprobante en UNA consulta agrupada: la lista marca las
+        # facturas/boletas acreditadas ("tiene NC") sin una búsqueda por fila. Mismo
+        # criterio de "vigente" que _l10n_pe_ne_nc_previas (las en cola cuentan).
+        nc_por_doc = {}
+        if moves:
+            grupos = self.env["account.move"]._read_group(
+                [
+                    ("move_type", "=", "out_refund"),
+                    ("reversed_entry_id", "in", moves.ids),
+                    ("state", "=", "posted"),
+                    ("l10n_pe_biller_state", "not in", ("rechazado", "error", "anulado")),
+                ],
+                groupby=["reversed_entry_id"],
+                aggregates=["__count", "amount_total:sum"],
+            )
+            nc_por_doc = {rev.id: (count, total or 0.0) for rev, count, total in grupos}
         items = [
             {
                 "id": m.id,
@@ -3814,12 +4941,29 @@ class AccountMove(models.Model):
                 if m.create_date
                 else "",
                 "mensaje": m.l10n_pe_biller_message or "",
+                # Notas de crédito vigentes que afectan este comprobante (0 si no tiene).
+                "ncCount": nc_por_doc.get(m.id, (0, 0.0))[0],
+                "ncTotal": round(nc_por_doc.get(m.id, (0, 0.0))[1], 2),
             }
             for m in moves
         ]
         if offset is None:
             return items
         return {"items": items, "total": self.search_count(domain)}
+
+    def _l10n_pe_ne_nc_previas(self):
+        """Notas de crédito VIGENTES que afectan este comprobante: posteadas y no
+        rechazadas/anuladas/con error. Las que siguen en cola (por_enviar/en_proceso)
+        también cuentan, para que dos NC simultáneas no acrediten más que el total."""
+        self.ensure_one()
+        return self.env["account.move"].search(
+            [
+                ("move_type", "=", "out_refund"),
+                ("reversed_entry_id", "=", self.id),
+                ("state", "=", "posted"),
+                ("l10n_pe_biller_state", "not in", ("rechazado", "error", "anulado")),
+            ]
+        )
 
     def l10n_pe_ne_comprobante_detalle(self):
         """Detalle completo de un comprobante para la vista de detalle (cabecera +
@@ -3842,9 +4986,19 @@ class AccountMove(models.Model):
                     "afectacion": afect,
                     "unidad": self._l10n_pe_unit_code(ln),
                     "subtotal": ln.price_subtotal or 0.0,
+                    # El front lo usa para conservar el producto real al espejar una NC
+                    # o al refacturar (post-NC motivo 02).
+                    "productId": ln.product_id.id or None,
                 }
             )
         of, ot, os_, on = self._l10n_pe_ne_ple_origen()
+        # NC previas vigentes (solo aplica a facturas/boletas): el front muestra el saldo
+        # pendiente de acreditar y las notas asociadas al elegir el comprobante a afectar.
+        ncs = (
+            self._l10n_pe_ne_nc_previas()
+            if self.move_type == "out_invoice"
+            else self.env["account.move"]
+        )
         return {
             "id": self.id,
             "tipoDoc": self.l10n_pe_ne_tipo_doc or self._l10n_pe_document_type(),
@@ -3861,6 +5015,18 @@ class AccountMove(models.Model):
             "formaPago": self.l10n_pe_ne_forma_pago or "Contado",
             "docOrigen": ("%s %s-%s" % (ot, os_, on)) if on else "",
             "lineas": lineas,
+            "notasCredito": [
+                {
+                    "id": m.id,
+                    "numero": "%s-%s" % m._l10n_pe_ne_doc_id(),
+                    "total": round(m.amount_total or 0.0, 2),
+                    "estado": m.l10n_pe_biller_state or "",
+                }
+                for m in ncs
+            ],
+            "saldoAcreditable": round(
+                (self.amount_total or 0.0) - sum(ncs.mapped("amount_total")), 2
+            ),
             "totales": {
                 "gravada": round(b["gravado"], 2),
                 "exonerada": round(b["exonerado"], 2),
@@ -4191,6 +5357,29 @@ class AccountMove(models.Model):
                     "La anulación aplica a factura, boleta, nota de crédito y nota de débito."
                 )
             )
+        # Una factura/boleta con NC VIGENTES no se da de baja: la baja anula el documento
+        # COMPLETO y las notas ya acreditaron parte (crédito duplicado), además de dejar
+        # esas NC referenciando un comprobante dado de baja. Primero se anulan las NC,
+        # o se acredita el saldo con otra NC en lugar de la baja.
+        if tipo in ("01", "03"):
+            ncs = self._l10n_pe_ne_nc_previas()
+            if ncs:
+                raise UserError(
+                    _(
+                        "No se puede anular %(doc)s: tiene %(n)d nota(s) de crédito "
+                        "vigente(s) por %(monto)s (%(lista)s). Anularla duplicaría el "
+                        "crédito — anule primero esas notas, o acredite el saldo con "
+                        "una nota de crédito en lugar de la baja."
+                    )
+                    % {
+                        "doc": "%s-%s" % (serie or "", (_corr or "").zfill(8)),
+                        "n": len(ncs),
+                        "monto": "%.2f" % sum(ncs.mapped("amount_total")),
+                        "lista": ", ".join(
+                            "%s-%s" % m._l10n_pe_ne_doc_id() for m in ncs
+                        ),
+                    }
+                )
         # Serie con prefijo B (boleta) / F / S, o numérica: refleja el formato del comprobante emitido.
         if not re.match(r"^([BFS][A-Z0-9]{3}|\d{1,4})$", serie or ""):
             raise UserError(

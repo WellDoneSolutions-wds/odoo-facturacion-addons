@@ -26,10 +26,12 @@ class TestBillerBaja(TransactionCase):
             'l10n_latam_identification_type_id': self.ruc_type.id})
         self.product = self.env['product.product'].create({'name': 'SERVICIO', 'default_code': 'S1'})
 
-    def _factura(self, partner=None):
+    def _factura(self, partner=None, fecha='2026-06-20'):
+        """`fecha` fija por defecto porque varios tests afirman el RA con ella (20260620).
+        Los que prueban OTRA cosa y no quieren pelear con el plazo de baja pasan la de hoy."""
         move = self.env['account.move'].create({
             'move_type': 'out_invoice', 'partner_id': (partner or self.partner).id,
-            'invoice_date': '2026-06-20', 'l10n_pe_serie': 'F001', 'l10n_pe_correlativo': '123',
+            'invoice_date': fecha, 'l10n_pe_serie': 'F001', 'l10n_pe_correlativo': '123',
             'invoice_line_ids': [(0, 0, {'product_id': self.product.id, 'quantity': 1.0,
                                          'price_unit': 500.0, 'tax_ids': [(6, 0, self.igv.ids)]})]})
         move.action_post()
@@ -140,9 +142,10 @@ class TestBillerBaja(TransactionCase):
         _l10n_pe_tributos() ya expone el ICBPER (7152) a nivel cabecera (regla 3279)."""
         if not self.igv:
             self.skipTest("sin IGV 1000 en la localización")
-        icbper = self.env['account.tax'].create({
-            'name': 'ICBPER', 'type_tax_use': 'sale', 'amount_type': 'fixed', 'amount': 0.50,
-            'l10n_pe_edi_tax_code': '7152', 'tax_group_id': self.igv.tax_group_id.id})
+        # Vía el helper de producción, que busca antes de crear: crearlo a pelo revienta
+        # ("Tax names must be unique!") en cualquier BD que ya tenga el ICBPER — que es
+        # justo lo que deja este mismo helper en cuanto se emite una bolsa una vez.
+        icbper = self.env['account.move']._l10n_pe_ne_ensure_icbper_tax()
         cf = self.env['res.partner'].create({'name': 'VARIOS'})
         move = self.env['account.move'].create({
             'move_type': 'out_invoice', 'partner_id': cf.id, 'invoice_date': '2026-06-20',
@@ -171,6 +174,31 @@ class TestBillerBaja(TransactionCase):
         icbper = [t for t in item['tributosDocResumen'] if t['ideTributoRd'] == '7152']
         self.assertEqual(len(icbper), 1, 'ICBPER (7152) duplicado en el RC de emisión (obs 2355)')
 
+    def test_baja_con_nc_vigente_rechaza(self):
+        """Una factura con NC vigentes no se da de baja: la baja anula el documento
+        completo y las notas ya acreditaron parte (crédito duplicado). Las NC en cola
+        (por_enviar/en_proceso) también bloquean; una rechazada deja de contar."""
+        # Fecha de HOY: este test prueba las NC vigentes, no el plazo. Con la fecha fija del
+        # helper (20/06/2026) el test caducó — al pasar 7 días de esa fecha, la última
+        # aserción ("no lanza") empezó a chocar contra la guarda del plazo y falla siempre.
+        hoy = fields.Date.context_today(self)
+        move = self._factura(fecha=hoy)
+        move.l10n_pe_biller_state = 'enviado'
+        move.l10n_pe_ne_baja_motivo = 'ANULAR'
+        nc = self.env['account.move'].create({
+            'move_type': 'out_refund', 'partner_id': self.partner.id,
+            'invoice_date': hoy, 'l10n_pe_serie': 'FC01', 'l10n_pe_correlativo': '9',
+            'reversed_entry_id': move.id,
+            'invoice_line_ids': [(0, 0, {'product_id': self.product.id, 'quantity': 1.0,
+                                         'price_unit': 100.0, 'tax_ids': [(6, 0, self.igv.ids)]})]})
+        nc.action_post()
+        nc.l10n_pe_biller_state = 'en_proceso'       # aún en cola: igual cuenta como vigente
+        with self.assertRaisesRegex(UserError, 'duplicaría el crédito'):
+            move._l10n_pe_check_baja()
+        # La NC rechazada deja de contar: la baja vuelve a proceder.
+        nc.l10n_pe_biller_state = 'rechazado'
+        move._l10n_pe_check_baja()                   # no lanza
+
     def test_baja_fuera_de_plazo_rechaza(self):
         vieja = fields.Date.context_today(self.partner) - timedelta(days=10)
         move = self.env['account.move'].create({
@@ -192,3 +220,31 @@ class TestBillerBaja(TransactionCase):
             move.action_l10n_pe_send_baja()
             p.assert_not_called()                    # un comprobante ya anulado no se reenvía
         self.assertEqual(move.l10n_pe_biller_state, 'anulado')
+
+    # -- Documento afectable por una nota (07/08) --------------------------------------
+    # La baja SÍ acepta notas (una NC se anula comunicando su baja) y comparte con la
+    # emisión el resolvedor del afectado, por eso la guarda del tipo es aparte.
+
+    def test_factura_es_afectable_con_nota(self):
+        self._factura()._l10n_pe_check_afectable_con_nota()   # no lanza
+
+    def test_nota_de_debito_no_es_afectable_con_nota(self):
+        """El tipo sale del cálculo (out_invoice + debit_origin_id = 08)."""
+        factura = self._factura()
+        nd = self.env['account.move'].create({
+            'move_type': 'out_invoice', 'partner_id': self.partner.id,
+            'invoice_date': '2026-06-21', 'l10n_pe_serie': 'F001', 'l10n_pe_correlativo': '124',
+            'debit_origin_id': factura.id,
+            'invoice_line_ids': [(0, 0, {'product_id': self.product.id, 'quantity': 1.0,
+                                         'price_unit': 50.0, 'tax_ids': [(6, 0, self.igv.ids)]})]})
+        self.assertEqual(nd._l10n_pe_document_type(), '08')
+        with self.assertRaises(UserError):           # una nota no se emite sobre otra nota
+            nd._l10n_pe_check_afectable_con_nota()
+
+    def test_nota_de_credito_no_es_afectable_con_nota(self):
+        """El tipo sale del congelado al enviar (l10n_pe_ne_tipo_doc), que es lo que mira
+        la guarda primero — igual que el resto de las guardas de baja."""
+        nc = self._factura()
+        nc.l10n_pe_ne_tipo_doc = '07'
+        with self.assertRaises(UserError):
+            nc._l10n_pe_check_afectable_con_nota()

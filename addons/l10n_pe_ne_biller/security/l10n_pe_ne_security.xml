@@ -19,7 +19,22 @@
             <field name="name">Emisor NE Express</field>
             <field name="implied_ids" eval="[(4, ref('account.group_account_user'))]"/>
             <field name="api_key_duration">365</field>
-            <field name="comment">Puede emitir/anular comprobantes electrónicos y gestionar clientes/productos vía la API de NE Express (controller /ne/api). Hereda el grupo Contable; el aislamiento por RUC lo aplican las reglas multi-compañía nativas.</field>
+            <field name="comment">Puede emitir comprobantes electrónicos y gestionar clientes/productos vía la API de NE Express (controller /ne/api). Hereda el grupo Contable; el aislamiento por RUC lo aplican las reglas multi-compañía nativas. Para anular hace falta además el grupo "Anulación de comprobantes".</field>
+        </record>
+
+        <!--
+            Anular es irreversible y tiene efecto ante SUNAT (RA/RC): se separa de la
+            emisión para que un cajero pueda facturar sin poder dar de baja. IMPLICA el
+            grupo Emisor (quien anula también emite), así que basta con asignar este.
+
+            Los emisores que YA existían conservan la anulación: la migración
+            pre-19.0.1.4.0 los mete en este grupo. Quitárselo es decisión del admin,
+            no un efecto colateral del upgrade.
+        -->
+        <record id="group_l10n_pe_ne_anulacion" model="res.groups">
+            <field name="name">Anulación de comprobantes NE Express</field>
+            <field name="implied_ids" eval="[(4, ref('group_l10n_pe_ne_emisor'))]"/>
+            <field name="comment">Puede comunicar la baja de un comprobante ante SUNAT (RA/RC) vía /ne/api/anular. Implica el grupo Emisor NE Express.</field>
         </record>
 
         <!--

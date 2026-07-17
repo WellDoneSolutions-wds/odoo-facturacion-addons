@@ -114,10 +114,12 @@ class TestCaja(TransactionCase):
         self.Sesion.l10n_pe_ne_abrir_caja({"saldoInicial": 0})
         with self.assertRaisesRegex(UserError, "ingreso o retiro"):
             self.Sesion.l10n_pe_ne_caja_movimiento({"tipo": "otro", "motivo": "x", "monto": 1})
-        with self.assertRaisesRegex(UserError, "necesita un motivo"):
+        with self.assertRaisesRegex(UserError, "al menos 3 caracteres"):
             self.Sesion.l10n_pe_ne_caja_movimiento({"tipo": "ingreso", "motivo": "  ", "monto": 1})
+        # El motivo va con 3+ caracteres a propósito: con uno más corto saltaría la
+        # validación del motivo y este caso nunca llegaría a comprobar el monto.
         with self.assertRaisesRegex(UserError, "mayor a 0"):
-            self.Sesion.l10n_pe_ne_caja_movimiento({"tipo": "ingreso", "motivo": "ok", "monto": 0})
+            self.Sesion.l10n_pe_ne_caja_movimiento({"tipo": "ingreso", "motivo": "caja chica", "monto": 0})
 
     def test_retiro_no_supera_disponible(self):
         # Escenario del reporte: 10 inicial + 323 de ingreso = 333 disponible en efectivo.
@@ -250,6 +252,20 @@ class TestCaja(TransactionCase):
         self.assertEqual(d["ventas"]["total"],
                          round(v_medios.amount_total + v_efec.amount_total + v_cred.amount_total, 2))
 
+    def test_amarre_cuenta_desde_el_cobro(self):
+        """La venta cuenta desde el COBRO (en cola async incluida): con la emisión en
+        'en_proceso' ya aporta al esperado; una rechazada sale del esperado en vivo."""
+        self._caja_fixtures()
+        self._caja_abrir(100)
+        v_cola = self._venta_enviada("1301", medios=[{"medio": "Efectivo", "monto": 50}])
+        v_cola.l10n_pe_biller_state = "en_proceso"     # aún sin CDR de SUNAT
+        v_rech = self._venta_enviada("1302", medios=[{"medio": "Efectivo", "monto": 70}])
+        v_rech.l10n_pe_biller_state = "rechazado"      # falló en definitiva: no cuenta
+        d = self.Sesion.l10n_pe_ne_caja_actual()["sesion"]
+        self.assertEqual(d["ventas"]["count"], 1)
+        esp = {f["medio"]: f["monto"] for f in d["esperado"]}
+        self.assertEqual(esp["Efectivo"], 150.0)       # saldo 100 + venta en cola 50
+
     def test_snapshot_inmutable_bajo_mutacion(self):
         """HU4: el arqueo de una sesión CERRADA lee los snapshots congelados
         (conteos_cierre/ventas_cierre), NO re-consulta las ventas. Se prueba MUTANDO una
@@ -274,7 +290,7 @@ class TestCaja(TransactionCase):
         self.assertEqual(before["ventas"]["count"], 1)
 
         # MUTACIÓN post-cierre: anular la venta amarrada. Una re-consulta la excluiría
-        # (el filtro exige l10n_pe_biller_state == 'enviado'); el snapshot NO debe moverse.
+        # (el filtro descarta rechazado/error/anulado); el snapshot NO debe moverse.
         venta = self.env["account.move"].search(
             [("l10n_pe_correlativo", "=", "1201"), ("company_id", "=", self.company.id)], limit=1)
         self.assertTrue(venta)

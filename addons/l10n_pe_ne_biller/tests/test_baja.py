@@ -172,6 +172,27 @@ class TestBillerBaja(TransactionCase):
         icbper = [t for t in item['tributosDocResumen'] if t['ideTributoRd'] == '7152']
         self.assertEqual(len(icbper), 1, 'ICBPER (7152) duplicado en el RC de emisión (obs 2355)')
 
+    def test_baja_con_nc_vigente_rechaza(self):
+        """Una factura con NC vigentes no se da de baja: la baja anula el documento
+        completo y las notas ya acreditaron parte (crédito duplicado). Las NC en cola
+        (por_enviar/en_proceso) también bloquean; una rechazada deja de contar."""
+        move = self._factura()
+        move.l10n_pe_biller_state = 'enviado'
+        move.l10n_pe_ne_baja_motivo = 'ANULAR'
+        nc = self.env['account.move'].create({
+            'move_type': 'out_refund', 'partner_id': self.partner.id,
+            'invoice_date': '2026-06-21', 'l10n_pe_serie': 'FC01', 'l10n_pe_correlativo': '9',
+            'reversed_entry_id': move.id,
+            'invoice_line_ids': [(0, 0, {'product_id': self.product.id, 'quantity': 1.0,
+                                         'price_unit': 100.0, 'tax_ids': [(6, 0, self.igv.ids)]})]})
+        nc.action_post()
+        nc.l10n_pe_biller_state = 'en_proceso'       # aún en cola: igual cuenta como vigente
+        with self.assertRaisesRegex(UserError, 'duplicaría el crédito'):
+            move._l10n_pe_check_baja()
+        # La NC rechazada deja de contar: la baja vuelve a proceder.
+        nc.l10n_pe_biller_state = 'rechazado'
+        move._l10n_pe_check_baja()                   # no lanza
+
     def test_baja_fuera_de_plazo_rechaza(self):
         vieja = fields.Date.context_today(self.partner) - timedelta(days=10)
         move = self.env['account.move'].create({

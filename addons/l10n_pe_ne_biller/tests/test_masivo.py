@@ -45,7 +45,7 @@ class TestMasivo(EnvioSincronoMixin, TransactionCase):
         super().setUp()
         self.Lote = self.env["l10n_pe_ne.lote"]
         self.Fila = self.env["l10n_pe_ne.lote.fila"]
-        self.company_b = self.env["res.company"].create(
+        self.company_b = self.env["res.company"].with_context(l10n_pe_ne_allow_company_create=True).create(
             {"name": "OTRO RUC SAC", "vat": "20999999991"})
         grp = self.env.ref("l10n_pe_ne_biller.group_l10n_pe_ne_emisor")
         self.user_b = self.env["res.users"].create({
@@ -350,7 +350,7 @@ class TestMasivoHttp(HttpCase):
         self.assertEqual(d["errores"], [])
 
     def test_aislamiento_403(self):
-        company_b = self.env["res.company"].create({"name": "RUC B", "vat": "20999999991"})
+        company_b = self.env["res.company"].with_context(l10n_pe_ne_allow_company_create=True).create({"name": "RUC B", "vat": "20999999991"})
         lote_b = self.env["l10n_pe_ne.lote"].with_company(company_b).create(
             {"name": "b.xlsx", "estado": "validado", "company_id": company_b.id})
         self.assertEqual(self._get("/ne/api/lotes/%s" % lote_b.id).status_code, 403)

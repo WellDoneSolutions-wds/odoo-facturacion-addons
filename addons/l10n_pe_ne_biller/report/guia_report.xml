@@ -59,29 +59,45 @@
                             <tr>
                                 <td style="vertical-align:top; width:50%; padding-right:14px;">
                                     <div style="font-size:10px; text-transform:uppercase; letter-spacing:.08em; color:#334155; font-weight:600; margin-bottom:4px;">Datos del traslado</div>
+                                    <t t-set="chips" t-value="[]"/>
+                                    <t t-if="o.ind_transbordo"><t t-set="chips" t-value="chips + ['Transbordo programado']"/></t>
+                                    <t t-if="o.ind_m1l"><t t-set="chips" t-value="chips + ['Vehículo(s) M1/L']"/></t>
+                                    <t t-if="o.ind_retorno_envases"><t t-set="chips" t-value="chips + ['Retorno con envases vacíos']"/></t>
+                                    <t t-if="o.ind_retorno_vacio"><t t-set="chips" t-value="chips + ['Retorno de vehículo vacío']"/></t>
+                                    <div t-if="chips" style="font-size:9.5px; color:#64748b; font-style:italic; margin-bottom:5px;" t-esc="' · '.join(chips)"/>
+                                    <t t-set="docs_rel" t-value="o.comprobante_ids or o.comprobante_id"/>
                                     <table class="o_ignore_layout_styling" style="width:100%;">
                                         <tr><td style="color:#64748b; padding:2px 0;">Motivo</td><td style="text-align:right;"><span t-field="o.motivo_traslado"/></td></tr>
                                         <tr><td style="color:#64748b; padding:2px 0;">Modalidad</td><td style="text-align:right;"><span t-field="o.modalidad_traslado"/></td></tr>
                                         <tr><td style="color:#64748b; padding:2px 0;">Peso bruto</td><td style="text-align:right;"><span t-esc="'%.3f' % o.peso_bruto"/> <span t-esc="o.uni_medida_peso"/></td></tr>
                                         <tr><td style="color:#64748b; padding:2px 0;">N° de bultos</td><td style="text-align:right;"><span t-esc="o.num_bultos"/></td></tr>
                                         <tr><td style="color:#64748b; padding:2px 0;">Inicio del traslado</td><td style="text-align:right;"><span t-esc="o.fecha_inicio_traslado.strftime('%d/%m/%Y') if o.fecha_inicio_traslado else ''"/></td></tr>
-                                        <tr t-if="o.comprobante_id"><td style="color:#64748b; padding:2px 0;">Comprobante</td><td style="text-align:right;"><span t-esc="'%s-%s' % (o.comprobante_id.l10n_pe_ne_serie_emit or '', o.comprobante_id.l10n_pe_ne_corr_emit or '')"/></td></tr>
+                                        <tr t-if="docs_rel"><td style="color:#64748b; padding:2px 0;"><t t-esc="'Comprobantes' if len(docs_rel) &gt; 1 else 'Comprobante'"/></td><td style="text-align:right;"><t t-foreach="docs_rel" t-as="m"><span t-esc="'%s-%s' % (m.l10n_pe_ne_serie_emit or '', m.l10n_pe_ne_corr_emit or '')"/><t t-if="not m_last">, </t></t></td></tr>
                                     </table>
                                 </td>
                                 <td style="vertical-align:top; width:50%; padding-left:14px;">
                                     <div style="font-size:10px; text-transform:uppercase; letter-spacing:.08em; color:#334155; font-weight:600; margin-bottom:4px;">Transporte</div>
                                     <table class="o_ignore_layout_styling" style="width:100%;">
                                         <t t-if="o.modalidad_traslado == '02'">
-                                            <tr><td style="color:#64748b; padding:2px 0;">Placa</td><td style="text-align:right;" t-esc="o.num_placa or '—'"/></tr>
-                                            <tr><td style="color:#64748b; padding:2px 0;">Conductor</td><td style="text-align:right;"><span t-esc="o.conductor_nombres or ''"/> <span t-esc="o.conductor_apellidos or ''"/></td></tr>
-                                            <tr><td style="color:#64748b; padding:2px 0;">Doc. conductor</td><td style="text-align:right;" t-esc="o.conductor_num_doc or '—'"/></tr>
-                                            <tr><td style="color:#64748b; padding:2px 0;">Licencia</td><td style="text-align:right;" t-esc="o.conductor_licencia or '—'"/></tr>
+                                            <t t-set="veh_ppal" t-value="o._l10n_pe_ne_principal(o.vehiculo_ids)"/>
+                                            <t t-set="cond_ppal" t-value="o._l10n_pe_ne_principal(o.conductor_ids)"/>
+                                            <tr><td style="color:#64748b; padding:2px 0;">Placa</td><td style="text-align:right;" t-esc="(veh_ppal.placa if veh_ppal else o.num_placa) or '—'"/></tr>
+                                            <tr><td style="color:#64748b; padding:2px 0;">Conductor</td><td style="text-align:right;"><span t-esc="(cond_ppal.nombres if cond_ppal else o.conductor_nombres) or ''"/> <span t-esc="(cond_ppal.apellidos if cond_ppal else o.conductor_apellidos) or ''"/></td></tr>
+                                            <tr><td style="color:#64748b; padding:2px 0;">Doc. conductor</td><td style="text-align:right;" t-esc="(cond_ppal.num_doc if cond_ppal else o.conductor_num_doc) or '—'"/></tr>
+                                            <tr><td style="color:#64748b; padding:2px 0;">Licencia</td><td style="text-align:right;" t-esc="(cond_ppal.licencia if cond_ppal else o.conductor_licencia) or '—'"/></tr>
+                                            <tr t-if="veh_ppal and (veh_ppal.ent_autorizacion or veh_ppal.num_autorizacion)"><td style="color:#64748b; padding:2px 0;">Autoriz. vehículo</td><td style="text-align:right;"><span t-esc="veh_ppal.ent_autorizacion or ''"/><t t-if="veh_ppal.ent_autorizacion and veh_ppal.num_autorizacion"> · </t><span t-esc="veh_ppal.num_autorizacion or ''"/></td></tr>
+                                            <t t-set="veh_sec" t-value="o.vehiculo_ids - veh_ppal"/>
+                                            <tr t-if="veh_sec"><td style="color:#64748b; padding:2px 0;">Vehíc. secund.</td><td style="text-align:right;"><t t-foreach="veh_sec" t-as="v"><span t-esc="v.placa"/><t t-if="not v_last">, </t></t></td></tr>
+                                            <t t-set="cond_sec" t-value="o.conductor_ids - cond_ppal"/>
+                                            <tr t-if="cond_sec"><td style="color:#64748b; padding:2px 0;">Conduct. secund.</td><td style="text-align:right;"><t t-foreach="cond_sec" t-as="c"><span t-esc="'%s %s' % (c.nombres, c.apellidos)"/><t t-if="not c_last">, </t></t></td></tr>
                                         </t>
                                         <t t-else="">
                                             <tr><td style="color:#64748b; padding:2px 0;">Transportista</td><td style="text-align:right;" t-esc="o.transportista_id.name or '—'"/></tr>
                                             <tr t-if="o.transportista_id.vat"><td style="color:#64748b; padding:2px 0;">RUC</td><td style="text-align:right;" t-esc="o.transportista_id.vat"/></tr>
                                             <tr><td style="color:#64748b; padding:2px 0;">Registro MTC</td><td style="text-align:right;" t-esc="o.num_reg_mtc or '—'"/></tr>
+                                            <tr t-if="o.fecha_entrega_transportista"><td style="color:#64748b; padding:2px 0;">Entrega al transportista</td><td style="text-align:right;" t-esc="o.fecha_entrega_transportista.strftime('%d/%m/%Y')"/></tr>
                                         </t>
+                                        <tr t-if="o.ent_autorizacion_carga or o.num_autorizacion_carga"><td style="color:#64748b; padding:2px 0;">Autoriz. de carga</td><td style="text-align:right;"><span t-esc="o.ent_autorizacion_carga or ''"/><t t-if="o.ent_autorizacion_carga and o.num_autorizacion_carga"> · </t><span t-esc="o.num_autorizacion_carga or ''"/></td></tr>
                                     </table>
                                 </td>
                             </tr>
@@ -92,13 +108,13 @@
                             <tr>
                                 <td style="width:50%; padding-right:8px; vertical-align:top;">
                                     <div style="background:#f1f5f9; border:1px solid #e2e8f0; border-radius:8px; padding:9px 12px;">
-                                        <div style="font-size:10px; text-transform:uppercase; letter-spacing:.06em; color:#64748b;">Punto de partida <span t-if="o.ubigeo_partida">· <span t-esc="o.ubigeo_partida"/></span></div>
+                                        <div style="font-size:10px; text-transform:uppercase; letter-spacing:.06em; color:#64748b;">Punto de partida <span t-if="o.ubigeo_partida">· <span t-esc="o.ubigeo_partida"/></span><span t-if="o.cod_estab_partida"> · Cód. estab.: <span t-esc="o.cod_estab_partida"/></span></div>
                                         <div t-esc="o.dir_partida or ''"/>
                                     </div>
                                 </td>
                                 <td style="width:50%; padding-left:8px; vertical-align:top;">
                                     <div style="background:#f1f5f9; border:1px solid #e2e8f0; border-radius:8px; padding:9px 12px;">
-                                        <div style="font-size:10px; text-transform:uppercase; letter-spacing:.06em; color:#64748b;">Punto de llegada <span t-if="o.ubigeo_llegada">· <span t-esc="o.ubigeo_llegada"/></span></div>
+                                        <div style="font-size:10px; text-transform:uppercase; letter-spacing:.06em; color:#64748b;">Punto de llegada <span t-if="o.ubigeo_llegada">· <span t-esc="o.ubigeo_llegada"/></span><span t-if="o.cod_estab_llegada"> · Cód. estab.: <span t-esc="o.cod_estab_llegada"/></span></div>
                                         <div t-esc="o.dir_llegada or ''"/>
                                     </div>
                                 </td>

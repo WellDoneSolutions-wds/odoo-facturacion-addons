@@ -11,4 +11,11 @@
       </field>
     </field>
   </record>
+
+  <!-- Modelo multi-DB: 1 empresa = 1 base. Se quitan los botones Crear/Eliminar de
+       la lista de empresas (se conserva ver/editar la empresa propia). El backstop
+       duro es el override de res.company.create en el addon. -->
+  <record id="base.action_res_company_form" model="ir.actions.act_window">
+    <field name="context">{'create': False, 'delete': False}</field>
+  </record>
 </odoo>

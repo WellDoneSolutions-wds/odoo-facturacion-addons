@@ -39,7 +39,7 @@ class TestGuiaNumeracion(TestGuiaBase):
 
     def setUp(self):
         super().setUp()
-        self.company = self.env["res.company"].create(
+        self.company = self.env["res.company"].with_context(l10n_pe_ne_allow_company_create=True).create(
             {"name": "GRE Numeracion SAC", "vat": "20999999992"})
         self.Guia = self.Guia.with_company(self.company)
 
@@ -58,7 +58,7 @@ class TestGuiaNumeracion(TestGuiaBase):
 
     def test_correlativo_por_compania(self):
         self.Guia.create(self._vals())  # T001-1 en la compañía base
-        otra = self.env["res.company"].create({"name": "Otra Empresa SAC", "vat": "20999999991"})
+        otra = self.env["res.company"].with_context(l10n_pe_ne_allow_company_create=True).create({"name": "Otra Empresa SAC", "vat": "20999999991"})
         g = self.Guia.with_company(otra).create(self._vals(company_id=otra.id))
         self.assertEqual(g.name, "T001-1")  # no comparte secuencia entre RUCs
 
@@ -96,7 +96,7 @@ class TestGuiaNumeracion(TestGuiaBase):
 class TestGuiaMultiCompany(TestGuiaBase):
     def test_rule_aisla_companias(self):
         self.Guia.create(self._vals())
-        otra = self.env["res.company"].create({"name": "Otra SAC", "vat": "20999999991"})
+        otra = self.env["res.company"].with_context(l10n_pe_ne_allow_company_create=True).create({"name": "Otra SAC", "vat": "20999999991"})
         user_b = self.env["res.users"].create({
             "name": "Emisor B", "login": "emisor_b_gre",
             "company_id": otra.id, "company_ids": [(6, 0, [otra.id])],
@@ -107,14 +107,14 @@ class TestGuiaMultiCompany(TestGuiaBase):
 
     def test_list_filtra_por_company_activa(self):
         self.Guia.create(self._vals())
-        otra = self.env["res.company"].create({"name": "Otra SAC 2", "vat": "20999999992"})
+        otra = self.env["res.company"].with_context(l10n_pe_ne_allow_company_create=True).create({"name": "Otra SAC 2", "vat": "20999999992"})
         res = self.Guia.with_company(otra).l10n_pe_ne_list_guias(offset=0)
         self.assertEqual(res["total"], 0)
 
     def test_rule_aisla_lineas(self):
         # La rule de las líneas también aísla (no solo la del padre).
         g = self.Guia.create(self._vals())
-        otra = self.env["res.company"].create({"name": "Otra SAC 3", "vat": "20999999993"})
+        otra = self.env["res.company"].with_context(l10n_pe_ne_allow_company_create=True).create({"name": "Otra SAC 3", "vat": "20999999993"})
         user_b = self.env["res.users"].create({
             "name": "Emisor B2", "login": "emisor_b2_gre",
             "company_id": otra.id, "company_ids": [(6, 0, [otra.id])],
@@ -126,7 +126,7 @@ class TestGuiaMultiCompany(TestGuiaBase):
     def test_list_filtra_con_busqueda(self):
         # El ancla de compañía debe sobrevivir cuando hay término de búsqueda (domain +=).
         self.Guia.create(self._vals())
-        otra = self.env["res.company"].create({"name": "Otra SAC 4", "vat": "20999999994"})
+        otra = self.env["res.company"].with_context(l10n_pe_ne_allow_company_create=True).create({"name": "Otra SAC 4", "vat": "20999999994"})
         res = self.Guia.with_company(otra).l10n_pe_ne_list_guias(query="T001", offset=0)
         self.assertEqual(res["total"], 0)
 

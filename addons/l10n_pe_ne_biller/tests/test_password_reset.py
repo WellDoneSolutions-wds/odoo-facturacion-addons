@@ -8,8 +8,8 @@ class TestPasswordReset(TransactionCase):
     def setUpClass(cls):
         super().setUpClass()
         Users = cls.env['res.users']
-        cls.company_a = cls.env['res.company'].create({'name': 'Co A', 'vat': '20000000001'})
-        cls.company_b = cls.env['res.company'].create({'name': 'Co B', 'vat': '20000000002'})
+        cls.company_a = cls.env['res.company'].with_context(l10n_pe_ne_allow_company_create=True).create({'name': 'Co A', 'vat': '20000000001'})
+        cls.company_b = cls.env['res.company'].with_context(l10n_pe_ne_allow_company_create=True).create({'name': 'Co B', 'vat': '20000000002'})
         cls.admin = Users.create({
             'name': 'Admin A', 'login': 'pr_admin_a',
             'company_id': cls.company_a.id, 'company_ids': [(6, 0, [cls.company_a.id])],

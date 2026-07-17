@@ -3408,6 +3408,38 @@ class AccountMove(models.Model):
         }
 
     @api.model
+    def _l10n_pe_ne_margen_default(self):
+        """Margen por defecto del negocio, en %. Configurable en caliente sin redeploy.
+        30% es un punto de partida razonable para el retail peruano, no una verdad: cada
+        negocio lo ajusta, y cada producto puede tener el suyo."""
+        raw = self.env["ir.config_parameter"].sudo().get_param(
+            "l10n_pe_ne.margen_default", "30"
+        )
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            return 30.0
+
+    @api.model
+    def _l10n_pe_ne_precio_con_margen(self, costo, margen):
+        """Costo → precio de venta, ambos CON IGV.
+
+        El margen se aplica sobre el bruto porque toda la app trabaja con precios de vitrina:
+        así el número que sale es el que va en la etiqueta, sin desarmar el impuesto para
+        pensar el negocio. Redondea a 2: es un precio, no una base imponible.
+
+        `margen=None` usa el default del negocio; `margen=0` es un margen de CERO (vender al
+        costo) y se respeta. Se distingue con `is None` a propósito: en Python 0 == False, y
+        un `if not margen` convertiría el 0% en el default — el producto de promoción saldría
+        30% más caro sin que nadie lo pidiera.
+
+        El campo del producto es Float y no distingue "sin margen" de "0%": su 0 significa
+        "usa el default", y quien llama lo traduce a None."""
+        c = float(costo or 0)
+        m = self._l10n_pe_ne_margen_default() if margen is None else float(margen)
+        return round(c * (1 + m / 100.0), 2)
+
+    @api.model
     def _l10n_pe_ne_rastreo_producto(self, rastreo):
         """Rastreo en Odoo: 'lot' | 'serial' | 'none'. La API habla el vocabulario del
         negocio ("lote"/"serie"), no el de Odoo.
@@ -3768,9 +3800,15 @@ class AccountMove(models.Model):
             "tracking": self._l10n_pe_ne_rastreo_producto(ln.get("rastreo")),
             # use_expiration_date lo agrega product_expiry; solo tiene sentido con rastreo.
             "use_expiration_date": bool(ln.get("vence")),
+            "l10n_pe_ne_margen": float(ln.get("margen") or 0),
             # company_id del emisor: aísla el producto por RUC (igual que el cliente).
             "company_id": self.env.company.id,
         }
+        # Costo: solo lo trae quien lo conoce (crear desde una línea de compra sabe cuánto se
+        # pagó). Al emitir no viene, y ahí no se toca: el costo de venta no es el de compra.
+        costo = float(ln.get("costo") or 0)
+        if costo > 0:
+            vals["standard_price"] = costo
         if cod:
             vals["default_code"] = cod
         bc = (ln.get("barcode") or "").strip()
@@ -3806,6 +3844,10 @@ class AccountMove(models.Model):
             # Existencias actuales. Solo tiene sentido si llevaStock; si no, va en 0 y la UI
             # muestra un guion (no es "cero unidades", es "no aplica").
             "stock": p.qty_available if p.is_storable else 0.0,
+            # Costo (con IGV) y margen: lo que hace falta para proponer el precio de venta
+            # cuando una compra trae un costo distinto.
+            "costo": p.standard_price or 0.0,
+            "margen": p.l10n_pe_ne_margen or 0.0,
             # Rastreo por lote o serie (Odoo: tracking). "lote" agrupa unidades (farmacia,
             # alimentos); "serie" es un número por unidad (celulares, equipos).
             "rastreo": {"lot": "lote", "serial": "serie"}.get(p.tracking, "ninguno"),
@@ -3968,6 +4010,8 @@ class AccountMove(models.Model):
                 "llevaStock": producto.get("llevaStock"),
                 "rastreo": producto.get("rastreo"),
                 "vence": producto.get("vence"),
+                "margen": producto.get("margen"),
+                "costo": producto.get("costo"),
             },
             tax,
         )
@@ -3998,6 +4042,10 @@ class AccountMove(models.Model):
             vals["is_storable"] = bool(producto.get("llevaStock"))
         if "rastreo" in producto:
             vals["tracking"] = self._l10n_pe_ne_rastreo_producto(producto.get("rastreo"))
+        if producto.get("margen") is not None:
+            vals["l10n_pe_ne_margen"] = float(producto.get("margen") or 0)
+        if producto.get("costo") is not None:
+            vals["standard_price"] = float(producto.get("costo") or 0)
         if "vence" in producto:
             vals["use_expiration_date"] = bool(producto.get("vence"))
         if producto.get("precio") is not None:
@@ -4573,6 +4621,16 @@ class AccountMove(models.Model):
             if costo < 0:
                 raise UserError(_("El costo de una línea no puede ser negativo."))
             suma += cant * costo
+            # El costo de compra se guarda SIEMPRE: es un hecho del documento, no una
+            # opinión — es lo que se pagó. El precio de VENTA solo se toca si el usuario lo
+            # pidió (actualizarPrecio), porque cambiarlo solo movería la etiqueta de la
+            # vitrina sin que nadie se entere.
+            if prod and costo > 0:
+                prod.sudo().standard_price = costo
+                if ln.get("actualizarPrecio"):
+                    prod.sudo().list_price = self._l10n_pe_ne_precio_con_margen(
+                        costo, prod.l10n_pe_ne_margen or None
+                    )
             vals = {
                 "name": ln.get("descripcion") or (prod.name if prod else "ITEM"),
                 "quantity": cant,

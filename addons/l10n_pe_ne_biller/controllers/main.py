@@ -597,6 +597,19 @@ class L10nPeNeApi(http.Controller):
         except Exception as e:  # noqa: BLE001
             return self._fail(e)
 
+    @http.route("/ne/api/reportes/ple-inventario", **_GET)
+    def ple_inventario(self, periodo=None, **kw):
+        """PLE 12.1 (Inventario Permanente en Unidades Físicas) del periodo YYYYMM.
+
+        ⚠ Estructura pendiente de validación contable (ver la nota en el modelo)."""
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        try:
+            return self._json(self._move(uid).l10n_pe_ne_ple_inventario(periodo))
+        except Exception as e:  # noqa: BLE001
+            return self._fail(e)
+
     @http.route("/ne/api/reportes/rvie-reemplazo", **_GET)
     def rvie_reemplazo(self, periodo=None, **kw):
         """SIRE RVIE — archivo de reemplazo de la propuesta (ZIP) del periodo YYYYMM."""

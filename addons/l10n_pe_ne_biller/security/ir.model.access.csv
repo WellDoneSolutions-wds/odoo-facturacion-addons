@@ -13,3 +13,4 @@ access_ne_emisor_caja_movimiento,ne.emisor.caja.movimiento,model_l10n_pe_ne_caja
 access_ne_emisor_lote,ne.emisor.lote,model_l10n_pe_ne_lote,group_l10n_pe_ne_emisor,1,1,1,1
 access_ne_emisor_lote_fila,ne.emisor.lote.fila,model_l10n_pe_ne_lote_fila,group_l10n_pe_ne_emisor,1,1,1,1
 access_ne_emisor_stock_lot,ne.emisor.stock.lot,stock.model_stock_lot,group_l10n_pe_ne_emisor,1,1,1,0
+access_ne_emisor_stock_move_line,ne.emisor.stock.move.line,stock.model_stock_move_line,group_l10n_pe_ne_emisor,1,0,0,0

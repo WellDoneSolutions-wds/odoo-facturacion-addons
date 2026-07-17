@@ -2982,6 +2982,134 @@ class AccountMove(models.Model):
             "total": sum(moves.mapped("amount_total")),
         }
 
+    # ------------------------------------- PLE 12.1 (inventario en unidades físicas)
+    #
+    # ⚠ ESTRUCTURA PENDIENTE DE VALIDACIÓN CONTABLE, igual que el 8.1: los anexos de SUNAT
+    # con el layout se publican como PDF escaneado. Cada campo va numerado para auditarlo.
+    #
+    # Se hace el de UNIDADES FÍSICAS y NO el valorizado, y no por comodidad: el valorizado
+    # exige el costo de cada movimiento, y con la valorización en `periodic` —el default de
+    # Odoo, el que esta app deja puesto— `stock.move.value` y `price_unit` salen en CERO.
+    # Verificado sobre los movimientos reales de la BD. Inventar ese costo (p. ej. usando el
+    # precio de lista) sería declararle a SUNAT un número que no salió de ningún lado.
+    # Para el valorizado hay que pasar la compañía a valorización perpetua, que cambia los
+    # asientos contables: es una decisión del contador, no un efecto colateral de un reporte.
+
+    @api.model
+    def _l10n_pe_ne_kardex_periodo(self, periodo):
+        """Movimientos de inventario del periodo YYYYMM, ordenados. Solo los que cruzan la
+        frontera del almacén (entradas y salidas reales); los internos no son del kardex."""
+        import calendar
+
+        periodo = (periodo or "").strip()
+        if len(periodo) != 6 or not periodo.isdigit():
+            raise UserError(_("Periodo inválido. Usa YYYYMM (p.ej. 202606)."))
+        year, month = int(periodo[:4]), int(periodo[4:6])
+        if not (1 <= month <= 12):
+            raise UserError(_("Mes inválido en el periodo."))
+        last = calendar.monthrange(year, month)[1]
+        return self.env["stock.move.line"].search(
+            [
+                ("state", "=", "done"),
+                ("company_id", "=", self.env.company.id),
+                ("date", ">=", "%04d-%02d-01 00:00:00" % (year, month)),
+                ("date", "<=", "%04d-%02d-%02d 23:59:59" % (year, month, last)),
+                ("product_id.is_storable", "=", True),
+                # Solo lo que entra o sale del almacén: un traslado interno no es del kardex.
+                "|",
+                ("location_id.usage", "in", ("supplier", "customer", "inventory")),
+                ("location_dest_id.usage", "in", ("supplier", "customer", "inventory")),
+            ],
+            order="date, id",
+        )
+
+    @api.model
+    def _l10n_pe_ne_kardex_linea(self, ml, periodo8, cuo, saldo):
+        """Una línea del PLE 12.1. Campos POSICIONALES separados por '|'."""
+        num = self._l10n_pe_ne_ple_num
+        entra = ml.location_dest_id.usage == "internal"
+        cant = abs(ml.quantity or 0)
+        doc = ml.move_id.l10n_pe_ne_move_id
+        if doc and doc.move_type in ("out_invoice", "out_refund"):
+            # VENTA: la serie/correlativo salen del mismo helper que usa la emisión y la
+            # baja. Partir l10n_latam_document_number por "-" no sirve: en una venta ese
+            # campo trae solo el número, y la serie terminaba llevándose el correlativo.
+            serie = doc.l10n_pe_ne_serie_emit or doc._l10n_pe_serie_correlativo()[0]
+            corr = doc.l10n_pe_ne_corr_emit or doc._l10n_pe_serie_correlativo()[1]
+            tipo = doc.l10n_pe_ne_tipo_doc or doc._l10n_pe_document_type()
+            fecha = doc.invoice_date.strftime("%d/%m/%Y") if doc.invoice_date else ""
+        elif doc:
+            # COMPRA: acá el documento es del proveedor y sí viene como "F001-00095001".
+            serie, _sep, corr = (doc.l10n_latam_document_number or doc.ref or "").partition("-")
+            tipo = (
+                doc.l10n_latam_document_type_id.code
+                if doc.l10n_latam_document_type_id
+                else "01"
+            )
+            fecha = doc.invoice_date.strftime("%d/%m/%Y") if doc.invoice_date else ""
+        else:
+            # Ajuste de inventario: no nace de un comprobante. Tipo 00 = "otros" (tabla 10).
+            serie, corr, tipo = "", "", "00"
+            fecha = ml.date.strftime("%d/%m/%Y") if ml.date else ""
+        p = ml.product_id
+        campos = [
+            periodo8,  # 1  Periodo (AAAAMM00)
+            str(ml.id),  # 2  CUO (único por movimiento)
+            "",  # 3  Nro correlativo del asiento
+            fecha,  # 4  Fecha de emisión del documento
+            tipo,  # 5  Tipo de documento (tabla 10)
+            serie,  # 6  Serie del documento
+            corr,  # 7  Número del documento
+            "01" if entra else "02",  # 8  Tipo de operación (tabla 12): 01 entrada, 02 salida
+            p.default_code or "",  # 9  Código de la existencia
+            "01",  # 10 Tipo de existencia (tabla 5): 01 mercadería
+            (p.name or "")[:100],  # 11 Descripción de la existencia
+            p.l10n_pe_ne_unit_code or "NIU",  # 12 Unidad de medida (tabla 6)
+            "",  # 13 Método de valuación (solo en el valorizado)
+            num(cant) if entra else "0.00",  # 14 Entradas — cantidad
+            "0.00" if entra else num(cant),  # 15 Salidas — cantidad
+            num(saldo),  # 16 Saldo final — cantidad
+            "1",  # 17 Estado (1 = del periodo)
+        ]
+        return "|".join(campos) + "|"
+
+    @api.model
+    def l10n_pe_ne_ple_inventario(self, periodo):
+        """PLE 12.1 (Registro de Inventario Permanente en Unidades Físicas) del periodo.
+
+        ⚠ Estructura pendiente de validación contable (ver la nota del bloque)."""
+        import base64
+        from collections import defaultdict
+
+        periodo = (periodo or "").strip()
+        lineas_ml = self._l10n_pe_ne_kardex_periodo(periodo)
+        periodo8 = periodo + "00"
+        # El saldo se arrastra POR PRODUCTO en el orden de los movimientos: es lo que hace
+        # legible un kardex — cada renglón muestra con cuánto quedó esa existencia.
+        saldos = defaultdict(float)
+        lines = []
+        for i, ml in enumerate(lineas_ml, 1):
+            entra = ml.location_dest_id.usage == "internal"
+            cant = abs(ml.quantity or 0)
+            saldos[ml.product_id.id] += cant if entra else -cant
+            lines.append(
+                self._l10n_pe_ne_kardex_linea(ml, periodo8, i, saldos[ml.product_id.id])
+            )
+        content = ("\r\n".join(lines) + "\r\n") if lines else ""
+        ruc = (self.env.company.vat or "").strip()
+        ind_cont = "1" if lines else "0"
+        # Mismo patrón que el 14.1/8.1, con el código del libro 120100.
+        filename = "LE%s%s00120100%s11.txt" % (ruc, periodo, "1" + ind_cont)
+        return {
+            "filename": filename,
+            "contentB64": base64.b64encode(content.encode("latin-1", "replace")).decode(
+                "ascii"
+            ),
+            "count": len(lines),
+            "periodo": periodo,
+            "total": 0.0,
+        }
+
     @api.model
     def l10n_pe_ne_dashboard(self, periodo=None):
         """Datos del dashboard de ventas del periodo (YYYYMM, default mes actual):
@@ -3462,6 +3590,13 @@ class AccountMove(models.Model):
                 m.quantity = m.product_uom_qty
                 m.picked = True
             moves._action_done()
+            # La fecha del movimiento es la del DOCUMENTO, no la de cuando se registró.
+            # Odoo pone `date` = ahora al validar; sin corregirlo, una compra de marzo
+            # cargada en julio caería en el kardex de julio y el libro del periodo saldría
+            # mal. Se escribe después de _action_done porque antes lo pisa él.
+            if self.invoice_date:
+                moves.write({"date": self.invoice_date})
+                moves.move_line_ids.write({"date": self.invoice_date})
         except Exception as e:  # noqa: BLE001 — el documento ya existe: el stock no lo tumba
             # Se traga a propósito: el comprobante ya es válido ante SUNAT y no puede caerse
             # porque el inventario no cuadre. Pero se deja RASTRO en el documento, no solo en

@@ -3765,6 +3765,13 @@ class AccountMove(models.Model):
         SIN IGV (ni ISC): quick_emit pasa False y al crear se repone el impuesto — sin esto el
         producto auto-creado quedaba ~15% más barato al revenderlo desde el catálogo."""
         Product = self.env["product.product"]
+        # `conceptoLibre`: el usuario dijo que esto NO es un producto, sino el detalle de un
+        # servicio, distinto en cada comprobante ("POR EL SERVICIO DE TRANSPORTE LIMA-JULIACA …
+        # DAM NRO. …"). No hay nada que resolver ni que crear, y se respeta al pie de la letra:
+        # engancharlo a uno del catálogo que se llame igual movería su stock, que es justo lo
+        # que el usuario dijo que no era. Uno por factura, además, volvería basura el catálogo.
+        if ln.get("conceptoLibre"):
+            return Product.browse()
         pid = ln.get("productId")
         if pid:
             prod = Product.browse(int(pid)).exists()

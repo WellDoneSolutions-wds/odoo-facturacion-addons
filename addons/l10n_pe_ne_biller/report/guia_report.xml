@@ -72,7 +72,7 @@
                                         <tr><td style="color:#64748b; padding:2px 0;">Peso bruto</td><td style="text-align:right;"><span t-esc="'%.3f' % o.peso_bruto"/> <span t-esc="o.uni_medida_peso"/></td></tr>
                                         <tr><td style="color:#64748b; padding:2px 0;">N° de bultos</td><td style="text-align:right;"><span t-esc="o.num_bultos"/></td></tr>
                                         <tr><td style="color:#64748b; padding:2px 0;">Inicio del traslado</td><td style="text-align:right;"><span t-esc="o.fecha_inicio_traslado.strftime('%d/%m/%Y') if o.fecha_inicio_traslado else ''"/></td></tr>
-                                        <tr t-if="docs_rel"><td style="color:#64748b; padding:2px 0;"><t t-esc="'Comprobantes' if len(docs_rel) &gt; 1 else 'Comprobante'"/></td><td style="text-align:right;"><t t-foreach="docs_rel" t-as="m"><span t-esc="'%s-%s' % (m.l10n_pe_ne_serie_emit or '', m.l10n_pe_ne_corr_emit or '')"/><t t-if="not m_last">, </t></t></td></tr>
+                                        <tr t-if="docs_rel"><td style="color:#64748b; padding:2px 0;"><t t-esc="'Comprobantes' if len(docs_rel) &gt; 1 else 'Comprobante'"/></td><td style="text-align:right;"><t t-foreach="docs_rel" t-as="m"><span t-esc="o._l10n_pe_ne_comprobante_numero(m)"/><t t-if="not m_last">, </t></t></td></tr>
                                     </table>
                                 </td>
                                 <td style="vertical-align:top; width:50%; padding-left:14px;">

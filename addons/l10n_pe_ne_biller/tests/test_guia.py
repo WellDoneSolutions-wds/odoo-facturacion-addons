@@ -418,3 +418,27 @@ class TestGuiaWizard(TestGuiaBase):
         g = self.Guia.create(self._vals(cod_estab_partida='0000'))
         with self.assertRaisesRegex(UserError, 'RUC de la compañía'):
             g._l10n_pe_ne_build_gre_payload()
+
+    # ------------------------------------------ comprobante no emitido (silent-drop)
+    def test_comprobante_relacionado_no_emitido_rechaza(self):
+        # Un account.move vinculado que nunca pasó por la emisión de este addon (sin
+        # l10n_pe_ne_serie_emit) sería descartado en silencio de docRelacionado por
+        # _l10n_pe_ne_build_gre_payload, mientras el PDF mostraría igual una fila para
+        # él. _l10n_pe_ne_validar debe rechazarlo con un mensaje explícito.
+        igv = self.env['account.tax'].search([
+            ('company_id', '=', self.env.company.id), ('type_tax_use', '=', 'sale'),
+            ('l10n_pe_edi_tax_code', '=', '1000')], limit=1)
+        ruc_type = self.env['l10n_latam.identification.type'].search(
+            [('l10n_pe_vat_code', '=', '6')], limit=1)
+        partner = self.env['res.partner'].create({
+            'name': 'CLIENTE GRE SAC', 'vat': '20605145648',
+            'l10n_latam_identification_type_id': ruc_type.id})
+        move = self.env['account.move'].create({
+            'move_type': 'out_invoice', 'partner_id': partner.id, 'invoice_date': '2026-06-19',
+            'l10n_pe_serie': 'F001', 'l10n_pe_correlativo': '1',
+            'invoice_line_ids': [(0, 0, {'product_id': self.producto.id, 'quantity': 1.0,
+                                         'price_unit': 7.20, 'tax_ids': [(6, 0, igv.ids)]})]})
+        move.action_post()  # posteado pero jamás emitido por este addon: sin serie_emit
+        g = self.Guia.create(self._vals(comprobante_ids=[(6, 0, [move.id])]))
+        with self.assertRaisesRegex(UserError, 'no ha sido emitido'):
+            g._l10n_pe_ne_validar()

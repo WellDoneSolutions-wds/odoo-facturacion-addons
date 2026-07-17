@@ -239,6 +239,16 @@ class L10nPeNeGuiaRemision(models.Model):
         ambigüedad real solo hay si hay MÁS de uno marcado."""
         return recs.filtered('principal')[:1] or recs[:1]
 
+    def _l10n_pe_ne_comprobante_numero(self, m):
+        """'serie-correlativo' de un comprobante relacionado para la representación impresa.
+        Misma cadena de respaldo que `L10nPeNeCotizacion._l10n_pe_ne_comprobante_numero`
+        (l10n_pe_ne_cotizacion.py): serie/correlativo emitidos por este addon si existen,
+        si no la numeración propia del asiento (l10n_pe_serie), y si tampoco hay eso,
+        m.name — nunca un '-' vacío para un comprobante aún no emitido a SUNAT."""
+        serie = m.l10n_pe_ne_serie_emit or m.l10n_pe_serie or ''
+        corr = m.l10n_pe_ne_corr_emit or ''
+        return ('%s-%s' % (serie, corr)) if (serie or corr) else (m.name or '')
+
     def _l10n_pe_ne_build_gre_payload(self):
         """Arma el JSON que espera el biller (`GreRequest`). Claves = campos de GreCabeceraRequest."""
         self.ensure_one()
@@ -394,6 +404,14 @@ class L10nPeNeGuiaRemision(models.Model):
                 and self.fecha_inicio_traslado < self.fecha_emision:
             raise UserError(_('La fecha de inicio del traslado no puede ser anterior a la emisión.'))
         self._l10n_pe_ne_doc_tipo(self.partner_id)  # valida RUC/DNI del destinatario
+        # Un comprobante vinculado sin l10n_pe_ne_serie_emit nunca fue emitido por este
+        # addon: _l10n_pe_ne_build_gre_payload lo descartaría en silencio de docRelacionado
+        # (SUNAT jamás lo vería), mientras el PDF ya mostraría algo para él. Mejor rechazar
+        # acá con un mensaje claro que dejar pasar un documento a medias.
+        for m in (self.comprobante_ids or self.comprobante_id):
+            if not m.l10n_pe_ne_serie_emit:
+                raise UserError(_('El comprobante relacionado %s aún no ha sido emitido a SUNAT.')
+                                % (m.name or m.id))
         if self.motivo_traslado not in SUPPORTED_MOTIVOS:
             raise UserError(_('El motivo de traslado %s aún no soportado para emisión.')
                             % self.motivo_traslado)

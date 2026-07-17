@@ -177,6 +177,26 @@ class TestGuiaValidaciones(TestGuiaBase):
     def test_motivo_compra_sin_proveedor(self):
         self._rechaza("requiere indicar el proveedor", motivo_traslado="02")
 
+    def test_motivo_04_destinatario_distinto_rechaza(self):
+        # SUNAT 2554: el traslado entre establecimientos propios exige destinatario = emisor.
+        self.env.company.vat = "20100190797"
+        self.cliente.vat = "20601030013"  # tercero, distinto al emisor
+        self._rechaza("debe ser tu propia empresa", motivo_traslado="04",
+                      cod_estab_partida="0001", cod_estab_llegada="0002")
+
+    def test_motivo_04_destinatario_emisor_pasa(self):
+        self.env.company.vat = "20100190797"
+        self.cliente.vat = "20100190797"  # mismo RUC que el emisor
+        g = self.Guia.create(self._vals(motivo_traslado="04",
+                                        cod_estab_partida="0001", cod_estab_llegada="0002"))
+        g._l10n_pe_ne_validar()  # no debe levantar
+
+    def test_motivo_venta_destinatario_emisor_rechaza(self):
+        # SUNAT 2555: en Venta el destinatario no puede ser el propio emisor.
+        self.env.company.vat = "20100190797"
+        self.cliente.vat = "20100190797"
+        self._rechaza("no puede ser tu propia empresa", motivo_traslado="01")
+
     def test_privado_conductor_incompleto(self):
         self._rechaza("licencia", conductor_licencia=False)
 

@@ -47,6 +47,14 @@ UNIDADES_PESO = [('KGM', 'Kilogramos'), ('TNE', 'Toneladas')]
 # biller + este set al soportarlos.
 SUPPORTED_MOTIVOS = ('01', '02', '04', '13', '14', '18')
 
+# Relación destinatario ↔ emisor según el motivo (SUNAT 2554/2555):
+#   - traslado interno (compra, entre establecimientos propios, itinerante): el destinatario
+#     DEBE ser la propia empresa (mismo RUC que el emisor).
+#   - venta y afines: el destinatario NO puede ser la propia empresa (debe ser un tercero).
+# Solo se listan los motivos soportados; el resto (p. ej. '13' Otros) no restringe el destinatario.
+MOTIVOS_DEST_ES_EMISOR = ('02', '04', '18')
+MOTIVOS_DEST_NO_EMISOR = ('01', '14')
+
 # Estados desde los que se puede (re)emitir o editar: aún sin CDR aceptado.
 ESTADOS_EMITIBLES = ('borrador', 'error', 'rechazado')
 
@@ -428,6 +436,19 @@ class L10nPeNeGuiaRemision(models.Model):
         if self.motivo_traslado == '04' and not (self.cod_estab_partida and self.cod_estab_llegada):
             raise UserError(_('El motivo "Traslado entre establecimientos de la misma empresa" '
                               'requiere el código de establecimiento en partida y llegada.'))
+        # SUNAT 2554/2555: el destinatario, según el motivo, debe (o no debe) ser el propio
+        # emisor. Se valida acá con un mensaje claro para que el usuario no llegue al rechazo.
+        motivo_txt = dict(MOTIVOS_TRASLADO).get(self.motivo_traslado, self.motivo_traslado)
+        ruc_emisor = (self.company_id.vat or '').strip()
+        ruc_dest = (self.partner_id.vat or '').strip()
+        if self.motivo_traslado in MOTIVOS_DEST_ES_EMISOR:
+            if not (len(ruc_dest) == 11 and ruc_dest == ruc_emisor):
+                raise UserError(_('Para el motivo "%s" el destinatario debe ser tu propia empresa '
+                                  '(el mismo RUC del emisor: %s).') % (motivo_txt, ruc_emisor or '—'))
+        elif self.motivo_traslado in MOTIVOS_DEST_NO_EMISOR:
+            if len(ruc_dest) == 11 and ruc_dest == ruc_emisor:
+                raise UserError(_('Para el motivo "%s" el destinatario no puede ser tu propia empresa '
+                                  '(debe ser un tercero distinto al emisor).') % motivo_txt)
         # Tope SUNAT: máximo 2 vehículos/conductores secundarios por guía (el biller no
         # lo limita — se valida acá). El principal (marcado o el primero) no cuenta.
         if self.vehiculo_ids and len(self.vehiculo_ids - self._l10n_pe_ne_principal(self.vehiculo_ids)) > 2:

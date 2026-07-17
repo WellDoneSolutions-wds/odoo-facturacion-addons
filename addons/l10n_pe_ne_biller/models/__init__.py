@@ -13,3 +13,5 @@ from . import l10n_pe_ne_caja
 from . import l10n_pe_ne_lote
 from . import l10n_pe_ne_flota
 from . import l10n_pe_ne_establecimiento
+
+from . import res_partner

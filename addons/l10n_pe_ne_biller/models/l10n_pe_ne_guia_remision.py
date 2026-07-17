@@ -42,9 +42,10 @@ MODALIDADES_TRASLADO = [
 ]
 UNIDADES_PESO = [('KGM', 'Kilogramos'), ('TNE', 'Toneladas')]
 
-# Motivos cuyo XML el biller sustenta completo hoy. 04 necesita código de establecimiento
-# anexo (AddressTypeCode), 08/09 contenedor/puerto — ampliar biller + este set al soportarlos.
-SUPPORTED_MOTIVOS = ('01', '02', '13', '14', '18')
+# Motivos cuyo XML el biller sustenta completo hoy. 04 exige código de establecimiento
+# propio en ambos puntos (ver _l10n_pe_ne_validar); 08/09 contenedor/puerto — ampliar
+# biller + este set al soportarlos.
+SUPPORTED_MOTIVOS = ('01', '02', '04', '13', '14', '18')
 
 # Estados desde los que se puede (re)emitir o editar: aún sin CDR aceptado.
 ESTADOS_EMITIBLES = ('borrador', 'error', 'rechazado')
@@ -116,8 +117,42 @@ class L10nPeNeGuiaRemision(models.Model):
     dir_llegada = fields.Char(string='Dirección de llegada', required=True)
 
     # Comprobante relacionado (docRelacionado): la factura/boleta que origina el traslado.
+    # comprobante_id se mantiene como "primer documento" por compat con guías/SPA viejas;
+    # comprobante_ids es la lista completa (0..n) que alimenta el docRelacionado real.
     comprobante_id = fields.Many2one('account.move', string='Comprobante relacionado',
                                      copy=False, index=True)
+    comprobante_ids = fields.Many2many('account.move', 'l10n_pe_ne_guia_move_rel',
+                                       'guia_id', 'move_id', string='Comprobantes relacionados',
+                                       copy=False)
+
+    # Indicadores de traslado (booleanos GRE remitente 2.1): '1' en el payload si están
+    # activos, ausentes si no (el biller no acepta 'false'/'0' — ver _l10n_pe_ne_build_gre_payload).
+    ind_transbordo = fields.Boolean(string='Transbordo programado')
+    ind_m1l = fields.Boolean(string='Vehículos categoría M1 o L')
+    ind_retorno_envases = fields.Boolean(string='Retorno con envases vacíos')
+    ind_retorno_vacio = fields.Boolean(string='Retorno de vehículo vacío')
+    fecha_entrega_transportista = fields.Date(
+        string='Entrega de bienes al transportista',
+        help='Modalidad 01 (transporte público): SUNAT la exige (observación 3617).')
+
+    # Establecimientos anexos PROPIOS del emisor como punto de partida/llegada (motivo 04:
+    # traslado entre establecimientos de la misma empresa). El RUC que acompaña al código
+    # en el payload SIEMPRE es el de esta compañía (son establecimientos propios, no de
+    # terceros) — nunca se manda un codEstab* sin su rucEstab* gemelo.
+    cod_estab_partida = fields.Char(string='Cód. establecimiento partida')
+    cod_estab_llegada = fields.Char(string='Cód. establecimiento llegada')
+
+    # Autorización de carga (permiso especial de transporte, catálogo D37 SUNAT).
+    ent_autorizacion_carga = fields.Char(string='Entidad autorización de carga (D37)')
+    num_autorizacion_carga = fields.Char(string='N° autorización de carga')
+
+    # Vehículo(s)/conductor(es) del traslado (transporte privado): uno principal + hasta 2
+    # secundarios de cada uno. Los campos num_placa/conductor_* de arriba siguen siendo el
+    # camino legado de un único vehículo/conductor sin lista — ver _l10n_pe_ne_principal().
+    vehiculo_ids = fields.One2many('l10n_pe_ne.guia_remision.vehiculo', 'guia_id',
+                                   string='Vehículos', copy=True)
+    conductor_ids = fields.One2many('l10n_pe_ne.guia_remision.conductor', 'guia_id',
+                                    string='Conductores', copy=True)
 
     line_ids = fields.One2many('l10n_pe_ne.guia_remision.line', 'guia_id',
                                string='Bienes', copy=True)
@@ -197,6 +232,23 @@ class L10nPeNeGuiaRemision(models.Model):
         raise UserError(_('El documento de "%s" debe ser RUC (11 dígitos) o DNI (8); tiene "%s".')
                         % (partner.display_name, vat or '—'))
 
+    def _l10n_pe_ne_principal(self, recs):
+        """El registro marcado `principal`, o el primero si ninguno lo está (recordset
+        vacío si `recs` está vacío). Se usa igual en el payload y en la validación: una
+        guía con un solo vehículo/conductor sin marcar lo trata como el principal —
+        ambigüedad real solo hay si hay MÁS de uno marcado."""
+        return recs.filtered('principal')[:1] or recs[:1]
+
+    def _l10n_pe_ne_comprobante_numero(self, m):
+        """'serie-correlativo' de un comprobante relacionado para la representación impresa.
+        Misma cadena de respaldo que `L10nPeNeCotizacion._l10n_pe_ne_comprobante_numero`
+        (l10n_pe_ne_cotizacion.py): serie/correlativo emitidos por este addon si existen,
+        si no la numeración propia del asiento (l10n_pe_serie), y si tampoco hay eso,
+        m.name — nunca un '-' vacío para un comprobante aún no emitido a SUNAT."""
+        serie = m.l10n_pe_ne_serie_emit or m.l10n_pe_serie or ''
+        corr = m.l10n_pe_ne_corr_emit or ''
+        return ('%s-%s' % (serie, corr)) if (serie or corr) else (m.name or '')
+
     def _l10n_pe_ne_build_gre_payload(self):
         """Arma el JSON que espera el biller (`GreRequest`). Claves = campos de GreCabeceraRequest."""
         self.ensure_one()
@@ -231,6 +283,34 @@ class L10nPeNeGuiaRemision(models.Model):
                 'numDocProveedor': prov.vat or '',
                 'rznSocialProveedor': prov.name or '',
             })
+        # Indicadores: '1' cuando activos, ausentes cuando no (el biller rechaza 'false'/'0').
+        if self.ind_transbordo:
+            cab['indTransbordoProgDatosEnvio'] = '1'
+        if self.ind_m1l:
+            cab['indTrasladoVehiculoM1L'] = '1'
+        if self.ind_retorno_envases:
+            cab['indRetornoVehiculoEnvaseVacio'] = '1'
+        if self.ind_retorno_vacio:
+            cab['indRetornoVehiculoVacio'] = '1'
+        # Establecimientos propios (motivo 04): el RUC gemelo SIEMPRE es el de esta
+        # compañía — nunca se manda un codEstab* sin su rucEstab* (el biller lo rechaza).
+        # Sin RUC de compañía configurado no hay con qué llenar rucEstab*: mejor fallar acá
+        # con un mensaje claro que mandar el campo vacío al biller (F4).
+        if (self.cod_estab_partida or self.cod_estab_llegada) and not self.company_id.vat:
+            raise UserError(_('Configure el RUC de la compañía antes de emitir con '
+                              'establecimiento propio de partida/llegada.'))
+        if self.cod_estab_partida:
+            cab['codEstabPartida'] = self.cod_estab_partida
+            cab['rucEstabPartida'] = self.company_id.vat
+        if self.cod_estab_llegada:
+            cab['codEstabLlegada'] = self.cod_estab_llegada
+            cab['rucEstabLlegada'] = self.company_id.vat
+        if self.fecha_entrega_transportista:
+            cab['fecEntregaBienesTransportista'] = self.fecha_entrega_transportista.strftime('%Y-%m-%d')
+        if self.ent_autorizacion_carga:
+            cab['entAutorizacionCarga'] = self.ent_autorizacion_carga
+        if self.num_autorizacion_carga:
+            cab['numAutorizacionCarga'] = self.num_autorizacion_carga
         if self.modalidad_traslado == '01':  # transporte público
             t = self.transportista_id
             cab.update({
@@ -239,28 +319,64 @@ class L10nPeNeGuiaRemision(models.Model):
                 'nomTransportista': (t.name or '') if t else '',
                 'numRegMtcTransportista': self.num_reg_mtc or '',
             })
-        else:  # transporte privado
-            cab.update({
-                'numPlacaTransPrivado': self.num_placa or '',
-                'tipDocIdeConductorTransPrivado': self.conductor_tipo_doc or '1',
-                'numDocIdeConductorTransPrivado': self.conductor_num_doc or '',
-                'nomConductorTransPrivado': self.conductor_nombres or '',
-                'apeConductorTransPrivado': self.conductor_apellidos or '',
-                'licConductorTransPrivado': self.conductor_licencia or '',
-            })
+        else:  # transporte privado: el vehículo/conductor PRINCIPAL alimenta las claves
+               # legadas (numPlacaTransPrivado/conductor*); sin lista, valen num_placa/
+               # conductor_* de siempre (compat guías viejas — ver test_compat_legado).
+            veh = self._l10n_pe_ne_principal(self.vehiculo_ids)
+            if veh:
+                cab['numPlacaTransPrivado'] = veh.placa or ''
+                if veh.ent_autorizacion:
+                    cab['entAutorizacionVehiculoPrincipal'] = veh.ent_autorizacion
+                if veh.num_autorizacion:
+                    cab['numAutorizacionVehiculoPrincipal'] = veh.num_autorizacion
+            else:
+                cab['numPlacaTransPrivado'] = self.num_placa or ''
+            cond = self._l10n_pe_ne_principal(self.conductor_ids)
+            if cond:
+                cab.update({
+                    'tipDocIdeConductorTransPrivado': cond.tipo_doc or '1',
+                    'numDocIdeConductorTransPrivado': cond.num_doc or '',
+                    'nomConductorTransPrivado': cond.nombres or '',
+                    'apeConductorTransPrivado': cond.apellidos or '',
+                    'licConductorTransPrivado': cond.licencia or '',
+                })
+            else:
+                cab.update({
+                    'tipDocIdeConductorTransPrivado': self.conductor_tipo_doc or '1',
+                    'numDocIdeConductorTransPrivado': self.conductor_num_doc or '',
+                    'nomConductorTransPrivado': self.conductor_nombres or '',
+                    'apeConductorTransPrivado': self.conductor_apellidos or '',
+                    'licConductorTransPrivado': self.conductor_licencia or '',
+                })
+            secundarios_veh = self.vehiculo_ids - veh
+            if secundarios_veh:
+                cab['vehiculosSecundarios'] = [{
+                    'numPlaca': v.placa or '',
+                    'entAutorizacion': v.ent_autorizacion or '',
+                    'numAutorizacion': v.num_autorizacion or '',
+                } for v in secundarios_veh]
+            secundarios_cond = self.conductor_ids - cond
+            if secundarios_cond:
+                cab['conductoresSecundarios'] = [{
+                    'tipDoc': c.tipo_doc or '1',
+                    'numDoc': c.num_doc or '',
+                    'nombres': c.nombres or '',
+                    'apellidos': c.apellidos or '',
+                    'licencia': c.licencia or '',
+                } for c in secundarios_cond]
         detalle = [{
             'canItem': '%.2f' % (l.cantidad or 0.0),
             'uniMedidaItem': l.unidad or 'NIU',
             'desItem': l.descripcion or (l.product_id.display_name or ''),
             'codItem': (l.product_id.default_code or '') if l.product_id else '',
         } for l in self.line_ids]
-        doc_rel = []
-        if self.comprobante_id and self.comprobante_id.l10n_pe_ne_serie_emit:
-            doc_rel.append({
-                'codTipDocRel': self.comprobante_id.l10n_pe_ne_tipo_doc or '01',
-                'numDocRel': '%s-%s' % (self.comprobante_id.l10n_pe_ne_serie_emit,
-                                        self.comprobante_id.l10n_pe_ne_corr_emit or ''),
-            })
+        # docRelacionado: itera comprobante_ids (lista nueva); sin lista, cae al
+        # comprobante_id legado (compat guías viejas con un único documento).
+        docs = self.comprobante_ids or self.comprobante_id
+        doc_rel = [{
+            'codTipDocRel': m.l10n_pe_ne_tipo_doc or '01',
+            'numDocRel': '%s-%s' % (m.l10n_pe_ne_serie_emit, m.l10n_pe_ne_corr_emit or ''),
+        } for m in docs if m.l10n_pe_ne_serie_emit]
         return {
             'id': {
                 'ruc': self.company_id.vat or '',
@@ -288,28 +404,71 @@ class L10nPeNeGuiaRemision(models.Model):
                 and self.fecha_inicio_traslado < self.fecha_emision:
             raise UserError(_('La fecha de inicio del traslado no puede ser anterior a la emisión.'))
         self._l10n_pe_ne_doc_tipo(self.partner_id)  # valida RUC/DNI del destinatario
+        # Un comprobante vinculado sin l10n_pe_ne_serie_emit nunca fue emitido por este
+        # addon: _l10n_pe_ne_build_gre_payload lo descartaría en silencio de docRelacionado
+        # (SUNAT jamás lo vería), mientras el PDF ya mostraría algo para él. Mejor rechazar
+        # acá con un mensaje claro que dejar pasar un documento a medias.
+        for m in (self.comprobante_ids or self.comprobante_id):
+            if not m.l10n_pe_ne_serie_emit:
+                raise UserError(_('El comprobante relacionado %s aún no ha sido emitido a SUNAT.')
+                                % (m.name or m.id))
         if self.motivo_traslado not in SUPPORTED_MOTIVOS:
             raise UserError(_('El motivo de traslado %s aún no soportado para emisión.')
                             % self.motivo_traslado)
         if self.motivo_traslado == '13' and not (self.des_motivo_traslado or '').strip():
             raise UserError(_('El motivo "Otros" requiere describir el motivo del traslado.'))
-        if self.motivo_traslado == '02' and not self.proveedor_id:
-            raise UserError(_('El motivo "Compra" requiere indicar el proveedor.'))
+        if self.motivo_traslado == '02':
+            if not self.proveedor_id:
+                raise UserError(_('El motivo "Compra" requiere indicar el proveedor.'))
+            if self.cod_estab_partida:
+                # SUNAT 3411: en Compra la partida es del proveedor, no un establecimiento
+                # propio del emisor.
+                raise UserError(_('El motivo "Compra" no admite establecimiento de partida '
+                                  '(la partida es del proveedor, no del emisor).'))
+        if self.motivo_traslado == '04' and not (self.cod_estab_partida and self.cod_estab_llegada):
+            raise UserError(_('El motivo "Traslado entre establecimientos de la misma empresa" '
+                              'requiere el código de establecimiento en partida y llegada.'))
+        # Tope SUNAT: máximo 2 vehículos/conductores secundarios por guía (el biller no
+        # lo limita — se valida acá). El principal (marcado o el primero) no cuenta.
+        if self.vehiculo_ids and len(self.vehiculo_ids - self._l10n_pe_ne_principal(self.vehiculo_ids)) > 2:
+            raise UserError(_('La guía admite máximo 2 vehículos secundarios.'))
+        if self.conductor_ids and len(self.conductor_ids - self._l10n_pe_ne_principal(self.conductor_ids)) > 2:
+            raise UserError(_('La guía admite máximo 2 conductores secundarios.'))
         if self.modalidad_traslado == '02':
-            faltantes = [etiqueta for campo, etiqueta in (
-                ('num_placa', _('la placa del vehículo')),
-                ('conductor_num_doc', _('el documento del conductor')),
-                ('conductor_nombres', _('los nombres del conductor')),
-                ('conductor_apellidos', _('los apellidos del conductor')),
-                ('conductor_licencia', _('la licencia de conducir')),
-            ) if not (self[campo] or '').strip()]
-            if faltantes:
-                raise UserError(_('Transporte privado: falta %s.') % ', '.join(faltantes))
+            if self.ind_m1l:
+                pass  # RS SUNAT: vehículos categoría M1/L no exigen vehículo/conductor
+            else:
+                if len(self.vehiculo_ids.filtered('principal')) > 1:
+                    raise UserError(_('Transporte privado: solo puede haber un vehículo principal.'))
+                if len(self.conductor_ids.filtered('principal')) > 1:
+                    raise UserError(_('Transporte privado: solo puede haber un conductor principal.'))
+                # Completitud exigida en AMBOS lados (vehículo Y conductor), sin importar
+                # qué representación use cada uno (lista nueva o campos legados): antes,
+                # que UN lado tuviera datos (en cualquier representación) bastaba para
+                # saltarse la validación del otro, colando conductor/vehículo vacíos hasta
+                # el biller (F1).
+                veh = self._l10n_pe_ne_principal(self.vehiculo_ids)
+                cond = self._l10n_pe_ne_principal(self.conductor_ids)
+                efectivos = (
+                    (_('la placa del vehículo'), (veh.placa if veh else self.num_placa) or ''),
+                    (_('el documento del conductor'), (cond.num_doc if cond else self.conductor_num_doc) or ''),
+                    (_('los nombres del conductor'), (cond.nombres if cond else self.conductor_nombres) or ''),
+                    (_('los apellidos del conductor'), (cond.apellidos if cond else self.conductor_apellidos) or ''),
+                    (_('la licencia de conducir'), (cond.licencia if cond else self.conductor_licencia) or ''),
+                )
+                faltantes = [etiqueta for etiqueta, valor in efectivos if not valor.strip()]
+                if faltantes:
+                    raise UserError(_('Transporte privado: falta %s.') % ', '.join(faltantes))
         else:
             if not self.transportista_id:
                 raise UserError(_('Transporte público: indica el transportista.'))
             if len((self.transportista_id.vat or '').strip()) != 11:
                 raise UserError(_('El transportista debe tener RUC (11 dígitos).'))
+            if not self.fecha_entrega_transportista:
+                # SUNAT 3617: obligatoria en modalidad 01 (el biller también la exige;
+                # Odoo debe fallar primero con un mensaje amigable).
+                raise UserError(_('Transporte público: indica la fecha de entrega de los '
+                                  'bienes al transportista.'))
 
     def _l10n_pe_ne_extraer_qr_url(self, cdr_bytes):
         """URL del código QR que SUNAT incluye en el CDR aceptado de la GRE. El QR de la
@@ -486,6 +645,28 @@ class L10nPeNeGuiaRemision(models.Model):
             'proveedorId': c.proveedor_id.id if c.proveedor_id else None,
             'proveedor': c.proveedor_id.name if c.proveedor_id else '',
             'comprobanteId': c.comprobante_id.id if c.comprobante_id else None,
+            'comprobanteIds': c.comprobante_ids.ids,
+            # Sibling con número (serie-correlativo) para que el front no tenga que resolver
+            # cada id de comprobanteIds con una consulta aparte (mata el N+1 de la SPA).
+            # comprobanteIds se mantiene tal cual (frozen) — esto es un agregado, no un
+            # reemplazo.
+            'comprobantes': [{'id': m.id, 'numero': c._l10n_pe_ne_comprobante_numero(m)}
+                             for m in (c.comprobante_ids or c.comprobante_id)],
+            'indTransbordo': c.ind_transbordo, 'indM1L': c.ind_m1l,
+            'indRetornoEnvases': c.ind_retorno_envases, 'indRetornoVacio': c.ind_retorno_vacio,
+            'fechaEntregaTransportista': c.fecha_entrega_transportista.strftime('%Y-%m-%d')
+                if c.fecha_entrega_transportista else '',
+            'codEstabPartida': c.cod_estab_partida or '', 'codEstabLlegada': c.cod_estab_llegada or '',
+            'entAutorizacionCarga': c.ent_autorizacion_carga or '',
+            'numAutorizacionCarga': c.num_autorizacion_carga or '',
+            'vehiculos': [{
+                'id': v.id, 'placa': v.placa, 'entAutorizacion': v.ent_autorizacion or '',
+                'numAutorizacion': v.num_autorizacion or '', 'principal': v.principal,
+            } for v in c.vehiculo_ids],
+            'conductores': [{
+                'id': d.id, 'tipoDoc': d.tipo_doc, 'numDoc': d.num_doc, 'nombres': d.nombres,
+                'apellidos': d.apellidos, 'licencia': d.licencia, 'principal': d.principal,
+            } for d in c.conductor_ids],
             'bienes': [{
                 'descripcion': l.descripcion, 'cantidad': l.cantidad, 'unidad': l.unidad or 'NIU',
                 'productId': l.product_id.id or None, 'codigo': l.product_id.default_code or '',
@@ -565,6 +746,12 @@ class L10nPeNeGuiaRemision(models.Model):
                 prod = self.env['product.product'].browse(int(it['productId'])).exists()
                 if prod and not desc:
                     desc = prod.display_name
+            # Una guía traslada bienes, no servicios (main introdujo bien/servicio en el
+            # producto — ver `_l10n_pe_ne_tipo_producto` en account_move_biller.py). Se
+            # valida acá, al capturar la línea, para no descubrirlo recién al emitir.
+            if prod and prod.type == 'service':
+                raise UserError(_('"%s" es un servicio — una guía de remisión solo traslada bienes.')
+                                % prod.display_name)
             if not desc:
                 raise UserError(_('Cada bien necesita una descripción (o un producto).'))
             vals.append((0, 0, {
@@ -588,10 +775,20 @@ class L10nPeNeGuiaRemision(models.Model):
             'numRegMtc': 'num_reg_mtc',
             'ubigeoPartida': 'ubigeo_partida', 'dirPartida': 'dir_partida',
             'ubigeoLlegada': 'ubigeo_llegada', 'dirLlegada': 'dir_llegada',
+            'codEstabPartida': 'cod_estab_partida', 'codEstabLlegada': 'cod_estab_llegada',
+            'entAutorizacionCarga': 'ent_autorizacion_carga',
+            'numAutorizacionCarga': 'num_autorizacion_carga',
         }
         for k, f in strmap.items():
             if k in payload:
                 vals[f] = payload.get(k) or False
+        boolmap = {
+            'indTransbordo': 'ind_transbordo', 'indM1L': 'ind_m1l',
+            'indRetornoEnvases': 'ind_retorno_envases', 'indRetornoVacio': 'ind_retorno_vacio',
+        }
+        for k, f in boolmap.items():
+            if k in payload:
+                vals[f] = bool(payload.get(k))
         if payload.get('pesoBruto') is not None:
             vals['peso_bruto'] = float(payload['pesoBruto'] or 0)
         if payload.get('numBultos') is not None:
@@ -600,11 +797,60 @@ class L10nPeNeGuiaRemision(models.Model):
             vals['fecha_emision'] = payload['fecha']
         if payload.get('fechaInicioTraslado'):
             vals['fecha_inicio_traslado'] = payload['fechaInicioTraslado']
+        if 'fechaEntregaTransportista' in payload:
+            # Partial-PUT: la SPA en modalidad privada manda '' para BORRAR una fecha ya
+            # guardada (antes solo se seteaba cuando venía truthy, y no había forma de
+            # limpiarla). Clave ausente = no tocar (el contrato del resto del método).
+            vals['fecha_entrega_transportista'] = payload.get('fechaEntregaTransportista') or False
         if 'transportistaId' in payload:
             vals['transportista_id'] = int(payload['transportistaId']) if payload.get('transportistaId') else False
         if 'proveedorId' in payload:
             vals['proveedor_id'] = int(payload['proveedorId']) if payload.get('proveedorId') else False
-        if 'comprobanteId' in payload:
+        if 'vehiculos' in payload:
+            # placa es required= en el modelo línea, pero eso solo garantiza NOT NULL en
+            # SQL: un Char required acepta '' sin quejarse. Sin este guard, un vehículo sin
+            # placa se cuela silenciosamente (F2) y llega vacío al biller.
+            veh_vals = []
+            for v in (payload.get('vehiculos') or []):
+                placa = (v.get('placa') or '').strip()
+                if not placa:
+                    raise UserError(_('Cada vehículo necesita la placa.'))
+                veh_vals.append((0, 0, {
+                    'placa': placa,
+                    'ent_autorizacion': v.get('entAutorizacion') or False,
+                    'num_autorizacion': v.get('numAutorizacion') or False,
+                    'principal': bool(v.get('principal')),
+                }))
+            vals['vehiculo_ids'] = [(5, 0, 0)] + veh_vals
+        if 'conductores' in payload:
+            cond_vals = []
+            for c in (payload.get('conductores') or []):
+                num_doc = (c.get('numDoc') or '').strip()
+                nombres = (c.get('nombres') or '').strip()
+                apellidos = (c.get('apellidos') or '').strip()
+                licencia = (c.get('licencia') or '').strip()
+                faltantes = [etiqueta for etiqueta, valor in (
+                    (_('N° de documento'), num_doc), (_('nombres'), nombres),
+                    (_('apellidos'), apellidos), (_('licencia de conducir'), licencia),
+                ) if not valor]
+                if faltantes:
+                    raise UserError(_('Cada conductor necesita %s.') % ', '.join(faltantes))
+                cond_vals.append((0, 0, {
+                    'tipo_doc': c.get('tipoDoc') or '1',
+                    'num_doc': num_doc,
+                    'nombres': nombres,
+                    'apellidos': apellidos,
+                    'licencia': licencia,
+                    'principal': bool(c.get('principal')),
+                }))
+            vals['conductor_ids'] = [(5, 0, 0)] + cond_vals
+        if 'comprobanteIds' in payload:
+            ids = [int(x) for x in (payload.get('comprobanteIds') or [])]
+            vals['comprobante_ids'] = [(6, 0, ids)]
+            # Espejo en el legado comprobante_id (primer documento): guías/SPA viejas
+            # que solo leen comprobanteId siguen funcionando.
+            vals['comprobante_id'] = ids[0] if ids else False
+        elif 'comprobanteId' in payload:
             vals['comprobante_id'] = int(payload['comprobanteId']) if payload.get('comprobanteId') else False
         return vals
 
@@ -690,4 +936,35 @@ class L10nPeNeGuiaRemisionLine(models.Model):
     descripcion = fields.Char(string='Descripción', required=True)
     cantidad = fields.Float(string='Cantidad', default=1.0)
     unidad = fields.Char(string='Unidad (cat. 03)', default='NIU')
+    company_id = fields.Many2one(related='guia_id.company_id', store=True, index=True)
+
+
+class L10nPeNeGuiaRemisionVehiculo(models.Model):
+    _name = 'l10n_pe_ne.guia_remision.vehiculo'
+    _description = 'Vehículo de la guía de remisión'
+    _order = 'principal desc, id'
+
+    guia_id = fields.Many2one('l10n_pe_ne.guia_remision', string='Guía',
+                              required=True, ondelete='cascade', index=True)
+    placa = fields.Char(string='Placa', required=True)
+    ent_autorizacion = fields.Char(string='Entidad de la autorización (cat. D37)')
+    num_autorizacion = fields.Char(string='N° de autorización')
+    principal = fields.Boolean(string='Principal')
+    company_id = fields.Many2one(related='guia_id.company_id', store=True, index=True)
+
+
+class L10nPeNeGuiaRemisionConductor(models.Model):
+    _name = 'l10n_pe_ne.guia_remision.conductor'
+    _description = 'Conductor de la guía de remisión'
+    _order = 'principal desc, id'
+
+    guia_id = fields.Many2one('l10n_pe_ne.guia_remision', string='Guía',
+                              required=True, ondelete='cascade', index=True)
+    tipo_doc = fields.Selection([('1', 'DNI'), ('4', 'Carné ext.'), ('7', 'Pasaporte')],
+                                string='Tipo doc.', default='1', required=True)
+    num_doc = fields.Char(string='N° documento', required=True)
+    nombres = fields.Char(string='Nombres', required=True)
+    apellidos = fields.Char(string='Apellidos', required=True)
+    licencia = fields.Char(string='Licencia de conducir', required=True)
+    principal = fields.Boolean(string='Principal')
     company_id = fields.Many2one(related='guia_id.company_id', store=True, index=True)

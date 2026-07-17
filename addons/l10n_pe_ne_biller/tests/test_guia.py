@@ -167,7 +167,9 @@ class TestGuiaValidaciones(TestGuiaBase):
         self._rechaza("RUC .* o DNI")
 
     def test_motivo_no_soportado(self):
-        self._rechaza("no soportado", motivo_traslado="04")
+        # '04' pasó a SUPPORTED_MOTIVOS (traslado entre establecimientos, ver
+        # TestGuiaWizard/amendment 3c); se usa '08' (Importación), que sigue sin XML.
+        self._rechaza("no soportado", motivo_traslado="08")
 
     def test_motivo_otros_sin_descripcion(self):
         self._rechaza("requiere describir", motivo_traslado="13")
@@ -297,3 +299,220 @@ class TestGuiaQr(TestGuiaBase):
     def test_sin_cdr_no_hay_qr(self):
         g = self.Guia.create(self._vals())
         self.assertEqual(g.l10n_pe_ne_qr_data(), "")
+
+
+class TestGuiaWizard(TestGuiaBase):
+    def _vals_wizard(self, **extra):
+        v = self._vals()
+        v.pop('num_placa', None); v.pop('conductor_num_doc', None)
+        v.update({
+            'vehiculo_ids': [(0, 0, {'placa': 'BET714', 'principal': True,
+                                     'ent_autorizacion': '06', 'num_autorizacion': '00786756'})],
+            'conductor_ids': [(0, 0, {'tipo_doc': '1', 'num_doc': '71958406', 'nombres': 'Hernan',
+                                      'apellidos': 'Vilca', 'licencia': 'U71958406', 'principal': True})],
+            'ind_retorno_vacio': True, 'cod_estab_partida': '0000',
+        })
+        v.update(extra)
+        return v
+
+    def test_payload_wizard_completo(self):
+        g = self.Guia.create(self._vals_wizard(ind_transbordo=True))
+        p = g._l10n_pe_ne_build_gre_payload()
+        cab = p['cabecera']
+        self.assertEqual(cab['indTransbordoProgDatosEnvio'], '1')
+        self.assertEqual(cab['indRetornoVehiculoVacio'], '1')
+        self.assertNotIn('indTrasladoVehiculoM1L', cab)     # apagado = ausente
+        self.assertEqual(cab['codEstabPartida'], '0000')
+        self.assertEqual(cab['numPlacaTransPrivado'], 'BET714')  # principal alimenta el legado
+        self.assertEqual(cab['entAutorizacionVehiculoPrincipal'], '06')
+
+    def test_payload_secundarios(self):
+        v = self._vals_wizard()
+        v['vehiculo_ids'].append((0, 0, {'placa': 'XYZ999', 'principal': False}))
+        v['conductor_ids'].append((0, 0, {'tipo_doc': '1', 'num_doc': '12345678', 'nombres': 'Juan',
+                                          'apellidos': 'Quispe', 'licencia': 'Q12345678', 'principal': False}))
+        g = self.Guia.create(v)
+        p = g._l10n_pe_ne_build_gre_payload()
+        self.assertEqual(p['cabecera']['vehiculosSecundarios'], [
+            {'numPlaca': 'XYZ999', 'entAutorizacion': '', 'numAutorizacion': ''}])
+        self.assertEqual(p['cabecera']['conductoresSecundarios'][0]['numDoc'], '12345678')
+
+    def test_max_dos_secundarios(self):
+        v = self._vals_wizard()
+        for i in range(3):
+            v['vehiculo_ids'].append((0, 0, {'placa': 'S%03d' % i, 'principal': False}))
+        g = self.Guia.create(v)
+        with self.assertRaisesRegex(UserError, 'máximo 2'):
+            g._l10n_pe_ne_validar()
+
+    def test_compat_legado(self):
+        g = self.Guia.create(self._vals())  # payload viejo con num_placa/conductor_*
+        p = g._l10n_pe_ne_build_gre_payload()
+        self.assertEqual(p['cabecera']['numPlacaTransPrivado'], 'ABC123')
+
+    def test_multiples_comprobantes(self):
+        v = self._vals_wizard()
+        g = self.Guia.create(v)
+        d = g.l10n_pe_ne_guia_detalle()
+        self.assertIn('comprobanteIds', d)
+        self.assertIn('vehiculos', d)
+        self.assertTrue(d['vehiculos'][0]['principal'])
+
+    # ---------------------------------------------------- 3a: modalidad 01
+    def test_publico_sin_fecha_entrega_transportista(self):
+        t = self.env['res.partner'].create({'name': 'Transportista GRE', 'vat': '20100190797'})
+        g = self.Guia.create(self._vals(modalidad_traslado='01', transportista_id=t.id))
+        with self.assertRaisesRegex(UserError, 'entrega'):
+            g._l10n_pe_ne_validar()
+
+    # ------------------------------------------------------ 3b: motivo 02
+    def test_compra_con_estab_partida_rechaza(self):
+        prov = self.env['res.partner'].create({'name': 'Proveedor GRE', 'vat': '20507639024'})
+        g = self.Guia.create(self._vals(motivo_traslado='02', proveedor_id=prov.id,
+                                        cod_estab_partida='0001'))
+        with self.assertRaisesRegex(UserError, 'no admite establecimiento'):
+            g._l10n_pe_ne_validar()
+
+    # ------------------------------------------------------ 3c: motivo 04
+    def test_motivo_04_sin_estab_rechaza(self):
+        g = self.Guia.create(self._vals(motivo_traslado='04'))
+        with self.assertRaisesRegex(UserError, 'establecimiento en partida y llegada'):
+            g._l10n_pe_ne_validar()
+
+    def test_motivo_04_con_ambos_estab_pasa(self):
+        # F4: rucEstabPartida/rucEstabLlegada exigen company.vat configurado.
+        self.env.company.vat = '20601030013'
+        g = self.Guia.create(self._vals(motivo_traslado='04', cod_estab_partida='0000',
+                                        cod_estab_llegada='0001'))
+        g._l10n_pe_ne_validar()  # no lanza
+        cab = g._l10n_pe_ne_build_gre_payload()['cabecera']
+        self.assertEqual(cab['rucEstabPartida'], '20601030013')
+        self.assertEqual(cab['rucEstabLlegada'], '20601030013')
+
+    # ---------------------------------------------------- exención M1L
+    def test_m1l_sin_vehiculo_ni_conductor_pasa(self):
+        g = self.Guia.create(self._vals(
+            modalidad_traslado='02', ind_m1l=True,
+            num_placa=False, conductor_num_doc=False, conductor_nombres=False,
+            conductor_apellidos=False, conductor_licencia=False,
+        ))
+        g._l10n_pe_ne_validar()  # no lanza
+
+    # ------------------------------------------------- ambigüedad de principal
+    def test_dos_vehiculos_principales_rechaza(self):
+        v = self._vals_wizard()
+        v['vehiculo_ids'].append((0, 0, {'placa': 'XYZ999', 'principal': True}))
+        g = self.Guia.create(v)
+        with self.assertRaisesRegex(UserError, 'un vehículo principal'):
+            g._l10n_pe_ne_validar()
+
+    # --------------------------------------------------------- F1 regresión
+    def test_conductor_vacio_con_vehiculo_en_lista_rechaza(self):
+        # Antes bastaba con que el LADO vehículo tuviera datos (en cualquier
+        # representación) para que el lado conductor se colara vacío hasta el biller.
+        g = self.Guia.create(self._vals(
+            modalidad_traslado='02',
+            num_placa=False, conductor_num_doc=False, conductor_nombres=False,
+            conductor_apellidos=False, conductor_licencia=False,
+            vehiculo_ids=[(0, 0, {'placa': 'BET714', 'principal': True})],
+        ))
+        with self.assertRaisesRegex(UserError, 'conductor'):
+            g._l10n_pe_ne_validar()
+
+    # --------------------------------------------------------- F2 regresión
+    def test_header_vals_vehiculo_sin_placa_rechaza(self):
+        with self.assertRaisesRegex(UserError, 'placa'):
+            self.Guia._l10n_pe_ne_guia_header_vals({'vehiculos': [{'principal': True}]})
+
+    def test_header_vals_conductor_incompleto_rechaza(self):
+        with self.assertRaisesRegex(UserError, 'conductor'):
+            self.Guia._l10n_pe_ne_guia_header_vals(
+                {'conductores': [{'nombres': 'Juan', 'principal': True}]})
+
+    # --------------------------------------------------------- F4 regresión
+    def test_estab_partida_sin_vat_compania_rechaza(self):
+        self.env.company.vat = False
+        g = self.Guia.create(self._vals(cod_estab_partida='0000'))
+        with self.assertRaisesRegex(UserError, 'RUC de la compañía'):
+            g._l10n_pe_ne_build_gre_payload()
+
+    # ------------------------------------------ comprobante no emitido (silent-drop)
+    def test_comprobante_relacionado_no_emitido_rechaza(self):
+        # Un account.move vinculado que nunca pasó por la emisión de este addon (sin
+        # l10n_pe_ne_serie_emit) sería descartado en silencio de docRelacionado por
+        # _l10n_pe_ne_build_gre_payload, mientras el PDF mostraría igual una fila para
+        # él. _l10n_pe_ne_validar debe rechazarlo con un mensaje explícito.
+        igv = self.env['account.tax'].search([
+            ('company_id', '=', self.env.company.id), ('type_tax_use', '=', 'sale'),
+            ('l10n_pe_edi_tax_code', '=', '1000')], limit=1)
+        ruc_type = self.env['l10n_latam.identification.type'].search(
+            [('l10n_pe_vat_code', '=', '6')], limit=1)
+        partner = self.env['res.partner'].create({
+            'name': 'CLIENTE GRE SAC', 'vat': '20605145648',
+            'l10n_latam_identification_type_id': ruc_type.id})
+        move = self.env['account.move'].create({
+            'move_type': 'out_invoice', 'partner_id': partner.id, 'invoice_date': '2026-06-19',
+            'l10n_pe_serie': 'F001', 'l10n_pe_correlativo': '1',
+            'invoice_line_ids': [(0, 0, {'product_id': self.producto.id, 'quantity': 1.0,
+                                         'price_unit': 7.20, 'tax_ids': [(6, 0, igv.ids)]})]})
+        move.action_post()  # posteado pero jamás emitido por este addon: sin serie_emit
+        g = self.Guia.create(self._vals(comprobante_ids=[(6, 0, [move.id])]))
+        with self.assertRaisesRegex(UserError, 'no ha sido emitido'):
+            g._l10n_pe_ne_validar()
+
+    # --------------------------------------- servicios no se trasladan (post-merge A1)
+    def test_servicio_no_se_traslada(self):
+        # main introdujo bien/servicio en el producto (type: 'consu'/'service'); una guía
+        # solo traslada bienes, así que un servicio en items debe rechazarse al capturar.
+        servicio = self.env['product.product'].create({
+            'name': 'ASESORIA GRE TEST', 'type': 'service'})
+        payload = {
+            'destinatarioId': self.cliente.id,
+            'items': [{'productId': servicio.id, 'cantidad': 1}],
+        }
+        with self.assertRaisesRegex(UserError, 'servicio'):
+            self.Guia.l10n_pe_ne_quick_guia(payload)
+
+    # ------------------------------- clear-on-empty fecha_entrega_transportista (A2)
+    def test_update_fecha_entrega_transportista_vacia_la_limpia(self):
+        t = self.env['res.partner'].create({'name': 'Transp GRE A2', 'vat': '20100190797'})
+        g = self.Guia.create(self._vals(
+            modalidad_traslado='01', transportista_id=t.id,
+            fecha_entrega_transportista='2026-07-10'))
+        self.assertTrue(g.fecha_entrega_transportista)
+        self.Guia.l10n_pe_ne_update_guia({'id': g.id, 'fechaEntregaTransportista': ''})
+        self.assertFalse(g.fecha_entrega_transportista)
+
+    def test_update_sin_la_clave_no_toca_fecha_entrega_transportista(self):
+        t = self.env['res.partner'].create({'name': 'Transp GRE A2b', 'vat': '20100190797'})
+        g = self.Guia.create(self._vals(
+            modalidad_traslado='01', transportista_id=t.id,
+            fecha_entrega_transportista='2026-07-10'))
+        # Partial-PUT: p.ej. PreviewGuia manda solo obsGuia — el resto debe quedar intacto.
+        self.Guia.l10n_pe_ne_update_guia({'id': g.id, 'obsGuia': 'nota'})
+        self.assertEqual(str(g.fecha_entrega_transportista), '2026-07-10')
+
+    # --------------------------------------- detalle con números de comprobantes (A3)
+    def test_detalle_incluye_comprobantes_con_numero(self):
+        igv = self.env['account.tax'].search([
+            ('company_id', '=', self.env.company.id), ('type_tax_use', '=', 'sale'),
+            ('l10n_pe_edi_tax_code', '=', '1000')], limit=1)
+        ruc_type = self.env['l10n_latam.identification.type'].search(
+            [('l10n_pe_vat_code', '=', '6')], limit=1)
+        partner = self.env['res.partner'].create({
+            'name': 'CLIENTE GRE DETALLE', 'vat': '20605145648',
+            'l10n_latam_identification_type_id': ruc_type.id})
+        move = self.env['account.move'].create({
+            'move_type': 'out_invoice', 'partner_id': partner.id, 'invoice_date': '2026-06-19',
+            'l10n_pe_serie': 'F001', 'l10n_pe_correlativo': '77',
+            'invoice_line_ids': [(0, 0, {'product_id': self.producto.id, 'quantity': 1.0,
+                                         'price_unit': 7.20, 'tax_ids': [(6, 0, igv.ids)]})]})
+        move.action_post()
+        g = self.Guia.create(self._vals(comprobante_ids=[(6, 0, [move.id])]))
+        detalle = g.l10n_pe_ne_guia_detalle()
+        self.assertIn('comprobantes', detalle)
+        self.assertIn('comprobanteIds', detalle)  # frozen: sigue ahí, sin tocar
+        self.assertEqual(
+            detalle['comprobantes'],
+            [{'id': move.id, 'numero': g._l10n_pe_ne_comprobante_numero(move)}])
+        self.assertTrue(detalle['comprobantes'][0]['numero'])

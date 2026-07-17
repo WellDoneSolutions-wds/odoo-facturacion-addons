@@ -102,5 +102,44 @@
             <field name="domain_force">[('company_id', 'in', company_ids)]</field>
             <field name="global" eval="True"/>
         </record>
+
+        <!-- Vehículos/conductores PROPIOS de una guía (o2m con flag principal, distinto
+             de los maestros "frecuentes" l10n_pe_ne.vehiculo/conductor de más abajo). -->
+        <record id="rule_l10n_pe_ne_guia_vehiculo_company" model="ir.rule">
+            <field name="name">Vehículo de guía: multi-compañía</field>
+            <field name="model_id" ref="model_l10n_pe_ne_guia_remision_vehiculo"/>
+            <field name="domain_force">[('company_id', 'in', company_ids)]</field>
+            <field name="global" eval="True"/>
+        </record>
+        <record id="rule_l10n_pe_ne_guia_conductor_company" model="ir.rule">
+            <field name="name">Conductor de guía: multi-compañía</field>
+            <field name="model_id" ref="model_l10n_pe_ne_guia_remision_conductor"/>
+            <field name="domain_force">[('company_id', 'in', company_ids)]</field>
+            <field name="global" eval="True"/>
+        </record>
+
+        <!-- Aislamiento multi-compañía para los maestros frecuentes de la GRE
+             (vehículos y conductores): mismo patrón que guía de remisión. -->
+        <record id="rule_l10n_pe_ne_vehiculo_company" model="ir.rule">
+            <field name="name">Vehículo frecuente NE Express: aislamiento por compañía</field>
+            <field name="model_id" ref="model_l10n_pe_ne_vehiculo"/>
+            <field name="domain_force">[('company_id', 'in', company_ids)]</field>
+            <field name="global" eval="True"/>
+        </record>
+        <record id="rule_l10n_pe_ne_conductor_company" model="ir.rule">
+            <field name="name">Conductor frecuente NE Express: aislamiento por compañía</field>
+            <field name="model_id" ref="model_l10n_pe_ne_conductor"/>
+            <field name="domain_force">[('company_id', 'in', company_ids)]</field>
+            <field name="global" eval="True"/>
+        </record>
+
+        <!-- Aislamiento multi-compañía para los establecimientos anexos del
+             emisor (GRE): mismo patrón que vehículo/conductor. -->
+        <record id="rule_l10n_pe_ne_establecimiento_company" model="ir.rule">
+            <field name="name">Establecimiento NE Express: aislamiento por compañía</field>
+            <field name="model_id" ref="model_l10n_pe_ne_establecimiento"/>
+            <field name="domain_force">[('company_id', 'in', company_ids)]</field>
+            <field name="global" eval="True"/>
+        </record>
     </data>
 </odoo>

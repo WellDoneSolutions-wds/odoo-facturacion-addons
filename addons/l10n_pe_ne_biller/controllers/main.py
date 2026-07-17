@@ -157,6 +157,14 @@ class L10nPeNeApi(http.Controller):
         u = self._user(uid)
         return request.env["l10n_pe_ne.guia_remision"].with_user(uid).with_company(u.company_id)
 
+    def _flota(self, uid, model):
+        u = self._user(uid)
+        return request.env[model].with_user(uid).with_company(u.company_id)
+
+    def _estab(self, uid):
+        u = self._user(uid)
+        return request.env["l10n_pe_ne.establecimiento"].with_user(uid).with_company(u.company_id)
+
     def _caja(self, uid):
         u = self._user(uid)
         return request.env["l10n_pe_ne.caja.sesion"].with_user(uid).with_company(u.company_id)
@@ -842,6 +850,18 @@ class L10nPeNeApi(http.Controller):
             return self._unauth()
         return self._run(lambda: self._move(uid).l10n_pe_ne_delete_cliente(int(rec_id)))
 
+    @http.route("/ne/api/clientes/<int:partner_id>/direcciones", **_GET)
+    def cliente_direcciones(self, partner_id, **kw):
+        """Direcciones registradas del cliente (principal + hijas delivery/other)
+        para poblar el punto de llegada del wizard de la GRE sin tipear a mano."""
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        try:
+            return self._json(self._estab(uid).l10n_pe_ne_direcciones_partner(partner_id))
+        except Exception as e:  # noqa: BLE001
+            return self._fail(e)
+
     # ------------------------------------------------ clientes: lookup externo
     # Reutiliza el motor del addon l10n_pe_partner_lookup (búsqueda por DNI/RUC en
     # API HTTP / DynamoDB / SUNAT) SIN duplicarlo. Integración OPCIONAL: si ese
@@ -1250,6 +1270,101 @@ class L10nPeNeApi(http.Controller):
             )
         except Exception as e:  # noqa: BLE001
             return self._fail(e)
+
+    # ------------------------------------------------- maestros frecuentes (GRE)
+    # Vehículos y conductores 'frecuentes' que el wizard de guías reutiliza al
+    # emitir (mismo criterio que el wizard de SUNAT: se guardan al usarlos).
+    @http.route("/ne/api/vehiculos", **_GET)
+    def list_vehiculos(self, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        try:
+            return self._json(self._flota(uid, "l10n_pe_ne.vehiculo").l10n_pe_ne_list())
+        except Exception as e:  # noqa: BLE001
+            return self._fail(e)
+
+    @http.route("/ne/api/vehiculos", **_POST)
+    def upsert_vehiculo(self, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(
+            lambda: self._flota(uid, "l10n_pe_ne.vehiculo")
+            .l10n_pe_ne_upsert(self._body())
+            ._l10n_pe_ne_dict()
+        )
+
+    @http.route("/ne/api/vehiculos/<int:rec_id>", **_DEL)
+    def delete_vehiculo(self, rec_id, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(
+            lambda: self._flota(uid, "l10n_pe_ne.vehiculo")
+            .l10n_pe_ne_delete_vehiculo(rec_id)
+        )
+
+    @http.route("/ne/api/conductores", **_GET)
+    def list_conductores(self, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        try:
+            return self._json(self._flota(uid, "l10n_pe_ne.conductor").l10n_pe_ne_list())
+        except Exception as e:  # noqa: BLE001
+            return self._fail(e)
+
+    @http.route("/ne/api/conductores", **_POST)
+    def upsert_conductor(self, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(
+            lambda: self._flota(uid, "l10n_pe_ne.conductor")
+            .l10n_pe_ne_upsert(self._body())
+            ._l10n_pe_ne_dict()
+        )
+
+    @http.route("/ne/api/conductores/<int:rec_id>", **_DEL)
+    def delete_conductor(self, rec_id, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(
+            lambda: self._flota(uid, "l10n_pe_ne.conductor")
+            .l10n_pe_ne_delete_conductor(rec_id)
+        )
+
+    # Establecimientos anexos del emisor: SIEMPRE incluye primero el domicilio
+    # fiscal (código '0000') derivado de la compañía, luego los propios creados.
+    @http.route("/ne/api/establecimientos", **_GET)
+    def list_establecimientos(self, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        try:
+            return self._json(self._estab(uid).l10n_pe_ne_list())
+        except Exception as e:  # noqa: BLE001
+            return self._fail(e)
+
+    @http.route("/ne/api/establecimientos", **_POST)
+    def upsert_establecimiento(self, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(
+            lambda: self._estab(uid).l10n_pe_ne_upsert(self._body())._l10n_pe_ne_dict()
+        )
+
+    @http.route("/ne/api/establecimientos/<int:rec_id>", **_DEL)
+    def delete_establecimiento(self, rec_id, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(
+            lambda: self._estab(uid).l10n_pe_ne_delete_establecimiento(rec_id)
+        )
 
     # ------------------------------------------------------------------- caja
     @http.route("/ne/api/caja", **_GET)

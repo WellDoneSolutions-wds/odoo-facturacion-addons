@@ -19,3 +19,9 @@ class TestEstablecimientos(TransactionCase):
         self.assertEqual(len(dirs), 2)
         self.assertEqual(dirs[0]["direccion"], "Jr. Bolognesi 125, Miraflores")
         self.assertEqual(dirs[1]["tipo"], "delivery")
+
+    def test_upsert_rechaza_codigo_reservado(self):
+        from odoo.exceptions import UserError
+        with self.assertRaisesRegex(UserError, 'domicilio fiscal'):
+            self.env["l10n_pe_ne.establecimiento"].l10n_pe_ne_upsert(
+                {"codigo": "0000", "ubigeo": "150101", "direccion": "X"})

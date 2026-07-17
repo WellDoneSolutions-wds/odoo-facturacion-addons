@@ -1,6 +1,7 @@
 """Establecimientos anexos del emisor (código SUNAT de 4 dígitos) y direcciones
 registradas de los clientes — los 'puntos' del wizard de SUNAT sin tipear a mano."""
-from odoo import api, fields, models
+from odoo import _, api, fields, models
+from odoo.exceptions import UserError
 
 
 class L10nPeNeEstablecimiento(models.Model):
@@ -41,6 +42,8 @@ class L10nPeNeEstablecimiento(models.Model):
     @api.model
     def l10n_pe_ne_upsert(self, payload):
         codigo = (payload.get('codigo') or '').strip()
+        if codigo == '0000':
+            raise UserError(_("El código '0000' es el domicilio fiscal (automático); use otro código."))
         rec = self.search([('codigo', '=', codigo), ('company_id', '=', self.env.company.id)], limit=1)
         vals = {'codigo': codigo, 'ubigeo': payload.get('ubigeo') or '',
                 'direccion': payload.get('direccion') or ''}

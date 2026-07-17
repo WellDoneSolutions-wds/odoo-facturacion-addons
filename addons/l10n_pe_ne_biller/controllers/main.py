@@ -862,6 +862,36 @@ class L10nPeNeApi(http.Controller):
         except Exception as e:  # noqa: BLE001
             return self._fail(e)
 
+    @http.route("/ne/api/clientes/<int:partner_id>/direcciones", **_POST)
+    def crear_direccion_cliente(self, partner_id, **kw):
+        """Crea una dirección adicional (hija) del cliente, atada a un distrito."""
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(
+            lambda: self._estab(uid).l10n_pe_ne_crear_direccion(partner_id, self._body())
+        )
+
+    @http.route("/ne/api/clientes/<int:partner_id>/direcciones/<int:addr_id>", **_PUT)
+    def editar_direccion_cliente(self, partner_id, addr_id, **kw):
+        """Edita una dirección (hija) existente del cliente."""
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(
+            lambda: self._estab(uid).l10n_pe_ne_editar_direccion(addr_id, self._body())
+        )
+
+    @http.route("/ne/api/clientes/<int:partner_id>/direcciones/<int:addr_id>", **_DEL)
+    def eliminar_direccion_cliente(self, partner_id, addr_id, **kw):
+        """Elimina (archiva) una dirección (hija) del cliente."""
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(
+            lambda: self._estab(uid).l10n_pe_ne_eliminar_direccion(addr_id)
+        )
+
     # ------------------------------------------------ clientes: lookup externo
     # Reutiliza el motor del addon l10n_pe_partner_lookup (búsqueda por DNI/RUC en
     # API HTTP / DynamoDB / SUNAT) SIN duplicarlo. Integración OPCIONAL: si ese

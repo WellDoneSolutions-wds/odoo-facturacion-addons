@@ -158,9 +158,28 @@ class TestOrdenTrabajo(TransactionCase):
 
     def test_entregada_sin_comprobante_bloqueada_a_nivel_modelo(self):
         # cierra el hueco de un write RPC directo que salte cobrar_saldo: 'entregada' exige factura.
+        # con el flag (simula un método interno erróneo) el write() guard no aplica -> salta la constraint.
         orden = self._orden(estado="terminada")
         with self.assertRaises(ValidationError):
-            orden.write({"estado": "entregada"})   # sin factura_final_id -> ValidationError
+            orden.with_context(l10n_pe_ne_flujo_ok=True).write({"estado": "entregada"})
+
+    # ── blindaje de la máquina de estados (iter 7) ──────────────────────────────
+    def test_estado_no_por_write_rpc_directo(self):
+        # un usuario real NO cambia estado por un write directo (se saltaría _avanzar: grupo, toma,
+        # guarda, gate, reglas duras). Solo por las acciones del flujo.
+        orden = self._orden()  # borrador
+        cajero = self._user("caj_blind_ot", ["l10n_pe_ne_roles.group_l10n_pe_ne_caja"])
+        with self.assertRaisesRegex(UserError, "no escribiéndolo directamente"):
+            orden.with_user(cajero).write({"estado": "terminada"})
+
+    def test_estado_no_por_create_rpc_directo(self):
+        # un documento nuevo NACE en su estado inicial; no se crea directamente en uno avanzado.
+        cajero = self._user("caj_crea_ot", ["l10n_pe_ne_roles.group_l10n_pe_ne_caja"])
+        with self.assertRaisesRegex(UserError, "nace en su estado inicial"):
+            self.Orden.with_user(cajero).create({
+                "partner_id": self.cliente.id, "estado": "terminada",
+                "linea_ids": [(0, 0, {"descripcion": "x", "cantidad": 1.0, "precio_unitario": 10.0})],
+            })
 
     # ── payload de emisión: IGV + medios = SOLO el saldo (no re-cuenta el adelanto) ──
     def test_payload_convierte_igv(self):

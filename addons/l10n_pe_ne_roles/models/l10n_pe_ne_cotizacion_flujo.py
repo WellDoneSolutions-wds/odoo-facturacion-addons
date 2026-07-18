@@ -121,7 +121,8 @@ class L10nPeNeCotizacionFlujo(models.Model):
         Idempotente. Corre como sistema (bypass del eje grupo vía escritura directa del estado)."""
         for cot in self.search([("estado", "in", ("aceptada", "enviada"))]):
             if cot._l10n_pe_ne_vencida():
-                cot.write({"estado": "vencida"})
+                # Escritura de estado AUTORIZADA (vencimiento por realidad, no por RPC de un usuario).
+                cot.with_context(l10n_pe_ne_flujo_ok=True).write({"estado": "vencida"})
 
     # ───────────────────────────────────────────── eje despacho
     def _l10n_pe_ne_tiene_despacho(self):
@@ -134,7 +135,10 @@ class L10nPeNeCotizacionFlujo(models.Model):
 
     def l10n_pe_ne_vincular_comprobante(self, comprobante_id):
         """Al emitir: además de vincular+convertir (biller), abre el eje de despacho si hay mercadería."""
-        res = super().l10n_pe_ne_vincular_comprobante(comprobante_id)
+        # El biller escribe estado='convertida' aquí dentro: autorizamos esa escritura con _FLUJO_OK
+        # (es la ÚNICA vía legítima a 'convertida', tras crear el comprobante fiscal).
+        res = super(L10nPeNeCotizacionFlujo,
+                    self.with_context(l10n_pe_ne_flujo_ok=True)).l10n_pe_ne_vincular_comprobante(comprobante_id)
         if self._l10n_pe_ne_tiene_despacho() and self.estado_despacho == "no_aplica":
             self.estado_despacho = "pendiente"
         return res

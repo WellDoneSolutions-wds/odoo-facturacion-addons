@@ -174,8 +174,10 @@ class L10nPeNeOrdenTrabajo(models.Model):
             monto, medio, self.partner_id, _("Adelanto %s") % self.name)
         mov.orden_trabajo_id = self.id
         # Encolar (borrador→encolada) NO es una arista del mixin: se hace aquí, atado al adelanto.
-        self.write({"adelanto_monto": monto, "medio_adelanto": medio,
-                    "adelanto_movimiento_id": mov.id, "estado": "encolada"})
+        # Flag _FLUJO_OK: escritura de estado AUTORIZADA (no es un write RPC crudo).
+        self.with_context(l10n_pe_ne_flujo_ok=True).write({
+            "adelanto_monto": monto, "medio_adelanto": medio,
+            "adelanto_movimiento_id": mov.id, "estado": "encolada"})
         self.message_post(body=_("Adelanto de S/ %(m).2f (%(me)s) cobrado por %(u)s. En cola.",
                                  m=monto, me=medio, u=self.env.user.name))
         return self._l10n_pe_ne_orden_dict()
@@ -201,7 +203,9 @@ class L10nPeNeOrdenTrabajo(models.Model):
         res = self.env["account.move"].l10n_pe_ne_quick_emit(
             self._l10n_pe_ne_payload_emision(medios))
         move_id = res.get("id") if isinstance(res, dict) else False
-        self.write({
+        # Flag _FLUJO_OK: escritura de estado AUTORIZADA (fold de cobro, tras emitir). La constraint
+        # de 'entregada exige comprobante' igual la valida (factura_final_id se setea en el mismo write).
+        self.with_context(l10n_pe_ne_flujo_ok=True).write({
             "factura_final_id": move_id,
             "estado": "entregada",
             "fecha_entrega": fields.Datetime.now(),

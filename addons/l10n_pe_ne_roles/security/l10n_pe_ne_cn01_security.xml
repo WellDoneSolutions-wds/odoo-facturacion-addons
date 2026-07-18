@@ -36,5 +36,35 @@
       <field name="groups" eval="[(4, ref('group_l10n_pe_ne_despacho'))]"/>
       <field name="domain_force">[('estado', '=', 'convertida')]</field>
     </record>
+
+    <!--
+      Segregación de la LÍNEA por estado, ESPEJO de la cabecera (blindaje iter 7): sin esto un
+      cajero/despachador lee las líneas de cotizaciones cuya cabecera no está en su bandeja. Dominio
+      sobre cotizacion_id.estado. (La compañía la AND-ea la regla global de la línea del biller.)
+    -->
+    <record id="rule_cot_linea_ventas" model="ir.rule">
+      <field name="name">Línea de cotización: el vendedor ve todas</field>
+      <field name="model_id" ref="l10n_pe_ne_biller.model_l10n_pe_ne_cotizacion_line"/>
+      <field name="groups" eval="[(4, ref('group_l10n_pe_ne_ventas'))]"/>
+      <field name="domain_force">[(1, '=', 1)]</field>
+    </record>
+    <record id="rule_cot_linea_supervisor" model="ir.rule">
+      <field name="name">Línea de cotización: el supervisor ve todas</field>
+      <field name="model_id" ref="l10n_pe_ne_biller.model_l10n_pe_ne_cotizacion_line"/>
+      <field name="groups" eval="[(4, ref('group_l10n_pe_ne_supervisor'))]"/>
+      <field name="domain_force">[(1, '=', 1)]</field>
+    </record>
+    <record id="rule_cot_linea_caja" model="ir.rule">
+      <field name="name">Línea de cotización: el cajero ve su cola de cobro y lo convertido</field>
+      <field name="model_id" ref="l10n_pe_ne_biller.model_l10n_pe_ne_cotizacion_line"/>
+      <field name="groups" eval="[(4, ref('group_l10n_pe_ne_caja'))]"/>
+      <field name="domain_force">[('cotizacion_id.estado', 'in', ['aceptada', 'convertida'])]</field>
+    </record>
+    <record id="rule_cot_linea_despacho" model="ir.rule">
+      <field name="name">Línea de cotización: el despachador solo ve lo convertido</field>
+      <field name="model_id" ref="l10n_pe_ne_biller.model_l10n_pe_ne_cotizacion_line"/>
+      <field name="groups" eval="[(4, ref('group_l10n_pe_ne_despacho'))]"/>
+      <field name="domain_force">[('cotizacion_id.estado', '=', 'convertida')]</field>
+    </record>
   </data>
 </odoo>

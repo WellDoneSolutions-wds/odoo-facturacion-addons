@@ -23,6 +23,10 @@ serán la cotización (CN-01) y el pedido (CN-02).
 from odoo import _, api, fields, models
 from odoo.exceptions import AccessError, UserError
 
+# Marca de contexto que autoriza escribir 'estado': la ponen SOLO las acciones controladas
+# (_avanzar y los escritores internos con nombre). Un write RPC directo no la trae y se bloquea.
+_FLUJO_OK = "l10n_pe_ne_flujo_ok"
+
 
 class L10nPeNeFlujoMixin(models.AbstractModel):
     _name = 'l10n_pe_ne.flujo.mixin'
@@ -193,6 +197,34 @@ class L10nPeNeFlujoMixin(models.AbstractModel):
             "«%(a)s» necesita la aprobación de otra persona. Quedó pendiente.",
             a=t.get('label') or self._estado_label(t.get('_destino', ''))))
 
+    # ─────────────────────────────────────────────── blindaje de la máquina de estados
+    @api.model_create_multi
+    def create(self, vals_list):
+        """Un documento de flujo NACE en su estado inicial (el default del campo), no directamente
+        en uno avanzado. Cierra el vector espejo del write: crear una cotización ya 'convertida' (sin
+        comprobante) o una orden ya 'entregada' por un create RPC. Sistema (su) y acciones internas
+        (_FLUJO_OK) sí pueden sembrar estados (migraciones, fixtures)."""
+        if not self.env.su and not self.env.context.get(_FLUJO_OK):
+            if any(v.get("estado") for v in vals_list):
+                raise UserError(_(
+                    "Un documento nuevo nace en su estado inicial; su avance va por las acciones "
+                    "del flujo, no se crea directamente en otro estado."))
+        return super().create(vals_list)
+
+    def write(self, vals):
+        """'estado' NO se escribe por un write RPC directo (que se saltaría _avanzar: has_group de
+        la arista, la toma atómica, la guarda de realidad, el gate del RUC y las reglas duras). Solo
+        pasa desde una acción controlada (que marca _FLUJO_OK) o en modo SISTEMA (env.su: migraciones,
+        cron, tests de fábrica). Cierra a nivel de MODELO el hueco de 'confiar en que solo el BFF
+        llama los métodos buenos' — vale para todos los modelos de flujo (CN-01 cotización, CN-02
+        orden, y los que vengan). La ir.rule limita QUÉ estados se ven; esto limita las TRANSICIONES."""
+        if "estado" in vals and not self.env.su and not self.env.context.get(_FLUJO_OK):
+            if any(rec.estado != vals["estado"] for rec in self):
+                raise UserError(_(
+                    "El estado de este documento se cambia por sus acciones (los botones del "
+                    "flujo), no escribiéndolo directamente."))
+        return super().write(vals)
+
     # ─────────────────────────────────────────────── avanzar (una transición)
     def _avanzar(self, destino, motivo=None, vals=None, magnitud=None):
         """Ejecuta UNA transición: valida los tres ejes, aplica política, escribe y audita."""
@@ -218,7 +250,8 @@ class L10nPeNeFlujoMixin(models.AbstractModel):
         # transición no ocurre). En 'aviso' o auto-aprobación, añade la marca de excepción.
         modo, mag = self._politica_de(t, magnitud)
         w.update(self._aplicar_politica({**t, '_destino': destino}, modo, mag))
-        self.write(w)
+        # Escritura AUTORIZADA de estado (viene de una transición validada por los 3 ejes).
+        self.with_context(**{_FLUJO_OK: True}).write(w)
         self.message_post(body=self._bitacora(t, destino, motivo))
         return self
 

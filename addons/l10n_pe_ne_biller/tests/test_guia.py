@@ -145,6 +145,37 @@ class TestGuiaPayload(TestGuiaBase):
         cab = g._l10n_pe_ne_build_gre_payload()["cabecera"]
         self.assertNotIn("numDocProveedor", cab)
 
+    # ---------------------------------------------------- bien normalizado (cat.25 + GTIN)
+    def test_payload_bien_normalizado_con_producto(self):
+        # Un producto con código SUNAT (cat.25) y GTIN (barcode) lleva ambos al bien.
+        prod = self.env["product.product"].create({
+            "name": "Producto normalizado", "l10n_pe_ne_cod_producto_sunat": "50333800",
+            "barcode": "7501234567890"})
+        g = self.Guia.create(self._vals(line_ids=[(0, 0, {
+            "descripcion": "Producto normalizado", "cantidad": 3, "product_id": prod.id})]))
+        bien = g._l10n_pe_ne_build_gre_payload()["detalle"][0]
+        self.assertEqual(bien["codProductoSUNAT"], "50333800")
+        self.assertEqual(bien["gtin"], "7501234567890")
+
+    def test_payload_bien_texto_libre_sin_normalizado(self):
+        # Un bien de texto libre (sin producto) manda ambas claves vacías (el biller
+        # omite los elementos): no debe reventar por acceder a product_id.
+        g = self.Guia.create(self._vals(line_ids=[(0, 0, {
+            "descripcion": "Bien suelto sin producto", "cantidad": 1})]))
+        bien = g._l10n_pe_ne_build_gre_payload()["detalle"][0]
+        self.assertEqual(bien["codProductoSUNAT"], "")
+        self.assertEqual(bien["gtin"], "")
+
+    def test_detalle_expone_bien_normalizado(self):
+        prod = self.env["product.product"].create({
+            "name": "Producto normalizado detalle",
+            "l10n_pe_ne_cod_producto_sunat": "50333800", "barcode": "7501234567890"})
+        g = self.Guia.create(self._vals(line_ids=[(0, 0, {
+            "descripcion": "Producto normalizado detalle", "cantidad": 1, "product_id": prod.id})]))
+        bien = g.l10n_pe_ne_guia_detalle()["bienes"][0]
+        self.assertEqual(bien["codProductoSUNAT"], "50333800")
+        self.assertEqual(bien["gtin"], "7501234567890")
+
 
 class TestGuiaValidaciones(TestGuiaBase):
     def _rechaza(self, msg_frag, **vals):

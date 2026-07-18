@@ -28,3 +28,8 @@ class ProductTemplate(models.Model):
         string='Unidad SUNAT (cat.03)',
         help="Código de unidad de medida SUNAT (Catálogo 03, ej. NIU, KGM, LTR) que se usa al "
              "facturar este producto. Si está vacío, el comprobante usa 'NIU' (unidad).")
+
+    l10n_pe_ne_cod_producto_sunat = fields.Char(
+        string="Cód. producto SUNAT (cat.25)",
+        help="Código de producto SUNAT (UNSPSC, catálogo 25). Aparece en la guía como "
+             "bien normalizado.")

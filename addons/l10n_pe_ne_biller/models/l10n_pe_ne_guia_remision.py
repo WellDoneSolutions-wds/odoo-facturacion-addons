@@ -377,6 +377,11 @@ class L10nPeNeGuiaRemision(models.Model):
             'uniMedidaItem': l.unidad or 'NIU',
             'desItem': l.descripcion or (l.product_id.display_name or ''),
             'codItem': (l.product_id.default_code or '') if l.product_id else '',
+            # Bien normalizado: código de producto SUNAT (cat.25) + GTIN del producto.
+            # Bien de texto libre (sin producto) → ambos vacíos y el biller omite los
+            # elementos cac:CommodityClassification / cac:StandardItemIdentification.
+            'codProductoSUNAT': (l.product_id.l10n_pe_ne_cod_producto_sunat or '') if l.product_id else '',
+            'gtin': (l.product_id.barcode or '') if l.product_id else '',
         } for l in self.line_ids]
         # docRelacionado: itera comprobante_ids (lista nueva); sin lista, cae al
         # comprobante_id legado (compat guías viejas con un único documento).
@@ -691,6 +696,9 @@ class L10nPeNeGuiaRemision(models.Model):
             'bienes': [{
                 'descripcion': l.descripcion, 'cantidad': l.cantidad, 'unidad': l.unidad or 'NIU',
                 'productId': l.product_id.id or None, 'codigo': l.product_id.default_code or '',
+                # Bien normalizado: SPA muestra el código SUNAT (cat.25) y el GTIN del producto.
+                'codProductoSUNAT': (l.product_id.l10n_pe_ne_cod_producto_sunat or '') if l.product_id else '',
+                'gtin': (l.product_id.barcode or '') if l.product_id else '',
             } for l in c.line_ids],
         }
 

@@ -770,6 +770,37 @@ class TestGuiaComercioExterior(TestGuiaBase):
         with self.assertRaisesRegex(UserError, "DAM"):
             g._l10n_pe_ne_validar()
 
+    # ---------------------------------------------------- contenedor + precinto (Package)
+    def test_contenedor_payload_suprime_bultos(self):
+        # Con contenedor + indicador total, SUNAT 3621 prohíbe los bultos → sentinela "-".
+        g = self.Guia.create(self._vals_export(num_contenedor="ABCU1234567", num_precinto="PRECINTO01"))
+        cab = g._l10n_pe_ne_build_gre_payload()["cabecera"]
+        self.assertEqual(cab["numContenedor"], "ABCU1234567")
+        self.assertEqual(cab["numPrecinto"], "PRECINTO01")
+        self.assertEqual(cab["numBultosDatosEnvio"], "-")
+        g._l10n_pe_ne_validar()  # no lanza
+
+    def test_contenedor_sin_precinto_rechaza(self):
+        g = self.Guia.create(self._vals_export(num_contenedor="ABCU1234567"))
+        with self.assertRaisesRegex(UserError, "precinto"):
+            g._l10n_pe_ne_validar()
+
+    def test_contenedor_formato_invalido_rechaza(self):
+        g = self.Guia.create(self._vals_export(num_contenedor="ab#1", num_precinto="PRECINTO01"))
+        with self.assertRaisesRegex(UserError, "contenedor"):
+            g._l10n_pe_ne_validar()
+
+    def test_contenedor_en_motivo_no_comercio_rechaza(self):
+        g = self.Guia.create(self._vals(num_contenedor="ABCU1234567", num_precinto="PRECINTO01"))
+        with self.assertRaisesRegex(UserError, "comercio exterior"):
+            g._l10n_pe_ne_validar()
+
+    def test_detalle_expone_contenedor(self):
+        g = self.Guia.create(self._vals_export(num_contenedor="ABCU1234567", num_precinto="PRECINTO01"))
+        d = g.l10n_pe_ne_guia_detalle()
+        self.assertEqual(d["numContenedor"], "ABCU1234567")
+        self.assertEqual(d["numPrecinto"], "PRECINTO01")
+
     def test_sin_establecimiento_llegada_rechaza(self):
         g = self.Guia.create(self._vals_export(cod_estab_llegada=False))
         with self.assertRaisesRegex(UserError, "llegada"):

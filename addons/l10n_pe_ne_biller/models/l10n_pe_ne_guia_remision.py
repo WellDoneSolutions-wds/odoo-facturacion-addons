@@ -210,6 +210,11 @@ class L10nPeNeGuiaRemision(models.Model):
     puerto_codigo = fields.Char(string='Cód. puerto/aeropuerto (SUNAT)')
     puerto_tipo = fields.Selection([('1', 'Puerto'), ('2', 'Aeropuerto')],
                                    string='Tipo de punto de embarque')
+    # Comercio exterior — contenedor y precinto (cac:TransportHandlingUnit/cac:Package). Con
+    # contenedor + indicador total, el precinto (TraceID) es obligatorio (SUNAT 3422) y los
+    # bultos quedan PROHIBIDOS (SUNAT 3621) — el biller los suprime con el sentinela "-".
+    num_contenedor = fields.Char(string='N° de contenedor')
+    num_precinto = fields.Char(string='N° de precinto')
 
     # Autorización de carga (permiso especial de transporte, catálogo D37 SUNAT).
     ent_autorizacion_carga = fields.Char(string='Entidad autorización de carga (D37)')
@@ -398,6 +403,14 @@ class L10nPeNeGuiaRemision(models.Model):
             cab['codPuerto'] = self.puerto_codigo
             cab['locTypePuerto'] = self.puerto_tipo or '1'
             cab['nomPuerto'] = entry[1] if entry else ''
+        # Contenedor (comercio exterior): va como cac:Package. Con el indicador total presente,
+        # SUNAT 3621 PROHÍBE TotalTransportHandlingUnitQuantity (bultos) — se suprime con el
+        # sentinela "-" que el biller interpreta como "no emitir bultos"; el precinto (3422) es
+        # obligatorio y lo garantiza la validación.
+        if self.num_contenedor:
+            cab['numContenedor'] = self.num_contenedor
+            cab['numPrecinto'] = self.num_precinto or ''
+            cab['numBultosDatosEnvio'] = '-'
         # Establecimientos propios (motivo 04): el RUC gemelo SIEMPRE es el de esta
         # compañía — nunca se manda un codEstab* sin su rucEstab* (el biller lo rechaza).
         # Sin RUC de compañía configurado no hay con qué llenar rucEstab*: mejor fallar acá
@@ -650,6 +663,10 @@ class L10nPeNeGuiaRemision(models.Model):
                             % self.motivo_traslado)
         if self.motivo_traslado == '13' and not (self.des_motivo_traslado or '').strip():
             raise UserError(_('El motivo "Otros" requiere describir el motivo del traslado.'))
+        # El contenedor (cac:Package) solo aplica a comercio exterior: en otros motivos el XSLT
+        # lo rechaza (el detalle de contenedor por línea 7024-7028 es exclusivo del motivo 19).
+        if self.num_contenedor and self.motivo_traslado not in ('08', '09'):
+            raise UserError(_('El contenedor solo aplica a comercio exterior (importación/exportación).'))
         if self.motivo_traslado in ('08', '09'):
             # Comercio exterior: la DAM/DUA es obligatoria (SUNAT 3440) y su N° codifica el
             # régimen (SUNAT 3441): 10 = importación, 40 = exportación.
@@ -662,6 +679,19 @@ class L10nPeNeGuiaRemision(models.Model):
             if self.motivo_traslado == '09' and not re.match(DAM_EXPORTACION_RE, dam):
                 raise UserError(_('El N° de DAM/DUA de exportación debe codificar el régimen 40 '
                                   '(formato NNN-AAAA-40-NNNNNN, p. ej. 235-2024-40-123456).'))
+            # Contenedor: con el indicador total el precinto es obligatorio (SUNAT 3422); ambos
+            # tienen formato acotado (contenedor 4071, precinto 4074).
+            if self.num_contenedor:
+                cont = (self.num_contenedor or '').strip()
+                if not re.match(r'^[A-Z0-9\-/]{1,17}$', cont):
+                    raise UserError(_('El N° de contenedor debe tener hasta 17 caracteres '
+                                      'alfanuméricos en mayúscula (SUNAT 4071).'))
+                prec = (self.num_precinto or '').strip()
+                if not prec:
+                    raise UserError(_('El contenedor requiere el N° de precinto (SUNAT 3422).'))
+                if not re.match(r'^(?!0+$)[A-Z0-9]{1,100}$', prec):
+                    raise UserError(_('El N° de precinto debe ser alfanumérico en mayúscula '
+                                      '(SUNAT 4074).'))
         # Puerto/aeropuerto (cat_63/cat_64): si se declara, exige el tipo y que el código
         # exista en el catálogo — de ahí sale el ubigeo que la regla SUNAT 3364 obliga a
         # que coincida con el punto de partida (importación) o de llegada (exportación).
@@ -935,6 +965,7 @@ class L10nPeNeGuiaRemision(models.Model):
             'damNumero': c.dam_numero or '',
             'puertoCodigo': c.puerto_codigo or '', 'puertoTipo': c.puerto_tipo or '',
             'puertoNombre': (c._l10n_pe_ne_puerto_entry() or (None, ''))[1],
+            'numContenedor': c.num_contenedor or '', 'numPrecinto': c.num_precinto or '',
             'numPlaca': c.num_placa or '',
             'conductorTipoDoc': c.conductor_tipo_doc or '1', 'conductorNumDoc': c.conductor_num_doc or '',
             'conductorNombres': c.conductor_nombres or '', 'conductorApellidos': c.conductor_apellidos or '',
@@ -1082,6 +1113,7 @@ class L10nPeNeGuiaRemision(models.Model):
             'codEstabPartida': 'cod_estab_partida', 'codEstabLlegada': 'cod_estab_llegada',
             'damNumero': 'dam_numero',
             'puertoCodigo': 'puerto_codigo', 'puertoTipo': 'puerto_tipo',
+            'numContenedor': 'num_contenedor', 'numPrecinto': 'num_precinto',
             'entAutorizacionCarga': 'ent_autorizacion_carga',
             'numAutorizacionCarga': 'num_autorizacion_carga',
         }

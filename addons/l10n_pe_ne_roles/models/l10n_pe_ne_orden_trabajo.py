@@ -20,7 +20,7 @@ ninguna arista de _transiciones la escribe (sería una entrega sin cobro). 'entr
 terminales.
 """
 from odoo import _, api, fields, models
-from odoo.exceptions import AccessError, UserError
+from odoo.exceptions import AccessError, UserError, ValidationError
 # Misma fuente que el desglose del biller: si el IGV cambia, la conversión de la emisión no driftea.
 from odoo.addons.l10n_pe_ne_biller.models.l10n_pe_ne_cotizacion import IGV_RATE
 
@@ -96,6 +96,16 @@ class L10nPeNeOrdenTrabajo(models.Model):
             o.amount_tax = round(bruto_gravado - base_gravado, 2)
             o.amount_untaxed = round(o.amount_total - o.amount_tax, 2)
             o.saldo = round(o.amount_total - (o.adelanto_monto or 0.0), 2)
+
+    @api.constrains("estado", "factura_final_id")
+    def _check_entregada_con_comprobante(self):
+        # Regla dura a nivel de MODELO (no solo del método): una orden 'entregada' DEBE tener su
+        # comprobante final. Cierra el hueco de un write RPC directo que salte cobrar_saldo y marque
+        # 'entregada' sin emitir (entrega sin cobro). Dispara en CUALQUIER vía de escritura.
+        for o in self:
+            if o.estado == "entregada" and not o.factura_final_id:
+                raise ValidationError(_(
+                    "Una orden entregada debe tener su comprobante final: se entrega al cobrar."))
 
     # ───────────────────────────────────────────── flujo
     @api.model

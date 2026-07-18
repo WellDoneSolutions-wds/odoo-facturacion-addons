@@ -1,4 +1,4 @@
-from odoo.exceptions import AccessError, UserError
+from odoo.exceptions import AccessError, UserError, ValidationError
 from odoo.tests import TransactionCase, tagged
 
 
@@ -24,8 +24,8 @@ class TestOrdenTrabajo(TransactionCase):
     def _orden(self, precio=118.0, afecto=True, estado=None, adelanto=0.0):
         orden = self.Orden.create({
             "partner_id": self.cliente.id,
-            "line_ids": [(0, 0, {"product_id": self.producto.id, "descripcion": "SERVICIO CN02",
-                                 "cantidad": 1.0, "precio_unitario": precio, "afecto_igv": afecto})],
+            "linea_ids": [(0, 0, {"product_id": self.producto.id, "descripcion": "SERVICIO CN02",
+                                  "cantidad": 1.0, "precio_unitario": precio, "afecto_igv": afecto})],
         })
         vals = {}
         if adelanto:
@@ -155,6 +155,12 @@ class TestOrdenTrabajo(TransactionCase):
         orden = self._orden(estado="terminada")
         with self.assertRaisesRegex(UserError, "No se puede pasar"):
             orden._avanzar("entregada")   # 'entregada' no es arista: solo por el fold de cobro
+
+    def test_entregada_sin_comprobante_bloqueada_a_nivel_modelo(self):
+        # cierra el hueco de un write RPC directo que salte cobrar_saldo: 'entregada' exige factura.
+        orden = self._orden(estado="terminada")
+        with self.assertRaises(ValidationError):
+            orden.write({"estado": "entregada"})   # sin factura_final_id -> ValidationError
 
     # ── payload de emisión: IGV + medios = SOLO el saldo (no re-cuenta el adelanto) ──
     def test_payload_convierte_igv(self):

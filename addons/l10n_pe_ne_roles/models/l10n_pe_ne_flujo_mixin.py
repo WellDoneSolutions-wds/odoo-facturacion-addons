@@ -197,6 +197,17 @@ class L10nPeNeFlujoMixin(models.AbstractModel):
     def _avanzar(self, destino, motivo=None, vals=None, magnitud=None):
         """Ejecuta UNA transición: valida los tres ejes, aplica política, escribe y audita."""
         self.ensure_one()
+        # Serializa la fila ANTES de validar: dos usuarios que avanzan el MISMO documento a la vez
+        # no se pisan. El segundo bloquea aquí hasta que el primero commitea, luego re-lee el estado
+        # ya cambiado y su transición deja de existir (p. ej. la TOMA de cola: el segundo operario
+        # ve la orden ya en 'en_proceso' y _check_transicion lanza). Así la 'toma' es atómica de
+        # verdad (NULL→yo bajo carrera), no solo de palabra.
+        # flush ANTES del SQL crudo (el ORM no lo hace por cr.execute): baja cualquier escritura
+        # pendiente de esta fila para que, tras invalidar, se re-lea el estado real bajo el lock.
+        self.flush_recordset()
+        self.env.cr.execute(
+            "SELECT id FROM %s WHERE id = %%s FOR UPDATE" % self._table, (self.id,))
+        self.invalidate_recordset()
         t = self._check_transicion(destino, motivo)
         w = dict(vals or {})
         w['estado'] = destino

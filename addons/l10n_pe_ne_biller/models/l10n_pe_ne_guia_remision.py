@@ -896,6 +896,15 @@ class L10nPeNeGuiaRemision(models.Model):
         if code == '0':
             self.estado = 'enviado'
             self.l10n_pe_biller_message = _('Aceptada por SUNAT — CDR ResponseCode 0. %s') % (desc or '')
+            # Automatización (opt-in): al aceptarse, enviar la guía (XML + PDF + CDR) al correo
+            # del destinatario. Gateado por config para no mandar correos sin querer; nunca rompe
+            # la emisión (un fallo de correo se loguea y sigue). Espeja email_on_accept de factura.
+            if self.env['ir.config_parameter'].sudo().get_param(
+                    'l10n_pe_ne_biller.email_guia_on_accept', '').strip().lower() in ('1', 'true'):
+                try:
+                    self._l10n_pe_ne_email_guia()
+                except Exception as e:  # noqa: BLE001
+                    _logger.warning('email guía %s: %s', self.name, e)
         elif not code:
             # CDR ilegible (base64/zip corrupto o sin ResponseCode): NO es un rechazo
             # de SUNAT — queda en_proceso para que el botón/cron reintenten con el ticket.
@@ -904,6 +913,53 @@ class L10nPeNeGuiaRemision(models.Model):
         else:
             self.estado = 'rechazado'
             self.l10n_pe_biller_message = _('Rechazada por SUNAT (ResponseCode %s). %s') % (code or '—', desc or '')
+
+    def _l10n_pe_ne_email_guia(self):
+        """Envía la guía aceptada (XML firmado + PDF + CDR) al correo del destinatario, con copia
+        al remitente en el tipo 31. Automatiza la entrega manual. No-op si no hay correo; nunca
+        lanza (el llamador la envuelve, pero igual usamos send sin excepción). Espeja
+        _l10n_pe_ne_email_comprobante de la factura."""
+        self.ensure_one()
+        email = (self.partner_id.email or '').strip()
+        cc = (self.remitente_id.email or '').strip() if (self.tipo_gre == '31' and self.remitente_id) else ''
+        if not email and not cc:
+            _logger.info('email guía %s: sin correo de destinatario/remitente, se omite', self.name)
+            return False
+        atts = self.env['ir.attachment']
+        if self.l10n_pe_biller_xml:
+            atts |= self.l10n_pe_biller_xml
+        try:
+            pdf, _ct = self.env['ir.actions.report'].sudo()._render_qweb_pdf(
+                'l10n_pe_ne_biller.action_report_guia', res_ids=self.ids)
+            if pdf:
+                atts |= self.env['ir.attachment'].sudo().create({
+                    'name': '%s.pdf' % self.name,
+                    'res_model': 'l10n_pe_ne.guia_remision', 'res_id': self.id,
+                    'mimetype': 'application/pdf', 'raw': pdf,
+                })
+        except Exception:  # noqa: BLE001 — el PDF es deseable pero no bloquea el correo
+            pass
+        if self.l10n_pe_biller_cdr:
+            atts |= self.l10n_pe_biller_cdr
+        subject = _('Guía de remisión electrónica %s') % self.name
+        body = _(
+            '<p>Estimado,</p>'
+            '<p>Adjuntamos la guía de remisión electrónica <b>%(num)s</b> emitida por '
+            '<b>%(emisor)s</b> y aceptada por SUNAT.</p>'
+            '<p>Se incluyen el XML firmado, la representación impresa (PDF) y el CDR.</p>'
+        ) % {'num': self.name, 'emisor': self.company_id.name or ''}
+        mail = self.env['mail.mail'].sudo().create({
+            'subject': subject,
+            'body_html': body,
+            'email_to': email or cc,
+            'email_cc': cc if (email and cc) else '',
+            'email_from': self.company_id.email or self.env.user.email_formatted,
+            'attachment_ids': [(6, 0, atts.ids)],
+            'auto_delete': False,
+        })
+        mail.send(raise_exception=False)
+        _logger.info('email guía %s enviado a %s (%d adjuntos)', self.name, email or cc, len(atts))
+        return True
 
     def l10n_pe_ne_emitir_guia(self):
         """Emite la GRE al biller: firma, envía a SUNAT y recoge el CDR. Según el tipo, va al

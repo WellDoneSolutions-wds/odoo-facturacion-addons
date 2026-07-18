@@ -219,8 +219,9 @@ class L10nPeNeFlujoMixin(models.AbstractModel):
         t = {'gate': key_gate} if key_gate else None
         if t and not self._puede_aprobar(t):
             raise AccessError(_("No tienes permiso para aprobar esto."))
-        if self.company_id.l10n_pe_ne_exigir_segregacion and \
-                self.env.user == (self.user_id or self.create_uid):
+        exigir = ('company_id' in self._fields and self.company_id
+                  and self.company_id.l10n_pe_ne_exigir_segregacion)
+        if exigir and self.env.user == (self.user_id or self.create_uid):
             raise UserError(_("Tu negocio exige que apruebe otra persona."))
         self.write({'aprobador_id': self.env.user.id, 'fecha_aprobacion': fields.Datetime.now(),
                     'es_auto_aprobacion': self.env.user == (self.user_id or self.create_uid)})

@@ -42,7 +42,7 @@ class TestCaja(TransactionCase):
         mov_a = self.Movimiento.create({
             "sesion_id": ses_a.id, "tipo": "ingreso", "motivo": "Fondo", "monto": 10.0,
         })
-        company_b = self.env["res.company"].create({"name": "CAJA B SAC"})
+        company_b = self.env["res.company"].with_context(l10n_pe_ne_allow_company_create=True).create({"name": "CAJA B SAC"})
         user_b = self.env["res.users"].create({
             "name": "Cajero B", "login": "cajero_b_qw07",
             "company_id": company_b.id, "company_ids": [(6, 0, [company_b.id])],
@@ -304,7 +304,7 @@ class TestCaja(TransactionCase):
 
     def test_arqueo_cross_tenant(self):
         d = self.Sesion.l10n_pe_ne_abrir_caja({"saldoInicial": 10})
-        company_b = self.env["res.company"].create({"name": "CAJA C SAC"})
+        company_b = self.env["res.company"].with_context(l10n_pe_ne_allow_company_create=True).create({"name": "CAJA C SAC"})
         user_b = self.env["res.users"].create({
             "name": "Cajero C", "login": "cajero_c_qw07",
             "company_id": company_b.id, "company_ids": [(6, 0, [company_b.id])],

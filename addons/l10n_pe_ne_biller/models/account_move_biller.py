@@ -150,6 +150,22 @@ class AccountMoveLine(models.Model):
         copy=False,
         help="Fecha de vencimiento del lote que ingresa por esta línea.",
     )
+    # Sub-tipo de operación gratuita (cat. 07 SUNAT). Solo aplica a líneas gratuitas (9996):
+    # afina el genérico "11" al motivo real (retiro, bonificación, donación…). Vacío = 11.
+    l10n_pe_ne_afectacion_gratuita = fields.Selection(
+        [
+            ("11", "Retiro por premio"),
+            ("12", "Retiro por donación"),
+            ("13", "Retiro de bienes"),
+            ("14", "Retiro por publicidad"),
+            ("15", "Bonificación"),
+            ("16", "Retiro por entrega a trabajadores"),
+        ],
+        string="Tipo de operación gratuita",
+        copy=False,
+        help="Solo para líneas gratuitas: precisa el motivo (catálogo 07 de SUNAT). "
+        "Si se deja vacío se usa 'Retiro por premio' (11).",
+    )
 
 
 class AccountMove(models.Model):
@@ -434,7 +450,10 @@ class AccountMove(models.Model):
         así que el pendiente/cuotas van sobre el neto, no sobre el total."""
         self.ensure_one()
         det = self._l10n_pe_detraccion_monto() if self.l10n_pe_ne_detraccion else 0.0
-        return round((self.amount_total or 0.0) - det, 2)
+        # Venta con inicial al contado: el saldo a crédito (lo que suman las cuotas) es el total
+        # menos la detracción y menos la inicial ya pagada.
+        inicial = self.l10n_pe_ne_inicial_contado or 0.0
+        return round((self.amount_total or 0.0) - det - inicial, 2)
 
     def _l10n_pe_adicional_cabecera(self):
         """Bloque adicional de la cabecera: detracción y/o total a cobrar de la percepción."""
@@ -535,6 +554,14 @@ class AccountMove(models.Model):
             ]
         return out
 
+    # Establecimiento anexo emisor (código SUNAT de 4 dígitos). Va como codLocalEmisor en el XML;
+    # "0000" = domicilio fiscal. Para negocios con sucursales, cada comprobante declara su local.
+    l10n_pe_ne_cod_establecimiento = fields.Char(
+        string="Establecimiento emisor",
+        default="0000",
+        copy=False,
+        help="Código de establecimiento anexo SUNAT (4 dígitos). '0000' = domicilio fiscal.",
+    )
     l10n_pe_ne_forma_pago = fields.Selection(
         [("Contado", "Contado"), ("Credito", "Crédito")],
         default="Contado",
@@ -545,6 +572,14 @@ class AccountMove(models.Model):
     l10n_pe_ne_cuotas = fields.Json(
         string="Cuotas de crédito", copy=False
     )  # [{'fecha','monto'}]
+    # Forma de pago MIXTA: parte pagada al contado (inicial) + saldo a crédito en cuotas. El neto
+    # pendiente (y por ende las cuotas y el mtoNetoPendientePago SUNAT) se reduce en esta inicial.
+    l10n_pe_ne_inicial_contado = fields.Monetary(
+        string="Inicial al contado",
+        copy=False,
+        help="Parte del total pagada al contado al emitir (venta con inicial + saldo a crédito). "
+        "El saldo a crédito = total − detracción − inicial y es lo que suman las cuotas.",
+    )
     l10n_pe_ne_medios_pago = fields.Json(
         string="Medios de pago (POS)", copy=False
     )  # [{'medio','monto'}]
@@ -738,6 +773,10 @@ class AccountMove(models.Model):
             (tip_afe, cod_tri, nom_trib, cod_tip_trib, _cod_cat), por_igv = (
                 self._l10n_pe_tax_info(line)
             )
+            # Gratuita: si la línea precisa el sub-tipo (retiro 13, bonificación 15, …) se usa ese
+            # código de catálogo 07 en vez del genérico 11. La estructura UBL gratuita es idéntica.
+            if cod_tri == "9996" and line.l10n_pe_ne_afectacion_gratuita:
+                tip_afe = line.l10n_pe_ne_afectacion_gratuita
             qty = line.quantity or 1.0
             base, igv, isc, icbper = self._l10n_pe_line_amounts(line)
             # Valor unitario BRUTO (antes del descuento): regla SUNAT 3271 exige
@@ -987,7 +1026,7 @@ class AccountMove(models.Model):
             "fecVencimiento": self.invoice_date_due.strftime("%Y-%m-%d")
             if self.invoice_date_due
             else "",
-            "codLocalEmisor": "0000",
+            "codLocalEmisor": (self.l10n_pe_ne_cod_establecimiento or "0000"),
             "tipDocUsuario": self._l10n_pe_cliente_doc()[0],
             "numDocUsuario": self._l10n_pe_cliente_doc()[1],
             "rznSocialUsuario": partner.name or "",
@@ -1310,12 +1349,63 @@ class AccountMove(models.Model):
             self.l10n_pe_biller_message = _(
                 "Aceptado por SUNAT — CDR ResponseCode 0. %s"
             ) % (desc or "")
+            # Automatización (opt-in): al aceptarse, enviar el comprobante (XML + PDF + CDR) al
+            # correo del cliente. Gateado por config para no mandar correos sin querer; nunca
+            # rompe la emisión (un fallo de correo se loguea y sigue).
+            if self.env["ir.config_parameter"].sudo().get_param(
+                "l10n_pe_ne_biller.email_on_accept", ""
+            ).strip().lower() in ("1", "true"):
+                try:
+                    self._l10n_pe_ne_email_comprobante()
+                except Exception as e:  # noqa: BLE001
+                    _logger.warning("email comprobante %s: %s", self.name, e)
         elif code:
             self.l10n_pe_biller_message = _(
                 "CDR de SUNAT (ResponseCode %s). %s"
             ) % (code, desc or "")
         else:
             self.l10n_pe_biller_message = _("Aceptado por el facturador (HTTP 200).")
+
+    def _l10n_pe_ne_email_comprobante(self):
+        """Envía el comprobante aceptado (XML firmado + PDF A4 + CDR) al correo del cliente.
+        Automatiza la entrega manual. No-op si el cliente no tiene correo; nunca lanza (el
+        llamador lo envuelve, pero igual usamos send sin excepción)."""
+        self.ensure_one()
+        email = (self.partner_id.email or "").strip()
+        if not email:
+            _logger.info("email comprobante %s: cliente sin correo, se omite", self.name)
+            return False
+        atts = self.env["ir.attachment"]
+        if self.l10n_pe_biller_xml:
+            atts |= self.l10n_pe_biller_xml
+        try:
+            pdf = self._l10n_pe_get_pdf_attachment(formato="A4")
+            if pdf:
+                atts |= pdf
+        except Exception:  # noqa: BLE001 — el PDF es deseable pero no bloquea el correo
+            pass
+        if self.l10n_pe_biller_cdr:
+            atts |= self.l10n_pe_biller_cdr
+        serie, corr = self._l10n_pe_serie_correlativo()
+        num = "%s-%s" % (serie, corr)
+        subject = _("Comprobante electrónico %s") % num
+        body = _(
+            "<p>Estimado cliente,</p>"
+            "<p>Adjuntamos su comprobante electrónico <b>%(num)s</b> emitido por "
+            "<b>%(emisor)s</b> y aceptado por SUNAT.</p>"
+            "<p>Se incluyen el XML firmado, la representación impresa (PDF) y el CDR.</p>"
+        ) % {"num": num, "emisor": self.company_id.name or ""}
+        mail = self.env["mail.mail"].sudo().create({
+            "subject": subject,
+            "body_html": body,
+            "email_to": email,
+            "email_from": self.company_id.email or self.env.user.email_formatted,
+            "attachment_ids": [(6, 0, atts.ids)],
+            "auto_delete": False,
+        })
+        mail.send(raise_exception=False)
+        _logger.info("email comprobante %s enviado a %s (%d adjuntos)", num, email, len(atts))
+        return True
 
     def _l10n_pe_apply_signed(self, firma):
         """Modo instantáneo: aplica el resultado de la FIRMA (sin enviar a SUNAT). Adjunta el
@@ -1806,6 +1896,13 @@ class AccountMove(models.Model):
             if move.l10n_pe_biller_state in ("enviado", "en_proceso"):
                 _logger.info("Factura ya enviada o en proceso: %s", move.name)
                 continue
+            # Guarda: no aplicar percepción a un cliente exceptuado del régimen (QA-028). El cobro
+            # adicional no corresponde; se bloquea con un mensaje claro en vez de emitir mal.
+            if move.l10n_pe_ne_percepcion and move.partner_id.l10n_pe_ne_exceptuado_percepcion:
+                raise UserError(_(
+                    "El cliente %s está exceptuado del régimen de percepciones; no corresponde "
+                    "aplicarle percepción. Desactivá la percepción para emitir este comprobante."
+                ) % (move.partner_id.display_name or ""))
             if use_async:
                 move._l10n_pe_enqueue_emission(icp)
                 continue
@@ -1934,6 +2031,8 @@ class AccountMove(models.Model):
                 lvals["l10n_pe_ne_unit_code"] = ln["unidad"]
             if ln.get("codSunat"):
                 lvals["l10n_pe_ne_cod_producto_sunat"] = ln["codSunat"]
+            if ln.get("afectacionGratuita"):
+                lvals["l10n_pe_ne_afectacion_gratuita"] = ln["afectacionGratuita"]
             lines.append((0, 0, lvals))
         # Otros cargos (que afectan la base imponible): se agregan como una línea gravada adicional, así
         # suben gravada/IGV/total con la maquinaria de líneas ya validada (no se prorratea el desc. global).
@@ -3881,6 +3980,8 @@ class AccountMove(models.Model):
             "email": p.email or "",
             "telefono": p.phone or "",
             "direccion": p.street or "",
+            "exceptuadoPercepcion": p.l10n_pe_ne_exceptuado_percepcion,
+            "parteVinculada": p.l10n_pe_ne_parte_vinculada,
         }
 
     def _l10n_pe_ne_ident_type(self, tipoDoc):
@@ -3903,6 +4004,8 @@ class AccountMove(models.Model):
             ("email", "email"),
             ("telefono", "phone"),
             ("direccion", "street"),
+            ("exceptuadoPercepcion", "l10n_pe_ne_exceptuado_percepcion"),
+            ("parteVinculada", "l10n_pe_ne_parte_vinculada"),
         ):
             if key in c:
                 vals[field] = c.get(key) or False
@@ -4831,10 +4934,16 @@ class AccountMove(models.Model):
                 move.l10n_pe_ne_anticipo_tipo = a["tipo"]
         # Forma de pago: Crédito (con cuotas) emite cac:PaymentTerms; medios de pago
         # (efectivo/Yape/…) se guardan como dato interno del POS (no van al XML SUNAT).
+        # Establecimiento emisor (sucursal): código de local anexo SUNAT del comprobante.
+        if payload.get("codEstablecimiento"):
+            move.l10n_pe_ne_cod_establecimiento = payload["codEstablecimiento"]
         fp = payload.get("formaPago") or {}
         if fp.get("tipo") == "Credito" or fp.get("cuotas"):
             move.l10n_pe_ne_forma_pago = "Credito"
             move.l10n_pe_ne_cuotas = fp.get("cuotas") or []
+            # Forma de pago mixta: inicial al contado; el saldo a crédito lo llevan las cuotas.
+            if fp.get("inicial"):
+                move.l10n_pe_ne_inicial_contado = float(fp["inicial"])
             venc = (fp.get("cuotas") or [{}])[-1].get("fecha")
             if venc:
                 move.invoice_date_due = venc

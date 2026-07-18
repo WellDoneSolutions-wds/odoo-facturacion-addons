@@ -719,6 +719,14 @@ class L10nPeNeGuiaRemision(models.Model):
             # y no se exige establecimiento de llegada; sin puerto, la llegada debe ser un
             # establecimiento propio (SUNAT 3369 exige AddressTypeCode de llegada presente).
             if self.puerto_codigo:
+                # SUNAT 3369 es ASIMÉTRICO: en exportación solo un puerto MARÍTIMO (tipo 1)
+                # exime el establecimiento de llegada; un aeropuerto (tipo 2) NO lo exime y el
+                # XSLT rechaza (a diferencia de la importación, que sí admite tipo 2). La
+                # exportación aérea va por el establecimiento de llegada, sin puerto.
+                if self.puerto_tipo != '1':
+                    raise UserError(_('La exportación por punto de embarque solo admite puertos '
+                                      'marítimos. Para exportación aérea, deja el puerto vacío e '
+                                      'indica el establecimiento de llegada.'))
                 if self.ubigeo_llegada != self._l10n_pe_ne_puerto_ubigeo():
                     raise UserError(_('El ubigeo de llegada debe coincidir con el del puerto elegido.'))
             elif not self.cod_estab_llegada:
@@ -947,10 +955,12 @@ class L10nPeNeGuiaRemision(models.Model):
         for g in guias:
             try:
                 g.l10n_pe_ne_consultar_ticket()
-            except Exception as exc:  # noqa: BLE001 — reintenta al próximo cron
+                # Solo cuenta el intento cuando HUBO respuesta del biller (la consulta no lanzó):
+                # un corte de red transitorio no debe gastar el tope y sacar la guía del cron —
+                # esos días de outage no son "tickets muertos". Un HTTP no-200 sí cuenta (no lanza).
+                g.consulta_intentos = (g.consulta_intentos or 0) + 1
+            except Exception as exc:  # noqa: BLE001 — reintenta al próximo cron (sin gastar intento)
                 _logger.warning('GRE %s: re-consulta falló: %s', g.name, exc)
-            # Contar el intento aunque la guía siga en_proceso (o ya sea 'enviado': inocuo).
-            g.consulta_intentos = (g.consulta_intentos or 0) + 1
             # Commit por guía: una re-consulta lenta no debe descartar el progreso previo.
             if not test_mode:
                 self.env.cr.commit()

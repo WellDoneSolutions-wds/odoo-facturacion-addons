@@ -937,6 +937,15 @@ class TestGuiaComercioExteriorPuerto(TestGuiaBase):
         with self.assertRaisesRegex(UserError, "coincidir"):
             g._l10n_pe_ne_validar()
 
+    def test_export_via_aeropuerto_rechaza(self):
+        # SUNAT 3369 es asimétrico: en exportación solo un puerto marítimo (tipo 1) exime el
+        # establecimiento de llegada; un aeropuerto (tipo 2) lo rechazaría. Se corta amigable
+        # ANTES de SUNAT (la importación, en cambio, sí admite tipo 2 — ver test_import_via_aeropuerto).
+        g = self.Guia.create(self._vals_export_puerto(
+            puerto_codigo="LIM", puerto_tipo="2", ubigeo_llegada="070101"))
+        with self.assertRaisesRegex(UserError, "marítimos"):
+            g._l10n_pe_ne_validar()
+
     def test_export_sin_puerto_sigue_exigiendo_establecimiento(self):
         # Regresión: la exportación sin puerto conserva la exigencia de codEstabLlegada.
         g = self.Guia.create(self._vals(
@@ -972,3 +981,16 @@ class TestGuiaCronConsulta(TestGuiaBase):
         self.assertNotIn(muerta.id, consultadas)
         self.assertEqual(activa.consulta_intentos, 1)
         self.assertEqual(muerta.consulta_intentos, self.Guia._MAX_CONSULTA_INTENTOS)
+
+    def test_cron_no_gasta_intento_en_corte_de_red(self):
+        # I1: si la re-consulta LANZA (corte de red / biller caído), el intento NO se cuenta —
+        # un outage transitorio no debe agotar el tope y sacar la guía del cron.
+        g = self._en_proceso(intentos=5)
+
+        def boom(guia):
+            raise UserError("Error de conexión con el facturador: timeout")
+
+        with patch.object(type(self.env["l10n_pe_ne.guia_remision"]),
+                          "l10n_pe_ne_consultar_ticket", boom):
+            self.env["l10n_pe_ne.guia_remision"]._cron_consultar_en_proceso()
+        self.assertEqual(g.consulta_intentos, 5)  # sin cambio: no gastó el intento

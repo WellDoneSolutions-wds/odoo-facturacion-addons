@@ -944,3 +944,31 @@ class TestGuiaComercioExteriorPuerto(TestGuiaBase):
             cod_estab_llegada=False))
         with self.assertRaisesRegex(UserError, "llegada"):
             g._l10n_pe_ne_validar()
+
+
+class TestGuiaCronConsulta(TestGuiaBase):
+    """Robustez del cron de re-consulta de guías en_proceso (G1 limit/commit, G4 tope de
+    intentos): acota la carga por corrida y no re-consulta tickets muertos para siempre."""
+
+    def _en_proceso(self, intentos=0):
+        g = self.Guia.create(self._vals())
+        g.write({"estado": "en_proceso", "num_ticket": "TCK123", "consulta_intentos": intentos})
+        return g
+
+    def test_cron_incrementa_intentos_y_respeta_tope(self):
+        activa = self._en_proceso(intentos=0)
+        muerta = self._en_proceso(intentos=self.Guia._MAX_CONSULTA_INTENTOS)
+        consultadas = []
+
+        def fake_consult(guia):
+            consultadas.append(guia.id)
+
+        with patch.object(type(self.env["l10n_pe_ne.guia_remision"]),
+                          "l10n_pe_ne_consultar_ticket", fake_consult):
+            self.env["l10n_pe_ne.guia_remision"]._cron_consultar_en_proceso()
+        # La guía dentro del tope se re-consulta y su contador sube; la que ya llegó al tope
+        # se salta (no gasta la ventana del cron).
+        self.assertIn(activa.id, consultadas)
+        self.assertNotIn(muerta.id, consultadas)
+        self.assertEqual(activa.consulta_intentos, 1)
+        self.assertEqual(muerta.consulta_intentos, self.Guia._MAX_CONSULTA_INTENTOS)

@@ -20,6 +20,7 @@ import requests
 
 from odoo import _, api, fields, models
 from odoo.exceptions import UserError
+from odoo.tools import config
 
 _logger = logging.getLogger(__name__)
 
@@ -236,6 +237,10 @@ class L10nPeNeGuiaRemision(models.Model):
     l10n_pe_biller_cdr = fields.Many2one('ir.attachment', string='CDR', copy=False)
     l10n_pe_biller_message = fields.Char(string='Mensaje del facturador', copy=False)
     num_ticket = fields.Char(string='N° de ticket SUNAT', copy=False)
+    # Nº de re-consultas del ticket ya intentadas (lo incrementa el cron). Acota la
+    # re-consulta: pasado un tope el ticket se da por muerto y deja de gastar la ventana
+    # del cron (mismo espíritu que l10n_pe_ne_envio_intentos en account.move).
+    consulta_intentos = fields.Integer(string='Intentos de re-consulta', default=0, copy=False)
     l10n_pe_ne_qr_url = fields.Char(string='URL del QR (SUNAT)', copy=False,
                                     help='Viene en el CDR aceptado; es el QR válido para sustentar el traslado.')
 
@@ -888,6 +893,15 @@ class L10nPeNeGuiaRemision(models.Model):
                 # para re-consultar (botón en la SPA + cron cada 10 min).
                 self.estado = 'en_proceso'
                 self.l10n_pe_biller_message = _('Firmada y enviada; SUNAT aún no devolvió el CDR.')
+                # Re-consulta inmediata (best-effort): SUNAT suele resolver el ticket GRE en
+                # segundos; así el usuario recibe el CDR sin esperar los 10 min del cron. Si
+                # falla, el cron reintenta. No debe romper la emisión ya realizada.
+                if self.num_ticket:
+                    try:
+                        self.l10n_pe_ne_consultar_ticket()
+                    except Exception as exc:  # noqa: BLE001
+                        _logger.info('GRE %s: re-consulta inmediata falló (reintenta el cron): %s',
+                                     self.name, exc)
         else:
             self.estado = 'rechazado' if resp.status_code == 400 else 'error'
             self.l10n_pe_biller_message = ('HTTP %s: %s' % (resp.status_code, body))[:2000]
@@ -914,14 +928,32 @@ class L10nPeNeGuiaRemision(models.Model):
             self.l10n_pe_biller_message = ('HTTP %s: %s' % (resp.status_code, resp.text or ''))[:2000]
         return self._l10n_pe_ne_guia_dict()
 
+    # Tope de re-consultas: a 10 min/cron, ~288 intentos ≈ 2 días. SUNAT resuelve un ticket
+    # GRE en minutos; pasado eso es un ticket muerto que no debe seguir gastando la ventana.
+    _MAX_CONSULTA_INTENTOS = 288
+
     @api.model
     def _cron_consultar_en_proceso(self):
-        """Cron: re-consulta todas las guías en_proceso con ticket. Best-effort."""
-        for g in self.search([('estado', '=', 'en_proceso'), ('num_ticket', '!=', False)]):
+        """Cron: re-consulta las guías en_proceso con ticket y aplica el CDR si ya está.
+        Acotado (limit + tope de intentos + commit por guía) para no exceder limit_time_real ni
+        perder el progreso ante un SIGKILL — mismo patrón que los crons de account.move."""
+        guias = self.search([
+            ('estado', '=', 'en_proceso'),
+            ('num_ticket', '!=', False),
+            ('consulta_intentos', '<', self._MAX_CONSULTA_INTENTOS),
+        ], limit=50)
+        # Odoo prohíbe cr.commit() dentro de un test; en producción sí commiteamos por guía.
+        test_mode = config['test_enable']
+        for g in guias:
             try:
                 g.l10n_pe_ne_consultar_ticket()
             except Exception as exc:  # noqa: BLE001 — reintenta al próximo cron
                 _logger.warning('GRE %s: re-consulta falló: %s', g.name, exc)
+            # Contar el intento aunque la guía siga en_proceso (o ya sea 'enviado': inocuo).
+            g.consulta_intentos = (g.consulta_intentos or 0) + 1
+            # Commit por guía: una re-consulta lenta no debe descartar el progreso previo.
+            if not test_mode:
+                self.env.cr.commit()
 
     # ------------------------------------------------------- serialización
     def _l10n_pe_ne_guia_dict(self):

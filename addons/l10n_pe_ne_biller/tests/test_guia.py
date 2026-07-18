@@ -198,9 +198,9 @@ class TestGuiaValidaciones(TestGuiaBase):
         self._rechaza("RUC .* o DNI")
 
     def test_motivo_no_soportado(self):
-        # '04' pasó a SUPPORTED_MOTIVOS (traslado entre establecimientos, ver
-        # TestGuiaWizard/amendment 3c); se usa '08' (Importación), que sigue sin XML.
-        self._rechaza("no soportado", motivo_traslado="08")
+        # '08' (Importación) pasó a SUPPORTED_MOTIVOS (comercio exterior vía puerto); se
+        # usa '19' (Traslado a zona primaria), que sigue sin XML soportado.
+        self._rechaza("no soportado", motivo_traslado="19")
 
     def test_motivo_otros_sin_descripcion(self):
         self._rechaza("requiere describir", motivo_traslado="13")
@@ -794,3 +794,122 @@ class TestGuiaComercioExterior(TestGuiaBase):
         res = self.Guia.l10n_pe_ne_quick_guia(payload)
         g = self.Guia.browse(res["id"])
         self.assertEqual(g.dam_numero, "235-2024-40-999999")
+
+
+class TestGuiaComercioExteriorPuerto(TestGuiaBase):
+    """Comercio exterior vía PUERTO/AEROPUERTO — importación (motivo 08) y exportación (09)
+    con FirstArrivalPortLocation. El biller emite codPuerto + locTypePuerto ('1' puerto /
+    '2' aeropuerto) + nomPuerto (del catálogo). Regla SUNAT 3364: el ubigeo del punto de
+    partida (importación) o de llegada (exportación) debe ser el del puerto elegido.
+    Se usa CLL (Callao, cat_63) -> ubigeo 070101."""
+
+    def _vals_import(self, **extra):
+        v = self._vals()
+        v.update({
+            "motivo_traslado": "08",
+            "dam_numero": "235-2024-10-123456",   # régimen 10 = importación
+            "puerto_codigo": "CLL", "puerto_tipo": "1",  # Callao (cat_63) -> ubigeo 070101
+            "ubigeo_partida": "070101",            # 3364: partida = ubigeo del puerto
+        })
+        v.update(extra)
+        return v
+
+    # ------------------------------------------------------------- importación 08
+    def test_import_payload_lleva_puerto_dam_indicador(self):
+        g = self.Guia.create(self._vals_import())
+        p = g._l10n_pe_ne_build_gre_payload()
+        cab = p["cabecera"]
+        self.assertEqual(cab["codPuerto"], "CLL")
+        self.assertEqual(cab["locTypePuerto"], "1")
+        self.assertEqual(cab["nomPuerto"], "Callao")
+        self.assertEqual(cab["indTrasladoTotalDAMoDS"], "1")
+        dam = [d for d in p["docRelacionado"] if d["codTipDocRel"] == "50"]
+        self.assertEqual(len(dam), 1)
+        self.assertEqual(dam[0]["numDocRel"], "235-2024-10-123456")
+        g._l10n_pe_ne_validar()  # no lanza
+
+    def test_import_sin_puerto_rechaza(self):
+        g = self.Guia.create(self._vals_import(puerto_codigo=False))
+        with self.assertRaisesRegex(UserError, "puerto"):
+            g._l10n_pe_ne_validar()
+
+    def test_import_ubigeo_partida_distinto_rechaza(self):
+        g = self.Guia.create(self._vals_import(ubigeo_partida="150101"))
+        with self.assertRaisesRegex(UserError, "coincidir"):
+            g._l10n_pe_ne_validar()
+
+    def test_import_dam_regimen_exportacion_rechaza(self):
+        # Régimen 40 (exportación) en un motivo de importación => formato inválido.
+        g = self.Guia.create(self._vals_import(dam_numero="235-2024-40-123456"))
+        with self.assertRaisesRegex(UserError, "importación"):
+            g._l10n_pe_ne_validar()
+
+    def test_import_puerto_desconocido_rechaza(self):
+        g = self.Guia.create(self._vals_import(puerto_codigo="ZZZ"))
+        with self.assertRaisesRegex(UserError, "catálogo"):
+            g._l10n_pe_ne_validar()
+
+    def test_import_aeropuerto_ubigeo_del_catalogo(self):
+        # LIM (Jorge Chávez, cat_64) -> ubigeo 070101: el ubigeo sale del catálogo de
+        # aeropuertos cuando puerto_tipo = '2'.
+        g = self.Guia.create(self._vals_import(
+            puerto_codigo="LIM", puerto_tipo="2", ubigeo_partida="070101"))
+        cab = g._l10n_pe_ne_build_gre_payload()["cabecera"]
+        self.assertEqual(cab["locTypePuerto"], "2")
+        self.assertEqual(cab["nomPuerto"], "Internacional Jorge Chávez")
+        g._l10n_pe_ne_validar()  # no lanza
+
+    def test_detalle_expone_puerto(self):
+        g = self.Guia.create(self._vals_import())
+        d = g.l10n_pe_ne_guia_detalle()
+        self.assertEqual(d["puertoCodigo"], "CLL")
+        self.assertEqual(d["puertoTipo"], "1")
+        self.assertEqual(d["puertoNombre"], "Callao")
+
+    def test_quick_guia_acepta_puerto(self):
+        payload = {
+            "destinatarioId": self.cliente.id, "motivoTraslado": "08",
+            "damNumero": "235-2024-10-777777",
+            "puertoCodigo": "CLL", "puertoTipo": "1",
+            "ubigeoPartida": "070101", "dirPartida": "Puerto del Callao",
+            "ubigeoLlegada": "150102", "dirLlegada": "Av. Dos 200",
+            "items": [{"descripcion": "Bien importado", "cantidad": 1}],
+        }
+        res = self.Guia.l10n_pe_ne_quick_guia(payload)
+        g = self.Guia.browse(res["id"])
+        self.assertEqual(g.puerto_codigo, "CLL")
+        self.assertEqual(g.puerto_tipo, "1")
+
+    # ------------------------------------------------------------- exportación 09
+    def _vals_export_puerto(self, **extra):
+        v = self._vals()
+        v.update({
+            "motivo_traslado": "09",
+            "dam_numero": "235-2024-40-123456",   # régimen 40 = exportación
+            "puerto_codigo": "CLL", "puerto_tipo": "1",
+            "ubigeo_llegada": "070101",            # 3364: llegada = ubigeo del puerto
+            "cod_estab_llegada": False,            # con puerto no se exige establecimiento
+        })
+        v.update(extra)
+        return v
+
+    def test_export_con_puerto_valida_ok(self):
+        g = self.Guia.create(self._vals_export_puerto())
+        g._l10n_pe_ne_validar()  # no lanza
+        cab = g._l10n_pe_ne_build_gre_payload()["cabecera"]
+        self.assertEqual(cab["codPuerto"], "CLL")
+        self.assertEqual(cab["nomPuerto"], "Callao")
+        self.assertEqual(cab["indTrasladoTotalDAMoDS"], "1")
+
+    def test_export_con_puerto_ubigeo_llegada_distinto_rechaza(self):
+        g = self.Guia.create(self._vals_export_puerto(ubigeo_llegada="150102"))
+        with self.assertRaisesRegex(UserError, "coincidir"):
+            g._l10n_pe_ne_validar()
+
+    def test_export_sin_puerto_sigue_exigiendo_establecimiento(self):
+        # Regresión: la exportación sin puerto conserva la exigencia de codEstabLlegada.
+        g = self.Guia.create(self._vals(
+            motivo_traslado="09", dam_numero="235-2024-40-123456",
+            cod_estab_llegada=False))
+        with self.assertRaisesRegex(UserError, "llegada"):
+            g._l10n_pe_ne_validar()

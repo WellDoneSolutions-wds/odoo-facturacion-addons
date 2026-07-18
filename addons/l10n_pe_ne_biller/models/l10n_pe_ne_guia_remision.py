@@ -43,15 +43,47 @@ MODALIDADES_TRASLADO = [
 UNIDADES_PESO = [('KGM', 'Kilogramos'), ('TNE', 'Toneladas')]
 
 # Motivos cuyo XML el biller sustenta completo hoy. 04 exige código de establecimiento
-# propio en ambos puntos (ver _l10n_pe_ne_validar); 08/09 contenedor/puerto — ampliar
-# biller + este set al soportarlos.
-SUPPORTED_MOTIVOS = ('01', '02', '04', '09', '13', '14', '18')
-# Motivo 09 = Exportación (catálogo 20). Comercio exterior: exige una DAM/DUA relacionada
-# (DocumentTypeCode 50, régimen 40 = exportación definitiva) + el indicador de traslado
-# total DAM/DS, que relaja el nivel de línea. La importación (08) queda fuera por ahora:
-# su establecimiento de partida lleva el RUC de un tercero (SUNAT 3411), que el modelo de
-# establecimientos propios no representa aún.
+# propio en ambos puntos (ver _l10n_pe_ne_validar).
+SUPPORTED_MOTIVOS = ('01', '02', '04', '08', '09', '13', '14', '18')
+# Comercio exterior (catálogo 20): 08 = Importación, 09 = Exportación. Ambos emiten una
+# DAM/DUA relacionada (DocumentTypeCode 50) + el indicador de traslado total DAM/DS, que
+# relaja el nivel de línea. El N° de la DAM codifica el régimen (SUNAT 3441): 10 =
+# importación, 40 = exportación definitiva. La importación se modela por el PUERTO de
+# ingreso (no un establecimiento de tercero): el origen es el puerto/aeropuerto, cuyo
+# ubigeo debe ser el punto de partida (SUNAT 3364/3365).
 DAM_EXPORTACION_RE = r'^[0-9]{3}-[0-9]{4}-40-[1-9][0-9]{0,5}$'
+DAM_IMPORTACION_RE = r'^[0-9]{3}-[0-9]{4}-10-[1-9][0-9]{0,5}$'
+
+# Puertos (cat_63, listID 1) y aeropuertos (cat_64, listID 2) SUNAT: código -> (ubigeo,
+# nombre). El biller los emite como cac:FirstArrivalPortLocation (codPuerto + locTypePuerto
+# '1' puerto / '2' aeropuerto + nomPuerto). La regla SUNAT 3364 exige que el ubigeo del
+# punto de partida (importación) o de llegada (exportación) sea el del puerto elegido.
+PUERTOS = {
+    "PUB": ("200801", "Bayóvar"), "CLL": ("070101", "Callao"), "CON": ("150119", "Conchán"),
+    "CHY": ("150605", "Chancay"), "CHM": ("021801", "Chimbote"), "EEN": ("140113", "Eten"),
+    "HCO": ("150801", "Huacho"), "HUY": ("021101", "Huarmey"), "ILQ": ("180301", "Ilo"),
+    "IQT": ("160101", "Iquitos"), "MRI": ("040701", "Matarani"), "PAI": ("200501", "Paita"),
+    "PIO": ("110505", "Pisco"), "PCL": ("250101", "Pucallpa"), "PUN": ("210101", "Puno"),
+    "SVY": ("130109", "Salaverry"), "SNX": ("110304", "San Nicolas"), "SUP": ("150204", "Supe"),
+    "TYL": ("200701", "Talara"), "YMS": ("160201", "Yurimaguas"), "ZOR": ("240103", "Zorritos"),
+}
+AEROPUERTOS = {
+    "AQP": ("040104", "Rodríguez Ballón"), "ANS": ("030201", "Andahuaylas"),
+    "ATA": ("020604", "Comandante FAP Germán Arias Graciani"), "AYP": ("050113", "Coronel FAP Alfredo Mendívil Duarte"),
+    "CJA": ("060108", "Mayor Gral. FAP Armando Revoredo Iglesias"), "CHM": ("021809", "Tnte. FAP Jaime De Montruil M."),
+    "CUZ": ("080108", "Alejandro Velazco Astete"), "CHH": ("010101", "Chachapoyas"),
+    "CIX": ("140101", "Capitán FAP José Quiñones G."), "HUU": ("100101", "Alférez FAP David Figueroa Fernandini"),
+    "ILO": ("180301", "Ilo"), "IQT": ("160101", "Coronel FAP Francisco Secada Vignetta"),
+    "JAE": ("060802", "Jaén - Shumba"), "JJI": ("220601", "Juanjuí"), "JUL": ("211101", "Manco Cápac"),
+    "JAU": ("120430", "Francisco Carlé"), "LIM": ("070101", "Internacional Jorge Chávez"),
+    "MBP": ("220101", "Moyobamba"), "PIO": ("110506", "Capitán FAP Renán Elías Olivera"),
+    "PIU": ("200104", "Capitán FAP Carlos Concha Iberico"), "PCL": ("250105", "Capitán FAP David Abensur Rengifo"),
+    "PEM": ("170101", "Padre Aldamiz"), "RIJ": ("220801", "Juan Simons Vela - Rioja"),
+    "TCQ": ("230101", "Coronel FAP Carlos Ciriani Santa Rosa"), "TYL": ("200701", "Capitán FAP Montes Arias"),
+    "TPP": ("220901", "Cadete FAP Guillermo del Castillo Paredes"), "TIG": ("100601", "Tingo María"),
+    "TRU": ("130104", "Capitán FAP Carlos Martínez Pinillos"), "TBP": ("240101", "Capitán FAP Pedro Canga Rodríguez"),
+    "ATG": ("250201", "Atalaya - Tnte. Gral. Gerardo Pérez Pinedo"), "YMS": ("160201", "Moisés Benzaquen Rengifo"),
+}
 
 # Relación destinatario ↔ emisor según el motivo (SUNAT 2554/2555):
 #   - traslado interno (compra, entre establecimientos propios, itinerante): el destinatario
@@ -168,10 +200,16 @@ class L10nPeNeGuiaRemision(models.Model):
     # terceros) — nunca se manda un codEstab* sin su rucEstab* gemelo.
     cod_estab_partida = fields.Char(string='Cód. establecimiento partida')
     cod_estab_llegada = fields.Char(string='Cód. establecimiento llegada')
-    # Comercio exterior (motivo 09 Exportación): N° de la DAM/DUA (Declaración Aduanera de
-    # Mercancías). Viaja como documento relacionado DocumentTypeCode 50; su formato codifica
-    # el régimen 40 (exportación definitiva). Ver DAM_EXPORTACION_RE.
-    dam_numero = fields.Char(string='N° de DAM/DUA (exportación)')
+    # Comercio exterior (08 Importación / 09 Exportación): N° de la DAM/DUA (Declaración
+    # Aduanera de Mercancías). Viaja como documento relacionado DocumentTypeCode 50; su
+    # formato codifica el régimen — 10 importación, 40 exportación. Ver DAM_*_RE.
+    dam_numero = fields.Char(string='N° de DAM/DUA')
+    # Puerto/aeropuerto de embarque/desembarque (cat_63 puerto / cat_64 aeropuerto). El
+    # nombre se deriva del catálogo (PUERTOS/AEROPUERTOS), no es un campo. En la importación
+    # (08) el ubigeo del puerto es el punto de partida; en la exportación (09), el de llegada.
+    puerto_codigo = fields.Char(string='Cód. puerto/aeropuerto (SUNAT)')
+    puerto_tipo = fields.Selection([('1', 'Puerto'), ('2', 'Aeropuerto')],
+                                   string='Tipo de punto de embarque')
 
     # Autorización de carga (permiso especial de transporte, catálogo D37 SUNAT).
     ent_autorizacion_carga = fields.Char(string='Entidad autorización de carga (D37)')
@@ -288,6 +326,21 @@ class L10nPeNeGuiaRemision(models.Model):
         corr = m.l10n_pe_ne_corr_emit or ''
         return ('%s-%s' % (serie, corr)) if (serie or corr) else (m.name or '')
 
+    def _l10n_pe_ne_puerto_entry(self):
+        """(ubigeo, nombre) del puerto/aeropuerto elegido según su tipo (cat_63 puerto /
+        cat_64 aeropuerto), o None si el código no está en el catálogo. Tipo '2' =
+        aeropuerto; cualquier otro (o vacío) se trata como puerto."""
+        self.ensure_one()
+        catalogo = AEROPUERTOS if self.puerto_tipo == '2' else PUERTOS
+        return catalogo.get((self.puerto_codigo or '').strip().upper())
+
+    def _l10n_pe_ne_puerto_ubigeo(self):
+        """Ubigeo (cat.13) del puerto/aeropuerto elegido, o '' si el código no está en el
+        catálogo. Es el ubigeo que la regla SUNAT 3364 exige en el punto de partida
+        (importación 08) o de llegada (exportación 09)."""
+        entry = self._l10n_pe_ne_puerto_entry()
+        return entry[0] if entry else ''
+
     def _l10n_pe_ne_build_gre_payload(self):
         """Arma el JSON que espera el biller (`GreRequest`). Claves = campos de GreCabeceraRequest."""
         self.ensure_one()
@@ -331,11 +384,20 @@ class L10nPeNeGuiaRemision(models.Model):
             cab['indRetornoVehiculoEnvaseVacio'] = '1'
         if self.ind_retorno_vacio:
             cab['indRetornoVehiculoVacio'] = '1'
-        # Exportación (09): el indicador de traslado total DAM/DS relaja el nivel de línea
-        # (así el detalle de bienes del baseline pasa el XSLT sin exigir unidad cat.65 ni
-        # cantidad). La DAM viaja como documento relacionado (ver _guia_doc_relacionado).
-        if self.motivo_traslado == '09':
+        # Comercio exterior (08 importación / 09 exportación): el indicador de traslado total
+        # DAM/DS relaja el nivel de línea (así el detalle de bienes del baseline pasa el XSLT
+        # sin exigir unidad cat.65 ni cantidad). La DAM viaja como documento relacionado
+        # (ver _guia_doc_relacionado).
+        if self.motivo_traslado in ('08', '09'):
             cab['indTrasladoTotalDAMoDS'] = '1'
+        # Puerto/aeropuerto de embarque/desembarque (cac:FirstArrivalPortLocation): codPuerto
+        # + locTypePuerto ('1' puerto cat_63 / '2' aeropuerto cat_64) + nomPuerto (del
+        # catálogo). En la importación es el puerto de ingreso; en la exportación, el de salida.
+        if self.puerto_codigo:
+            entry = self._l10n_pe_ne_puerto_entry()
+            cab['codPuerto'] = self.puerto_codigo
+            cab['locTypePuerto'] = self.puerto_tipo or '1'
+            cab['nomPuerto'] = entry[1] if entry else ''
         # Establecimientos propios (motivo 04): el RUC gemelo SIEMPRE es el de esta
         # compañía — nunca se manda un codEstab* sin su rucEstab* (el biller lo rechaza).
         # Sin RUC de compañía configurado no hay con qué llenar rucEstab*: mejor fallar acá
@@ -442,9 +504,10 @@ class L10nPeNeGuiaRemision(models.Model):
             'codTipDocRel': m.l10n_pe_ne_tipo_doc or '01',
             'numDocRel': '%s-%s' % (m.l10n_pe_ne_serie_emit, m.l10n_pe_ne_corr_emit or ''),
         } for m in docs if m.l10n_pe_ne_serie_emit]
-        # Exportación (09): la DAM/DUA como documento relacionado DocumentTypeCode 50 (no
-        # lleva IssuerParty — el gate 3380/3382 no aplica a 50/52).
-        if self.motivo_traslado == '09' and self.dam_numero:
+        # Comercio exterior (08 importación / 09 exportación): la DAM/DUA como documento
+        # relacionado DocumentTypeCode 50 (no lleva IssuerParty — el gate 3380/3382 no aplica
+        # a 50/52).
+        if self.motivo_traslado in ('08', '09') and self.dam_numero:
             rel.append({'codTipDocRel': '50', 'numDocRel': self.dam_numero})
         return rel
 
@@ -587,19 +650,45 @@ class L10nPeNeGuiaRemision(models.Model):
                             % self.motivo_traslado)
         if self.motivo_traslado == '13' and not (self.des_motivo_traslado or '').strip():
             raise UserError(_('El motivo "Otros" requiere describir el motivo del traslado.'))
-        if self.motivo_traslado == '09':
-            # Exportación: la DAM/DUA es obligatoria (SUNAT 3440) y su N° codifica el régimen
-            # 40 (SUNAT 3441). Sin puerto declarado, el punto de llegada debe ser un
-            # establecimiento propio (SUNAT 3369 exige AddressTypeCode de llegada presente).
+        if self.motivo_traslado in ('08', '09'):
+            # Comercio exterior: la DAM/DUA es obligatoria (SUNAT 3440) y su N° codifica el
+            # régimen (SUNAT 3441): 10 = importación, 40 = exportación.
             dam = (self.dam_numero or '').strip()
             if not dam:
-                raise UserError(_('La exportación requiere el N° de DAM/DUA.'))
-            if not re.match(DAM_EXPORTACION_RE, dam):
-                raise UserError(_('El N° de DAM/DUA de exportación debe tener el formato '
-                                  'NNN-AAAA-40-NNNNNN (p. ej. 235-2024-40-123456).'))
-            if not self.cod_estab_llegada:
-                raise UserError(_('La exportación requiere indicar el establecimiento de '
-                                  'llegada (elige un punto de llegada registrado).'))
+                raise UserError(_('El comercio exterior requiere el N° de DAM/DUA.'))
+            if self.motivo_traslado == '08' and not re.match(DAM_IMPORTACION_RE, dam):
+                raise UserError(_('El N° de DAM/DUA de importación debe codificar el régimen 10 '
+                                  '(formato NNN-AAAA-10-NNNNNN, p. ej. 235-2024-10-123456).'))
+            if self.motivo_traslado == '09' and not re.match(DAM_EXPORTACION_RE, dam):
+                raise UserError(_('El N° de DAM/DUA de exportación debe codificar el régimen 40 '
+                                  '(formato NNN-AAAA-40-NNNNNN, p. ej. 235-2024-40-123456).'))
+        # Puerto/aeropuerto (cat_63/cat_64): si se declara, exige el tipo y que el código
+        # exista en el catálogo — de ahí sale el ubigeo que la regla SUNAT 3364 obliga a
+        # que coincida con el punto de partida (importación) o de llegada (exportación).
+        if self.puerto_codigo:
+            if not self.puerto_tipo:
+                raise UserError(_('Indica si el punto de embarque es un puerto o un aeropuerto.'))
+            if not self._l10n_pe_ne_puerto_ubigeo():
+                raise UserError(_('El código de puerto/aeropuerto "%s" no está en el catálogo '
+                                  'SUNAT (cat_63 puerto / cat_64 aeropuerto).') % self.puerto_codigo)
+        if self.motivo_traslado == '08':
+            # Importación vía puerto (SUNAT 3365): el origen es el puerto/aeropuerto de ingreso
+            # y su ubigeo debe ser el punto de partida (SUNAT 3364). No lleva establecimiento
+            # propio de partida (ese iría con RUC del agente de aduanas — no modelado).
+            if not self.puerto_codigo:
+                raise UserError(_('La importación requiere el puerto/aeropuerto de ingreso.'))
+            if self.ubigeo_partida != self._l10n_pe_ne_puerto_ubigeo():
+                raise UserError(_('El ubigeo de partida debe coincidir con el del puerto elegido.'))
+        elif self.motivo_traslado == '09':
+            # Exportación: con puerto, el ubigeo de llegada debe ser el del puerto (SUNAT 3364)
+            # y no se exige establecimiento de llegada; sin puerto, la llegada debe ser un
+            # establecimiento propio (SUNAT 3369 exige AddressTypeCode de llegada presente).
+            if self.puerto_codigo:
+                if self.ubigeo_llegada != self._l10n_pe_ne_puerto_ubigeo():
+                    raise UserError(_('El ubigeo de llegada debe coincidir con el del puerto elegido.'))
+            elif not self.cod_estab_llegada:
+                raise UserError(_('La exportación sin puerto requiere indicar el establecimiento '
+                                  'de llegada (elige un punto de llegada registrado).'))
         if self.motivo_traslado == '02':
             if not self.proveedor_id:
                 raise UserError(_('El motivo "Compra" requiere indicar el proveedor.'))
@@ -844,6 +933,8 @@ class L10nPeNeGuiaRemision(models.Model):
             'ubigeoPartida': c.ubigeo_partida or '', 'dirPartida': c.dir_partida or '',
             'ubigeoLlegada': c.ubigeo_llegada or '', 'dirLlegada': c.dir_llegada or '',
             'damNumero': c.dam_numero or '',
+            'puertoCodigo': c.puerto_codigo or '', 'puertoTipo': c.puerto_tipo or '',
+            'puertoNombre': (c._l10n_pe_ne_puerto_entry() or (None, ''))[1],
             'numPlaca': c.num_placa or '',
             'conductorTipoDoc': c.conductor_tipo_doc or '1', 'conductorNumDoc': c.conductor_num_doc or '',
             'conductorNombres': c.conductor_nombres or '', 'conductorApellidos': c.conductor_apellidos or '',
@@ -990,6 +1081,7 @@ class L10nPeNeGuiaRemision(models.Model):
             'ubigeoLlegada': 'ubigeo_llegada', 'dirLlegada': 'dir_llegada',
             'codEstabPartida': 'cod_estab_partida', 'codEstabLlegada': 'cod_estab_llegada',
             'damNumero': 'dam_numero',
+            'puertoCodigo': 'puerto_codigo', 'puertoTipo': 'puerto_tipo',
             'entAutorizacionCarga': 'ent_autorizacion_carga',
             'numAutorizacionCarga': 'num_autorizacion_carga',
         }

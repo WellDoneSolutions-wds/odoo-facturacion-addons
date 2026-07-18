@@ -1857,6 +1857,13 @@ class AccountMove(models.Model):
             if move.l10n_pe_biller_state in ("enviado", "en_proceso"):
                 _logger.info("Factura ya enviada o en proceso: %s", move.name)
                 continue
+            # Guarda: no aplicar percepción a un cliente exceptuado del régimen (QA-028). El cobro
+            # adicional no corresponde; se bloquea con un mensaje claro en vez de emitir mal.
+            if move.l10n_pe_ne_percepcion and move.partner_id.l10n_pe_ne_exceptuado_percepcion:
+                raise UserError(_(
+                    "El cliente %s está exceptuado del régimen de percepciones; no corresponde "
+                    "aplicarle percepción. Desactivá la percepción para emitir este comprobante."
+                ) % (move.partner_id.display_name or ""))
             if use_async:
                 move._l10n_pe_enqueue_emission(icp)
                 continue
@@ -3923,6 +3930,7 @@ class AccountMove(models.Model):
             "email": p.email or "",
             "telefono": p.phone or "",
             "direccion": p.street or "",
+            "exceptuadoPercepcion": p.l10n_pe_ne_exceptuado_percepcion,
         }
 
     def _l10n_pe_ne_ident_type(self, tipoDoc):
@@ -3945,6 +3953,7 @@ class AccountMove(models.Model):
             ("email", "email"),
             ("telefono", "phone"),
             ("direccion", "street"),
+            ("exceptuadoPercepcion", "l10n_pe_ne_exceptuado_percepcion"),
         ):
             if key in c:
                 vals[field] = c.get(key) or False

@@ -75,10 +75,14 @@ class TestCotizacionFlujo(TransactionCase):
             cot._avanzar("convertida")   # 'convertida' no es arista del mixin
 
     def test_rechazar_exige_motivo(self):
+        # con un vendedor explícito (env.user de TransactionCase es root, SIN grupos → el eje
+        # de grupo saltaría antes que el de motivo).
         cot = self._cot(estado="aceptada")
+        vendedor = self._user("ven_rech_cn01", ["l10n_pe_ne_roles.group_l10n_pe_ne_ventas"])
+        cotv = cot.with_user(vendedor)
         with self.assertRaisesRegex(UserError, "motivo"):
-            cot.l10n_pe_ne_rechazar()
-        cot.l10n_pe_ne_rechazar("cliente desistió")
+            cotv.l10n_pe_ne_rechazar()
+        cotv.l10n_pe_ne_rechazar("cliente desistió")
         self.assertEqual(cot.estado, "rechazada")
 
     # ── Conversión de IGV (regresión crítica) ───────────────────────────────────

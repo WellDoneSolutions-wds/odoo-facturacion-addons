@@ -16,6 +16,8 @@ from datetime import timedelta
 
 from odoo import _, api, fields, models
 from odoo.exceptions import AccessError, UserError
+# Misma fuente que el desglose del biller: si el IGV cambia, la conversión del fold no driftea.
+from odoo.addons.l10n_pe_ne_biller.models.l10n_pe_ne_cotizacion import IGV_RATE
 
 _G = "l10n_pe_ne_roles."
 _G_VENTAS = _G + "group_l10n_pe_ne_ventas"
@@ -191,14 +193,14 @@ class L10nPeNeCotizacionFlujo(models.Model):
     def _l10n_pe_ne_payload_emision(self, medios=None):
         """Construye el payload de quick_emit desde la cotización. CLAVE: la línea guarda
         precio_unitario CON IGV, pero quick_emit espera precioUnitario SIN IGV — se convierte
-        (afecto: /1.18; no gravado: tal cual), o el comprobante saldría ~18% más alto."""
+        (afecto: /(1+IGV); no gravado: tal cual), o el comprobante saldría ~18% más alto."""
         self.ensure_one()
         p = self.partner_id
         # tipoDoc por el documento del cliente (11=RUC→factura, si no boleta).
         tipo_doc = "01" if (p.vat and len(p.vat) == 11) else "03"
         lineas = []
         for l in self.line_ids:
-            base = round(l.precio_unitario / 1.18, 6) if l.afecto_igv else l.precio_unitario
+            base = round(l.precio_unitario / (1 + IGV_RATE), 6) if l.afecto_igv else l.precio_unitario
             lineas.append({
                 "descripcion": l.descripcion or (l.product_id.display_name or ""),
                 "cantidad": l.cantidad,

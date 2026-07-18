@@ -62,8 +62,11 @@ class L10nPeNeEstablecimiento(models.Model):
             vals['distrito_id'] = d.id
             vals['ubigeo'] = d.code or ''
         else:
-            # Sin distritoId: comportamiento previo (ubigeo tipeado a mano), intacto.
+            # Sin distritoId: comportamiento previo (ubigeo tipeado a mano). Se limpia
+            # distrito_id para que ubigeo y distrito no queden desincronizados (el dict
+            # reportaría el distrito viejo contra un ubigeo nuevo).
             vals['ubigeo'] = payload.get('ubigeo') or ''
+            vals['distrito_id'] = False
         if rec:
             rec.write(vals)
         else:

@@ -28,6 +28,18 @@ class TestDireccionesEstablec(TransactionCase):
         E = self.env["l10n_pe_ne.establecimiento"]
         rec = E.l10n_pe_ne_upsert({"codigo": "0003", "direccion": "Y", "ubigeo": "150110"})
         self.assertEqual(rec.ubigeo, "150110")
+
+    def test_upsert_ubigeo_manual_limpia_distrito_previo(self):
+        # Si un establecimiento tenía distrito y luego se hace upsert con ubigeo a mano
+        # (sin distritoId), el distrito_id se limpia para no quedar desincronizado.
+        d = self._miraflores()
+        E = self.env["l10n_pe_ne.establecimiento"]
+        rec = E.l10n_pe_ne_upsert({"codigo": "0004", "direccion": "Z", "distritoId": d.id})
+        self.assertEqual(rec.distrito_id.id, d.id)
+        rec2 = E.l10n_pe_ne_upsert({"codigo": "0004", "direccion": "Z", "ubigeo": "040101"})
+        self.assertEqual(rec2.id, rec.id)
+        self.assertEqual(rec2.ubigeo, "040101")
+        self.assertFalse(rec2.distrito_id, "distrito_id debe limpiarse al tipear ubigeo a mano")
         self.assertFalse(rec.distrito_id)
 
     # --------------------------------------------------------- direcciones cliente

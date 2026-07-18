@@ -360,21 +360,34 @@ class AccountMove(models.Model):
             )
 
     def _l10n_pe_relacionados(self):
-        """Referencia al comprobante de anticipo (indDocRelacionado 2)."""
+        """Documentos relacionados de la factura: guía de remisión (indDocRelacionado 1,
+        DespatchDocumentReference) y/o comprobante de anticipo (indDocRelacionado 2)."""
+        rels = []
+        guia = (self.l10n_pe_ne_guia_ref or "").strip()
+        if guia:
+            rels.append(
+                {
+                    "indDocRelacionado": "1",
+                    "tipDocRelacionado": self.l10n_pe_ne_guia_tipo or "09",
+                    "numDocRelacionado": guia,
+                    "tipDocEmisor": "6",
+                    "numDocEmisor": self.company_id.vat or "",
+                }
+            )
         ant = self._l10n_pe_anticipo()
-        if not ant:
-            return []
-        return [
-            {
-                "indDocRelacionado": "2",
-                "tipDocRelacionado": self.l10n_pe_ne_anticipo_tipo or "02",
-                "numDocRelacionado": self.l10n_pe_ne_anticipo_doc or "",
-                "numIdeAnticipo": "1",
-                "mtoDocRelacionado": self._l10n_pe_fmt(ant[2]),
-                "tipDocEmisor": "6",
-                "numDocEmisor": self.company_id.vat or "",
-            }
-        ]
+        if ant:
+            rels.append(
+                {
+                    "indDocRelacionado": "2",
+                    "tipDocRelacionado": self.l10n_pe_ne_anticipo_tipo or "02",
+                    "numDocRelacionado": self.l10n_pe_ne_anticipo_doc or "",
+                    "numIdeAnticipo": "1",
+                    "mtoDocRelacionado": self._l10n_pe_fmt(ant[2]),
+                    "tipDocEmisor": "6",
+                    "numDocEmisor": self.company_id.vat or "",
+                }
+            )
+        return rels
 
     def _l10n_pe_variables_globales(self):
         """Variables globales de la factura:
@@ -561,6 +574,18 @@ class AccountMove(models.Model):
         default="0000",
         copy=False,
         help="Código de establecimiento anexo SUNAT (4 dígitos). '0000' = domicilio fiscal.",
+    )
+    # Guía de remisión que sustenta el traslado: va como cac:DespatchDocumentReference en el XML
+    # de la factura (indDocRelacionado 1). QA-031.
+    l10n_pe_ne_guia_ref = fields.Char(
+        string="Guía de remisión referenciada",
+        copy=False,
+        help="Serie-número de la GRE que sustenta el traslado (ej. T001-00000123).",
+    )
+    l10n_pe_ne_guia_tipo = fields.Selection(
+        [("09", "Guía de remisión remitente"), ("31", "Guía de remisión transportista")],
+        string="Tipo de guía referenciada",
+        default="09",
     )
     l10n_pe_ne_forma_pago = fields.Selection(
         [("Contado", "Contado"), ("Credito", "Crédito")],
@@ -4937,6 +4962,11 @@ class AccountMove(models.Model):
         # Establecimiento emisor (sucursal): código de local anexo SUNAT del comprobante.
         if payload.get("codEstablecimiento"):
             move.l10n_pe_ne_cod_establecimiento = payload["codEstablecimiento"]
+        # Guía de remisión referenciada (DespatchDocumentReference).
+        if payload.get("guiaRef"):
+            move.l10n_pe_ne_guia_ref = payload["guiaRef"]
+            if payload.get("guiaTipo"):
+                move.l10n_pe_ne_guia_tipo = payload["guiaTipo"]
         fp = payload.get("formaPago") or {}
         if fp.get("tipo") == "Credito" or fp.get("cuotas"):
             move.l10n_pe_ne_forma_pago = "Credito"

@@ -3,7 +3,7 @@ access_ne_emisor_partner,ne.emisor.res.partner,base.model_res_partner,group_l10n
 access_ne_emisor_product_template,ne.emisor.product.template,product.model_product_template,group_l10n_pe_ne_emisor,1,1,1,0
 access_ne_emisor_product_product,ne.emisor.product.product,product.model_product_product,group_l10n_pe_ne_emisor,1,1,1,0
 access_ne_emisor_uom,ne.emisor.uom.uom,uom.model_uom_uom,group_l10n_pe_ne_emisor,1,1,1,0
-access_ne_emisor_gasto,ne.emisor.gasto,model_l10n_pe_ne_gasto,group_l10n_pe_ne_emisor,1,1,1,1
+access_ne_emisor_gasto,ne.emisor.gasto,model_l10n_pe_ne_gasto,group_l10n_pe_ne_emisor,1,1,1,0
 access_ne_emisor_cotizacion,ne.emisor.cotizacion,model_l10n_pe_ne_cotizacion,group_l10n_pe_ne_emisor,1,1,1,1
 access_ne_emisor_cotizacion_line,ne.emisor.cotizacion.line,model_l10n_pe_ne_cotizacion_line,group_l10n_pe_ne_emisor,1,1,1,1
 access_ne_emisor_guia_remision,ne.emisor.guia_remision,model_l10n_pe_ne_guia_remision,group_l10n_pe_ne_emisor,1,1,1,1

@@ -30,6 +30,10 @@ class ResCompany(models.Model):
         maximo = self.l10n_pe_ne_max_usuarios or 0
         if maximo <= 0:
             return
+        # Se bloquea la fila de la compañía (FOR UPDATE) para SERIALIZAR las altas/reactivaciones
+        # concurrentes del mismo RUC: sin esto, dos altas a la vez pasan ambas el conteo y superan
+        # el cupo (TOCTOU). Igual que el guard del último dueño.
+        self.env.cr.execute("SELECT id FROM res_company WHERE id = %s FOR UPDATE", (self.id,))
         actuales = self.env["res.users"].sudo().search_count([
             ("company_ids", "in", self.ids), ("share", "=", False), ("active", "=", True),
         ])

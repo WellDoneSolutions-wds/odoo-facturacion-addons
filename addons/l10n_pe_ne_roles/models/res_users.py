@@ -158,8 +158,11 @@ class ResUsers(models.Model):
             [("company_ids", "in", company.ids), ("share", "=", False)], order="name")
         out = []
         for u in usuarios:
+            # Nunca listar a un administrador de la plataforma (system o erp_manager) ni al
+            # superusuario, aunque estuviera atado a este RUC.
             if (u.company_ids != company or u.id == SUPERUSER_ID
-                    or u.has_group("base.group_system")):
+                    or u.has_group("base.group_system")
+                    or u.has_group("base.group_erp_manager")):
                 continue
             out.append(self._l10n_pe_ne_equipo_dict(u))
         return out

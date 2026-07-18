@@ -450,7 +450,10 @@ class AccountMove(models.Model):
         así que el pendiente/cuotas van sobre el neto, no sobre el total."""
         self.ensure_one()
         det = self._l10n_pe_detraccion_monto() if self.l10n_pe_ne_detraccion else 0.0
-        return round((self.amount_total or 0.0) - det, 2)
+        # Venta con inicial al contado: el saldo a crédito (lo que suman las cuotas) es el total
+        # menos la detracción y menos la inicial ya pagada.
+        inicial = self.l10n_pe_ne_inicial_contado or 0.0
+        return round((self.amount_total or 0.0) - det - inicial, 2)
 
     def _l10n_pe_adicional_cabecera(self):
         """Bloque adicional de la cabecera: detracción y/o total a cobrar de la percepción."""
@@ -561,6 +564,14 @@ class AccountMove(models.Model):
     l10n_pe_ne_cuotas = fields.Json(
         string="Cuotas de crédito", copy=False
     )  # [{'fecha','monto'}]
+    # Forma de pago MIXTA: parte pagada al contado (inicial) + saldo a crédito en cuotas. El neto
+    # pendiente (y por ende las cuotas y el mtoNetoPendientePago SUNAT) se reduce en esta inicial.
+    l10n_pe_ne_inicial_contado = fields.Monetary(
+        string="Inicial al contado",
+        copy=False,
+        help="Parte del total pagada al contado al emitir (venta con inicial + saldo a crédito). "
+        "El saldo a crédito = total − detracción − inicial y es lo que suman las cuotas.",
+    )
     l10n_pe_ne_medios_pago = fields.Json(
         string="Medios de pago (POS)", copy=False
     )  # [{'medio','monto'}]
@@ -4907,6 +4918,9 @@ class AccountMove(models.Model):
         if fp.get("tipo") == "Credito" or fp.get("cuotas"):
             move.l10n_pe_ne_forma_pago = "Credito"
             move.l10n_pe_ne_cuotas = fp.get("cuotas") or []
+            # Forma de pago mixta: inicial al contado; el saldo a crédito lo llevan las cuotas.
+            if fp.get("inicial"):
+                move.l10n_pe_ne_inicial_contado = float(fp["inicial"])
             venc = (fp.get("cuotas") or [{}])[-1].get("fecha")
             if venc:
                 move.invoice_date_due = venc

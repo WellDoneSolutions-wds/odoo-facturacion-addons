@@ -83,3 +83,73 @@ class L10nPeNeEquipoApi(L10nPeNeApi):
         b = self._body() or {}
         return self._run(lambda: request.env["res.company"].with_user(uid)
                          .l10n_pe_ne_set_exigir_segregacion(b.get("activo")))
+
+    # ── CN-01: cotización como flujo (transiciones, colas, fold, despacho) ─────
+    def _cot(self, uid, rec_id):
+        return self._cotizacion(uid).browse(int(rec_id))
+
+    def _paginacion(self, kw):
+        page = max(1, int(kw.get("page") or 1))
+        size = min(200, max(1, int(kw.get("pageSize") or 10)))
+        return (page - 1) * size, size
+
+    @http.route("/ne/api/cotizaciones/<int:rec_id>/enviar", **_POST)
+    def cot_enviar(self, rec_id, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(lambda: self._cot(uid, rec_id).l10n_pe_ne_enviar())
+
+    @http.route("/ne/api/cotizaciones/<int:rec_id>/aceptar", **_POST)
+    def cot_aceptar(self, rec_id, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(lambda: self._cot(uid, rec_id).l10n_pe_ne_aceptar())
+
+    @http.route("/ne/api/cotizaciones/<int:rec_id>/rechazar", **_POST)
+    def cot_rechazar(self, rec_id, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        b = self._body() or {}
+        return self._run(lambda: self._cot(uid, rec_id).l10n_pe_ne_rechazar(b.get("motivo")))
+
+    @http.route("/ne/api/cotizaciones/<int:rec_id>/cobrar-entregar", **_POST)
+    def cot_cobrar_entregar(self, rec_id, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(lambda: self._cot(uid, rec_id).l10n_pe_ne_cobrar_entregar(self._body() or {}))
+
+    @http.route("/ne/api/cotizaciones/<int:rec_id>/acciones", **_GET)
+    def cot_acciones(self, rec_id, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(lambda: self._cot(uid, rec_id)._acciones())
+
+    @http.route("/ne/api/cotizaciones/cola-cobro", **_GET)
+    def cola_cobro(self, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        off, lim = self._paginacion(kw)
+        return self._run(lambda: self._cotizacion(uid).l10n_pe_ne_cola_cobro(off, lim))
+
+    @http.route("/ne/api/despacho/cola", **_GET)
+    def cola_despacho(self, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        off, lim = self._paginacion(kw)
+        return self._run(lambda: self._cotizacion(uid).l10n_pe_ne_cola_despacho(off, lim))
+
+    @http.route("/ne/api/despacho/<int:rec_id>/entregar", **_POST)
+    def despacho_entregar(self, rec_id, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        b = self._body() or {}
+        return self._run(lambda: self._cot(uid, rec_id).l10n_pe_ne_entregar(
+            b.get("receptorNombre"), b.get("receptorDoc")))

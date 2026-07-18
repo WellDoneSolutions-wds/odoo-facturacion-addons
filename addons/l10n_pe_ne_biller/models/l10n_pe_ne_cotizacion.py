@@ -32,6 +32,7 @@ class L10nPeNeCotizacion(models.Model):
         ('enviada', 'Enviada'),
         ('aceptada', 'Aceptada'),
         ('rechazada', 'Rechazada'),
+        ('vencida', 'Vencida'),
         ('convertida', 'Convertida'),
     ], string='Estado', default='borrador', required=True)
     comprobante_id = fields.Many2one('account.move', string='Comprobante emitido',
@@ -241,6 +242,16 @@ class L10nPeNeCotizacion(models.Model):
         })
         return cot._l10n_pe_ne_cotizacion_dict()
 
+    # Piso defensivo del biller (H4): transiciones comerciales válidas del `estado`. NUNCA admite
+    # →convertida (eso lo escribe SOLO l10n_pe_ne_vincular_comprobante al emitir) ni salir de
+    # convertida/vencida. El addon de roles añade encima el eje de grupo (quién puede cada paso).
+    _L10N_PE_NE_TRANSICIONES = {
+        'borrador': {'enviada', 'aceptada', 'rechazada'},
+        'enviada': {'aceptada', 'rechazada'},
+        'aceptada': {'rechazada', 'vencida'},
+        'rechazada': {'aceptada'},
+    }
+
     @api.model
     def l10n_pe_ne_update_cotizacion(self, payload):
         """Reemplaza cabecera + líneas de una cotización existente (por id)."""
@@ -248,6 +259,12 @@ class L10nPeNeCotizacion(models.Model):
         cot = self.browse(int(payload.get('id') or 0)).exists()
         if not cot:
             raise UserError(_('Cotización no encontrada.'))
+        # H4: una cotización ya convertida en comprobante es INMUTABLE (si no, la proforma se
+        # desalinea del comprobante fiscal emitido).
+        if cot.estado == 'convertida' or cot.comprobante_id:
+            raise UserError(_(
+                "La cotización %(n)s ya se convirtió en el comprobante %(c)s; no se puede editar.",
+                n=cot.name, c=cot._l10n_pe_ne_comprobante_numero() or '—'))
         vals = {}
         if payload.get('clienteId') or payload.get('cliente'):
             vals['partner_id'] = self._l10n_pe_ne_resolve_partner(payload).id
@@ -258,8 +275,8 @@ class L10nPeNeCotizacion(models.Model):
         if 'notas' in payload:
             vals['notas'] = payload.get('notas') or False
         vals.update(self._l10n_pe_ne_condiciones_vals(payload))
-        if payload.get('estado'):
-            vals['estado'] = payload['estado']
+        # El estado NO viaja por update: cambiarlo es responsabilidad de las transiciones con nombre
+        # (aceptar/rechazar/…), no de una reescritura de cabecera.
         if payload.get('items') is not None or payload.get('lineas') is not None:
             vals['line_ids'] = [(5, 0, 0)] + self._l10n_pe_ne_build_lines(
                 payload.get('items') or payload.get('lineas'))
@@ -267,17 +284,24 @@ class L10nPeNeCotizacion(models.Model):
         return cot._l10n_pe_ne_cotizacion_dict()
 
     def l10n_pe_ne_set_estado(self, estado):
-        """Cambia el estado (borrador/enviada/aceptada/rechazada)."""
+        """Cambia el estado por una TRANSICIÓN válida (H4: antes aceptaba cualquier estado del
+        Selection, permitiendo saltar de 'convertida' a 'borrador' o marcar 'convertida' a mano)."""
         self.ensure_one()
-        valid = dict(self._fields['estado'].selection)
-        if estado not in valid:
-            raise UserError(_('Estado no válido.'))
+        if estado not in self._L10N_PE_NE_TRANSICIONES.get(self.estado, set()):
+            raise UserError(_(
+                "No se puede pasar de «%(o)s» a «%(d)s».",
+                o=self.estado, d=estado))
         self.estado = estado
         return self._l10n_pe_ne_cotizacion_dict()
 
     @api.model
     def l10n_pe_ne_delete_cotizacion(self, rec_id):
         cot = self.browse(int(rec_id or 0)).exists()
+        if cot and (cot.estado == 'convertida' or cot.comprobante_id):
+            # H4: no se borra el origen de un comprobante ya emitido/enviado a SUNAT.
+            raise UserError(_(
+                "No se puede borrar una cotización convertida (%s); anula el comprobante primero.")
+                % (cot._l10n_pe_ne_comprobante_numero() or cot.name))
         if cot:
             cot.unlink()
         return {'ok': True, 'modo': 'eliminado'}

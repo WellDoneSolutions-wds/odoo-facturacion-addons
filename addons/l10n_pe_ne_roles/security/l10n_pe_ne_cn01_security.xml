@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+  <data>
+    <!--
+      CN-01: segregación de la cotización POR ROL (además del aislamiento por RUC de las reglas
+      globales del biller, que AND-ean siempre). Estas reglas NO son globales: se OR-ean entre los
+      grupos del usuario. El usuario con todos los roles (o el vendedor/supervisor) ve todo; el
+      cajero puro ve solo lo que le toca cobrar; el despachador solo lo convertido.
+
+      OJO (subtileza de Odoo): un usuario que NO esté en NINGUNO de estos grupos NO queda restringido
+      por ellas (solo por las globales). Por eso ventas/supervisor llevan una regla "ve todo"
+      EXPLÍCITA — así el acceso amplio se concede por ROL, no por implicación de 'emisor' (que todos
+      tienen y rompería la segregación si le colgáramos la regla).
+    -->
+    <record id="rule_cotizacion_ventas" model="ir.rule">
+      <field name="name">Cotización: el vendedor ve todas</field>
+      <field name="model_id" ref="l10n_pe_ne_biller.model_l10n_pe_ne_cotizacion"/>
+      <field name="groups" eval="[(4, ref('group_l10n_pe_ne_ventas'))]"/>
+      <field name="domain_force">[(1, '=', 1)]</field>
+    </record>
+    <record id="rule_cotizacion_supervisor" model="ir.rule">
+      <field name="name">Cotización: el supervisor ve todas</field>
+      <field name="model_id" ref="l10n_pe_ne_biller.model_l10n_pe_ne_cotizacion"/>
+      <field name="groups" eval="[(4, ref('group_l10n_pe_ne_supervisor'))]"/>
+      <field name="domain_force">[(1, '=', 1)]</field>
+    </record>
+    <record id="rule_cotizacion_caja" model="ir.rule">
+      <field name="name">Cotización: el cajero ve su cola de cobro y lo convertido</field>
+      <field name="model_id" ref="l10n_pe_ne_biller.model_l10n_pe_ne_cotizacion"/>
+      <field name="groups" eval="[(4, ref('group_l10n_pe_ne_caja'))]"/>
+      <field name="domain_force">[('estado', 'in', ['aceptada', 'convertida'])]</field>
+    </record>
+    <record id="rule_cotizacion_despacho" model="ir.rule">
+      <field name="name">Cotización: el despachador solo ve lo convertido (su cola)</field>
+      <field name="model_id" ref="l10n_pe_ne_biller.model_l10n_pe_ne_cotizacion"/>
+      <field name="groups" eval="[(4, ref('group_l10n_pe_ne_despacho'))]"/>
+      <field name="domain_force">[('estado', '=', 'convertida')]</field>
+    </record>
+  </data>
+</odoo>

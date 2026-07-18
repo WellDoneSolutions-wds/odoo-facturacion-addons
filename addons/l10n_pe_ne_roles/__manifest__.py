@@ -1,6 +1,6 @@
 {
     'name': 'NE Express — Roles y flujos de trabajo',
-    'version': '19.0.1.1.0',
+    'version': '19.0.1.2.0',
     'post_init_hook': 'post_init_hook',
     'category': 'Accounting/Localizations/EDI',
     'summary': 'Roles por rol funcional y mixin de flujo (estado + cola + auditoría) para los '
@@ -14,6 +14,8 @@
     'data': [
         'security/l10n_pe_ne_roles_security.xml',
         'security/ir.model.access.csv',
+        'security/l10n_pe_ne_cn01_security.xml',
+        'data/l10n_pe_ne_cn01_cron.xml',
     ],
     'license': 'LGPL-3',
     'application': False,

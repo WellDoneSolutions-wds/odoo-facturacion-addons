@@ -150,6 +150,22 @@ class AccountMoveLine(models.Model):
         copy=False,
         help="Fecha de vencimiento del lote que ingresa por esta línea.",
     )
+    # Sub-tipo de operación gratuita (cat. 07 SUNAT). Solo aplica a líneas gratuitas (9996):
+    # afina el genérico "11" al motivo real (retiro, bonificación, donación…). Vacío = 11.
+    l10n_pe_ne_afectacion_gratuita = fields.Selection(
+        [
+            ("11", "Retiro por premio"),
+            ("12", "Retiro por donación"),
+            ("13", "Retiro de bienes"),
+            ("14", "Retiro por publicidad"),
+            ("15", "Bonificación"),
+            ("16", "Retiro por entrega a trabajadores"),
+        ],
+        string="Tipo de operación gratuita",
+        copy=False,
+        help="Solo para líneas gratuitas: precisa el motivo (catálogo 07 de SUNAT). "
+        "Si se deja vacío se usa 'Retiro por premio' (11).",
+    )
 
 
 class AccountMove(models.Model):
@@ -738,6 +754,10 @@ class AccountMove(models.Model):
             (tip_afe, cod_tri, nom_trib, cod_tip_trib, _cod_cat), por_igv = (
                 self._l10n_pe_tax_info(line)
             )
+            # Gratuita: si la línea precisa el sub-tipo (retiro 13, bonificación 15, …) se usa ese
+            # código de catálogo 07 en vez del genérico 11. La estructura UBL gratuita es idéntica.
+            if cod_tri == "9996" and line.l10n_pe_ne_afectacion_gratuita:
+                tip_afe = line.l10n_pe_ne_afectacion_gratuita
             qty = line.quantity or 1.0
             base, igv, isc, icbper = self._l10n_pe_line_amounts(line)
             # Valor unitario BRUTO (antes del descuento): regla SUNAT 3271 exige
@@ -1992,6 +2012,8 @@ class AccountMove(models.Model):
                 lvals["l10n_pe_ne_unit_code"] = ln["unidad"]
             if ln.get("codSunat"):
                 lvals["l10n_pe_ne_cod_producto_sunat"] = ln["codSunat"]
+            if ln.get("afectacionGratuita"):
+                lvals["l10n_pe_ne_afectacion_gratuita"] = ln["afectacionGratuita"]
             lines.append((0, 0, lvals))
         # Otros cargos (que afectan la base imponible): se agregan como una línea gravada adicional, así
         # suben gravada/IGV/total con la maquinaria de líneas ya validada (no se prorratea el desc. global).

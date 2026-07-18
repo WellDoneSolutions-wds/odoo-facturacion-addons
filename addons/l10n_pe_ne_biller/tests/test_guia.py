@@ -589,7 +589,7 @@ class TestGuiaTransportista(TestGuiaBase):
             "tipo_gre": "31",
             "remitente_id": self.remitente.id,
             "num_reg_mtc": "0123456789",   # MTC propio del carrier
-            "num_tuc": "TUC-000123",       # TUC del vehículo (solo tipo 31)
+            "num_tuc": "TUC0000000123",    # TUC del vehículo (10-15 alfanum, solo tipo 31)
         })
         v.update(extra)
         return v
@@ -608,7 +608,7 @@ class TestGuiaTransportista(TestGuiaBase):
         self.assertEqual(cab["rznSocialDestinatario"], "Cliente GRE")
         # Vehículo único (placa + TUC) y MTC del carrier.
         self.assertEqual(cab["numPlacaVehiculoPrincipal"], "ABC123")
-        self.assertEqual(cab["numTucVehiculoPrincipal"], "TUC-000123")
+        self.assertEqual(cab["numTucVehiculoPrincipal"], "TUC0000000123")
         self.assertEqual(cab["numRegMtcTransportista"], "0123456789")
         # Conductor único (campos legados de TestGuiaBase._vals()).
         self.assertEqual(cab["numDocConductor"], "12345678")
@@ -622,7 +622,8 @@ class TestGuiaTransportista(TestGuiaBase):
         # detalle: el bien lleva desItem/canItem.
         self.assertEqual(p["detalle"][0]["desItem"], "Caja de tornillos")
         self.assertEqual(p["detalle"][0]["canItem"], "2.00")
-        self.assertEqual(p["id"]["serie"], "T001")
+        # La serie del transportista es V### (SUNAT rechaza T### con errorCode 1001).
+        self.assertEqual(p["id"]["serie"], "V001")
 
     def test_validar_sin_remitente_rechaza(self):
         g = self.Guia.create(self._vals_transportista(remitente_id=False))
@@ -640,7 +641,7 @@ class TestGuiaTransportista(TestGuiaBase):
         self.assertEqual(d["remitenteId"], self.remitente.id)
         self.assertEqual(d["remitente"], "Remitente SAC")
         self.assertEqual(d["remitenteDoc"], "20507639024")
-        self.assertEqual(d["numTuc"], "TUC-000123")
+        self.assertEqual(d["numTuc"], "TUC0000000123")
 
     def test_quick_guia_acepta_claves_transportista(self):
         # Las claves SPA (tipoGre/remitenteId/numTuc) se traducen a los campos del modelo.
@@ -665,3 +666,38 @@ class TestGuiaTransportista(TestGuiaBase):
         g = self.Guia.create(self._vals())
         self.assertEqual(g.tipo_gre, "09")
         self.assertIn("motTrasladoDatosEnvio", g._l10n_pe_ne_build_gre_payload()["cabecera"])
+
+    def test_serie_transportista_es_V(self):
+        # Sin serie explícita, el transportista (31) arranca en V### — SUNAT exige V para
+        # el DespatchAdvice/cbc:ID del transportista (T### => errorCode 1001).
+        g = self.Guia.create(self._vals_transportista())
+        self.assertEqual(g.serie, "V001")
+        self.assertTrue(g.name.startswith("V001-"))
+        self.assertEqual(g._l10n_pe_ne_build_gre_transportista_payload()["id"]["serie"], "V001")
+
+    def test_serie_remitente_es_T(self):
+        # Regresión: la remitente (09) sigue en T### sin serie explícita.
+        g = self.Guia.create(self._vals())
+        self.assertEqual(g.serie, "T001")
+
+    def test_serie_explicita_se_respeta_en_transportista(self):
+        # Si el caller fija la serie (p.ej. V002), no se pisa con el default.
+        g = self.Guia.create(self._vals_transportista(serie="V002"))
+        self.assertEqual(g.serie, "V002")
+
+    def test_tuc_formato_invalido_rechaza(self):
+        # TUC fuera de 10-15 alfanuméricos => rechazo amigable antes de SUNAT (3355).
+        g = self.Guia.create(self._vals_transportista(num_tuc="TUC-1"))
+        with self.assertRaisesRegex(UserError, "TUC"):
+            g._l10n_pe_ne_validar()
+
+    def test_tuc_con_guion_rechaza(self):
+        # El guión no está en [0-9A-Z]; una TUC con guión no cumple el patrón SUNAT.
+        g = self.Guia.create(self._vals_transportista(num_tuc="TUC-0000123"))
+        with self.assertRaisesRegex(UserError, "TUC"):
+            g._l10n_pe_ne_validar()
+
+    def test_tuc_vacia_es_opcional(self):
+        # La TUC es opcional: sin ella la guía transportista valida igual.
+        g = self.Guia.create(self._vals_transportista(num_tuc=False))
+        g._l10n_pe_ne_validar()  # no lanza

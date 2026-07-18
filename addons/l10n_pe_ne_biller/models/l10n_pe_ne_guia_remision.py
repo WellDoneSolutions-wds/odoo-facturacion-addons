@@ -233,7 +233,15 @@ class L10nPeNeGuiaRemision(models.Model):
     def create(self, vals_list):
         for vals in vals_list:
             if not vals.get('name') or vals.get('name') == _('Nueva'):
-                serie = vals.get('serie') or 'T001'
+                # La serie codifica el tipo de GRE ante SUNAT: Remitente usa T###,
+                # Transportista (tipo 31) exige V### — con T### SUNAT rechaza el
+                # DespatchAdvice/cbc:ID (errorCode 1001). Se fija explícito en vals para
+                # que el campo serie quede coherente con name/correlativo (no basta el
+                # default del campo, que es T### para ambos).
+                serie = vals.get('serie')
+                if not serie:
+                    serie = 'V001' if vals.get('tipo_gre') == '31' else 'T001'
+                vals['serie'] = serie
                 company = self.env['res.company'].browse(
                     vals.get('company_id') or self.env.company.id)
                 corr = self._l10n_pe_ne_next_correlativo(company, serie)
@@ -522,6 +530,13 @@ class L10nPeNeGuiaRemision(models.Model):
             faltantes = [etiqueta for etiqueta, valor in efectivos if not valor.strip()]
             if faltantes:
                 raise UserError(_('Guía transportista: falta %s.') % ', '.join(faltantes))
+            # La TUC es opcional, pero si va debe cumplir el formato SUNAT (cbc:Registration-
+            # NationalityID, errorCode 3355): 10 a 15 alfanuméricos en mayúscula, no todo ceros.
+            # Validarlo aquí evita un rechazo 3355 poco claro del biller/SUNAT.
+            tuc = (self.num_tuc or '').strip()
+            if tuc and not re.match(r'^(?!0+$)[0-9A-Z]{10,15}$', tuc):
+                raise UserError(_('La TUC del vehículo debe tener de 10 a 15 caracteres '
+                                  'alfanuméricos en mayúscula (SUNAT 3355).'))
             return
         if self.motivo_traslado not in SUPPORTED_MOTIVOS:
             raise UserError(_('El motivo de traslado %s aún no soportado para emisión.')

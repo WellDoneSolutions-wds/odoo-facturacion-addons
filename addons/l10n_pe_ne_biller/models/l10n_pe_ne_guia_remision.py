@@ -490,6 +490,17 @@ class L10nPeNeGuiaRemision(models.Model):
         self.ensure_one()
         if self.estado not in ESTADOS_EMITIBLES:
             raise UserError(_('La guía %s ya fue emitida (estado: %s).') % (self.name, self.estado))
+        # La serie codifica el tipo ante SUNAT (T### remitente / V### transportista). El
+        # selector de tipo se bloquea al editar, pero si por API se cambiara el tipo de una
+        # guía ya numerada, serie y tipo quedarían desincronizados y SUNAT rechazaría el
+        # cbc:ID (errorCode 1001). Se corta acá con un mensaje claro antes de emitir.
+        prefijo = (self.serie or '')[:1].upper()
+        if self.tipo_gre == '31' and prefijo != 'V':
+            raise UserError(_('Una guía de transportista (31) necesita una serie V### (la '
+                              'actual es %s). Crea una guía nueva con el tipo correcto.') % (self.serie or '—'))
+        if self.tipo_gre == '09' and prefijo != 'T':
+            raise UserError(_('Una guía de remitente (09) necesita una serie T### (la actual '
+                              'es %s). Crea una guía nueva con el tipo correcto.') % (self.serie or '—'))
         if not self.line_ids:
             raise UserError(_('La guía necesita al menos un bien.'))
         if not self.peso_bruto or self.peso_bruto <= 0:
@@ -517,6 +528,13 @@ class L10nPeNeGuiaRemision(models.Model):
             if not self.remitente_id:
                 raise UserError(_('Indica el remitente (quien envía los bienes).'))
             self._l10n_pe_ne_doc_tipo(self.remitente_id)  # valida RUC/DNI del remitente
+            # SUNAT 2560: el remitente (DespatchParty) no puede ser el propio transportista
+            # (DespatchSupplierParty = emisor). Si el que transporta también envía, corresponde
+            # una guía de remitente (09), no de transportista.
+            if (self.remitente_id.vat or '').strip() and \
+                    (self.remitente_id.vat or '').strip() == (self.company_id.vat or '').strip():
+                raise UserError(_('El remitente no puede ser el mismo transportista (emisor). '
+                                  'Si tú envías los bienes, emite una guía de remitente (09).'))
             # Un solo vehículo/conductor: placa desde num_placa; conductor desde el principal
             # de la lista o los campos legados (misma lógica de completitud del privado).
             cond = self._l10n_pe_ne_principal(self.conductor_ids)
@@ -530,6 +548,12 @@ class L10nPeNeGuiaRemision(models.Model):
             faltantes = [etiqueta for etiqueta, valor in efectivos if not valor.strip()]
             if faltantes:
                 raise UserError(_('Guía transportista: falta %s.') % ', '.join(faltantes))
+            # SUNAT 2567: la placa (cbc:ID del TransportEquipment) debe ser 6-8 alfanuméricos
+            # en mayúscula, no todo ceros. Validarlo evita un rechazo confuso del biller.
+            placa = (self.num_placa or '').strip()
+            if not re.match(r'^(?!0+$)[0-9A-Z]{6,8}$', placa):
+                raise UserError(_('La placa del vehículo debe tener de 6 a 8 caracteres '
+                                  'alfanuméricos en mayúscula (SUNAT 2567).'))
             # La TUC es opcional, pero si va debe cumplir el formato SUNAT (cbc:Registration-
             # NationalityID, errorCode 3355): 10 a 15 alfanuméricos en mayúscula, no todo ceros.
             # Validarlo aquí evita un rechazo 3355 poco claro del biller/SUNAT.

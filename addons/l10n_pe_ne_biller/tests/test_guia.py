@@ -701,3 +701,33 @@ class TestGuiaTransportista(TestGuiaBase):
         # La TUC es opcional: sin ella la guía transportista valida igual.
         g = self.Guia.create(self._vals_transportista(num_tuc=False))
         g._l10n_pe_ne_validar()  # no lanza
+
+    def test_serie_tipo_mismatch_rechaza(self):
+        # Defensa server-side (C1): un tipo 31 con serie T### (desincronía por API) se corta
+        # antes de emitir — SUNAT lo rechazaría con errorCode 1001.
+        g = self.Guia.create(self._vals_transportista())
+        g.serie = "T001"
+        with self.assertRaisesRegex(UserError, "V###"):
+            g._l10n_pe_ne_validar()
+
+    def test_serie_tipo_mismatch_remitente_rechaza(self):
+        # El caso inverso: una remitente (09) con serie V### también se corta.
+        g = self.Guia.create(self._vals())
+        g.serie = "V001"
+        with self.assertRaisesRegex(UserError, "T###"):
+            g._l10n_pe_ne_validar()
+
+    def test_remitente_igual_emisor_rechaza(self):
+        # SUNAT 2560: el remitente no puede ser el propio transportista (emisor).
+        g = self.Guia.create(self._vals_transportista())
+        ruc = g.company_id.vat or "20111111111"
+        g.company_id.vat = ruc
+        g.remitente_id = self.env["res.partner"].create({"name": "Yo mismo", "vat": ruc})
+        with self.assertRaisesRegex(UserError, "transportista"):
+            g._l10n_pe_ne_validar()
+
+    def test_placa_formato_invalido_rechaza(self):
+        # SUNAT 2567: placa fuera de 6-8 alfanuméricos (o con guión) se rechaza amigable.
+        g = self.Guia.create(self._vals_transportista(num_placa="AB-12"))
+        with self.assertRaisesRegex(UserError, "placa"):
+            g._l10n_pe_ne_validar()

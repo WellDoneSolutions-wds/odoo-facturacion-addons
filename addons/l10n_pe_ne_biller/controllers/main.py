@@ -326,20 +326,13 @@ class L10nPeNeApi(http.Controller):
                 .sudo()
                 ._generate(_SCOPE, f"{_KEY_NAME} ({exp:%Y-%m-%d %H:%M})", exp)
             )
-            return self._json(
-                {
-                    "token": token,
-                    "user": user.name,
-                    "login": user.login,
-                    "companyId": user.company_id.id,
-                    "company": user.company_id.name,
-                    "ruc": user.company_id.vat or "",
-                    "isAdmin": user.has_group("base.group_system"),
-                    "puedeAnular": self._puede_anular(uid),
-                    "mustChangePassword": user.l10n_pe_ne_must_change_password,
-                    "expires": exp.isoformat(),
-                }
-            )
+            # Perfil desde la fuente única (res.users.l10n_pe_ne_perfil, extendida por el
+            # addon de roles) + los campos propios del login (token/expiración).
+            return self._json({
+                **user.l10n_pe_ne_perfil(),
+                "token": token,
+                "expires": exp.isoformat(),
+            })
         except Exception as e:  # noqa: BLE001
             _logger.exception("NE login error")
             return self._err(e)
@@ -350,18 +343,7 @@ class L10nPeNeApi(http.Controller):
         if not uid:
             return self._unauth()
         user = self._user(uid)
-        return self._json(
-            {
-                "user": user.name,
-                "login": user.login,
-                "companyId": user.company_id.id,
-                "company": user.company_id.name,
-                "ruc": user.company_id.vat or "",
-                "isAdmin": user.has_group("base.group_system"),
-                "puedeAnular": self._puede_anular(uid),
-                "mustChangePassword": user.l10n_pe_ne_must_change_password,
-            }
-        )
+        return self._json(user.l10n_pe_ne_perfil())
 
     @http.route("/ne/api/logout", **_POST)
     def logout(self, **kw):

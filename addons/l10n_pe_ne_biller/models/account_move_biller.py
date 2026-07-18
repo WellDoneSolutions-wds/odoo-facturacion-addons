@@ -3826,6 +3826,9 @@ class AccountMove(models.Model):
         bc = (ln.get("barcode") or "").strip()
         if bc:
             vals["barcode"] = bc
+        cs = (ln.get("codSunat") or "").strip()
+        if cs:
+            vals["l10n_pe_ne_cod_producto_sunat"] = cs
         if uni:
             vals["l10n_pe_ne_unit_code"] = uni
         if tax:
@@ -3843,6 +3846,7 @@ class AccountMove(models.Model):
             "descripcion": p.name or "",
             "codigo": p.default_code or "",
             "barcode": p.barcode or "",
+            "codSunat": p.l10n_pe_ne_cod_producto_sunat or "",
             "precio": p.list_price,
             "taxCode": (tax.l10n_pe_edi_tax_code or "1000") if tax else "1000",
             "unidad": p.l10n_pe_ne_unit_code or "",
@@ -4016,6 +4020,7 @@ class AccountMove(models.Model):
                 "descripcion": desc,
                 "productCod": producto.get("codigo"),
                 "barcode": producto.get("barcode"),
+                "codSunat": producto.get("codSunat"),
                 "precioUnitario": producto.get("precio"),
                 "unidad": producto.get("unidad"),
                 "tipo": producto.get("tipo"),
@@ -4044,6 +4049,8 @@ class AccountMove(models.Model):
             vals["default_code"] = (producto.get("codigo") or "").strip() or False
         if "barcode" in producto:
             vals["barcode"] = (producto.get("barcode") or "").strip() or False
+        if "codSunat" in producto:
+            vals["l10n_pe_ne_cod_producto_sunat"] = (producto.get("codSunat") or "").strip() or False
         if "unidad" in producto:
             vals["l10n_pe_ne_unit_code"] = (producto.get("unidad") or "").strip() or False
         if producto.get("tipo"):

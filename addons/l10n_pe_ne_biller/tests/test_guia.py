@@ -826,6 +826,79 @@ class TestGuiaComercioExterior(TestGuiaBase):
         g = self.Guia.browse(res["id"])
         self.assertEqual(g.dam_numero, "235-2024-40-999999")
 
+    # ------------------------------------ DSI (Declaración Simplificada, DocumentTypeCode 52)
+    def test_dsi_export_payload_lleva_codtipdocrel_52(self):
+        # DSI de exportación: régimen 48 en el N°, docRelacionado codTipDocRel 52 (no 50).
+        g = self.Guia.create(self._vals_export(dam_tipo="52", dam_numero="235-2024-48-123456"))
+        p = g._l10n_pe_ne_build_gre_payload()
+        dsi = [d for d in p["docRelacionado"] if d["codTipDocRel"] == "52"]
+        self.assertEqual(len(dsi), 1)
+        self.assertEqual(dsi[0]["numDocRel"], "235-2024-48-123456")
+        self.assertFalse([d for d in p["docRelacionado"] if d["codTipDocRel"] == "50"])
+        g._l10n_pe_ne_validar()  # no lanza
+
+    def test_dsi_con_regimen_dam_rechaza(self):
+        # Régimen 40 (DAM export) en una DSI (tipo 52) => formato inválido; el mensaje nombra la DSI.
+        g = self.Guia.create(self._vals_export(dam_tipo="52", dam_numero="235-2024-40-123456"))
+        with self.assertRaisesRegex(UserError, "DSI"):
+            g._l10n_pe_ne_validar()
+
+    def test_dam_con_regimen_dsi_rechaza(self):
+        # Régimen 48 (DSI export) en una DAM (tipo 50) => formato inválido; el mensaje nombra la DAM.
+        g = self.Guia.create(self._vals_export(dam_tipo="50", dam_numero="235-2024-48-123456"))
+        with self.assertRaisesRegex(UserError, "DAM"):
+            g._l10n_pe_ne_validar()
+
+    def test_detalle_expone_dam_tipo(self):
+        g = self.Guia.create(self._vals_export(dam_tipo="52", dam_numero="235-2024-48-123456"))
+        self.assertEqual(g.l10n_pe_ne_guia_detalle()["damTipo"], "52")
+
+    # ------------------------------------------ segundo contenedor (máx 2 por SUNAT 3420)
+    def test_dos_contenedores_payload(self):
+        g = self.Guia.create(self._vals_export(
+            num_contenedor="ABCU1234567", num_precinto="PRECINTO01",
+            num_contenedor2="ABCU7654321", num_precinto2="PRECINTO02"))
+        cab = g._l10n_pe_ne_build_gre_payload()["cabecera"]
+        self.assertEqual(cab["numContenedor2"], "ABCU7654321")
+        self.assertEqual(cab["numPrecinto2"], "PRECINTO02")
+        self.assertEqual(cab["numBultosDatosEnvio"], "-")  # el 1er contenedor ya suprime bultos
+        g._l10n_pe_ne_validar()  # no lanza
+
+    def test_segundo_contenedor_sin_primero_rechaza(self):
+        g = self.Guia.create(self._vals_export(
+            num_contenedor2="ABCU7654321", num_precinto2="PRECINTO02"))
+        with self.assertRaisesRegex(UserError, "primero"):
+            g._l10n_pe_ne_validar()
+
+    def test_segundo_contenedor_sin_precinto_rechaza(self):
+        g = self.Guia.create(self._vals_export(
+            num_contenedor="ABCU1234567", num_precinto="PRECINTO01",
+            num_contenedor2="ABCU7654321"))
+        with self.assertRaisesRegex(UserError, "precinto"):
+            g._l10n_pe_ne_validar()
+
+    def test_contenedores_duplicados_rechaza(self):
+        g = self.Guia.create(self._vals_export(
+            num_contenedor="ABCU1234567", num_precinto="PRECINTO01",
+            num_contenedor2="ABCU1234567", num_precinto2="PRECINTO02"))
+        with self.assertRaisesRegex(UserError, "distintos"):
+            g._l10n_pe_ne_validar()
+
+    def test_precintos_duplicados_rechaza(self):
+        g = self.Guia.create(self._vals_export(
+            num_contenedor="ABCU1234567", num_precinto="PRECINTO01",
+            num_contenedor2="ABCU7654321", num_precinto2="PRECINTO01"))
+        with self.assertRaisesRegex(UserError, "distintos"):
+            g._l10n_pe_ne_validar()
+
+    def test_detalle_expone_segundo_contenedor(self):
+        g = self.Guia.create(self._vals_export(
+            num_contenedor="ABCU1234567", num_precinto="PRECINTO01",
+            num_contenedor2="ABCU7654321", num_precinto2="PRECINTO02"))
+        d = g.l10n_pe_ne_guia_detalle()
+        self.assertEqual(d["numContenedor2"], "ABCU7654321")
+        self.assertEqual(d["numPrecinto2"], "PRECINTO02")
+
 
 class TestGuiaComercioExteriorPuerto(TestGuiaBase):
     """Comercio exterior vía PUERTO/AEROPUERTO — importación (motivo 08) y exportación (09)

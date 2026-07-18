@@ -1,6 +1,7 @@
 import inspect
 from unittest.mock import patch
 
+from odoo.addons.l10n_pe_ne_roles.models.l10n_pe_ne_flujo_mixin import L10nPeNeFlujoMixin
 from odoo.tests import TransactionCase, tagged
 
 
@@ -12,10 +13,15 @@ class TestEscalaLibre(TransactionCase):
     """
 
     def _modelos_con_flujo(self):
+        # Se detecta por el MRO de la clase de registro, NO por `_inherit`: `_inherit`
+        # refleja solo la última clase Python cargada para el modelo, así que si otro
+        # módulo reabre un modelo de flujo (class X: _inherit='...cotizacion') el modelo
+        # desaparecería del set y el invariante quedaría verde sin verificar nada. El MRO
+        # sí conserva la clase base del mixin pase lo que pase.
         return [
             name for name in self.env.registry
             if name != 'l10n_pe_ne.flujo.mixin'
-            and 'l10n_pe_ne.flujo.mixin' in getattr(self.env[name], '_inherit', [])
+            and issubclass(type(self.env[name]), L10nPeNeFlujoMixin)
         ]
 
     # ── El motor de folds, ejercitado con un grafo de prueba ──────────────────

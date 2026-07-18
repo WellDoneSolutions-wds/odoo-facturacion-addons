@@ -80,6 +80,8 @@ class L10nPeNeFlujoMixin(models.AbstractModel):
         return []
 
     def _estado_label(self, key):
+        if not key:
+            return _("(sin estado)")
         sel = dict(self._fields['estado']._description_selection(self.env))
         return sel.get(key, key)
 

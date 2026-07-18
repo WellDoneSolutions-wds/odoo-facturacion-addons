@@ -2003,6 +2003,15 @@ class AccountMove(models.Model):
         )
         if not journal:
             raise UserError(_("No hay diario de ventas configurado para la compañía."))
+        # Anti-doble-conversión (QA-098): una cotización/orden ya convertida no puede emitir OTRO
+        # comprobante (evita duplicar la venta). Se valida antes de armar el move.
+        cotid = payload.get("cotizacionId")
+        if cotid:
+            cot = self.env["l10n_pe_ne.cotizacion"].browse(int(cotid)).exists()
+            if cot and cot.estado == "convertida":
+                raise UserError(_(
+                    "La cotización %s ya fue convertida en el comprobante %s; no se puede emitir otro."
+                ) % (cot.name or cot.id, cot._l10n_pe_ne_comprobante_numero() or "—"))
         tipo = payload.get("tipoDoc") or "01"
         # NC motivo 03 = "Corrección por error en la descripción": SOLO corrige el texto,
         # NO cambia importes. La nota va con importe 0.00 (la factura original conserva su

@@ -731,3 +731,66 @@ class TestGuiaTransportista(TestGuiaBase):
         g = self.Guia.create(self._vals_transportista(num_placa="AB-12"))
         with self.assertRaisesRegex(UserError, "placa"):
             g._l10n_pe_ne_validar()
+
+
+class TestGuiaComercioExterior(TestGuiaBase):
+    """Comercio exterior — motivo 09 (Exportación). Emite una DAM/DUA como documento
+    relacionado (DocumentTypeCode 50, régimen 40) + el indicador de traslado total DAM/DS,
+    validado contra el XSLT real del biller (ver GreXsltMatrixTest.comercioExteriorExportacion).
+    Requiere establecimiento de llegada (SUNAT 3369)."""
+
+    def _vals_export(self, **extra):
+        v = self._vals()
+        v.update({
+            "motivo_traslado": "09",
+            "dam_numero": "235-2024-40-123456",   # régimen 40 = exportación definitiva
+            "cod_estab_llegada": "0001",           # 3369: llegada exige establecimiento
+        })
+        v.update(extra)
+        return v
+
+    def test_payload_lleva_dam_e_indicador(self):
+        g = self.Guia.create(self._vals_export())
+        p = g._l10n_pe_ne_build_gre_payload()
+        self.assertEqual(p["cabecera"]["indTrasladoTotalDAMoDS"], "1")
+        dam = [d for d in p["docRelacionado"] if d["codTipDocRel"] == "50"]
+        self.assertEqual(len(dam), 1)
+        self.assertEqual(dam[0]["numDocRel"], "235-2024-40-123456")
+        # El establecimiento de llegada viaja con el RUC de la compañía (emisor).
+        self.assertEqual(p["cabecera"]["codEstabLlegada"], "0001")
+
+    def test_sin_dam_rechaza(self):
+        g = self.Guia.create(self._vals_export(dam_numero=False))
+        with self.assertRaisesRegex(UserError, "DAM"):
+            g._l10n_pe_ne_validar()
+
+    def test_dam_formato_invalido_rechaza(self):
+        # Régimen 10 (importación) en un motivo de exportación => formato inválido.
+        g = self.Guia.create(self._vals_export(dam_numero="235-2024-10-123456"))
+        with self.assertRaisesRegex(UserError, "DAM"):
+            g._l10n_pe_ne_validar()
+
+    def test_sin_establecimiento_llegada_rechaza(self):
+        g = self.Guia.create(self._vals_export(cod_estab_llegada=False))
+        with self.assertRaisesRegex(UserError, "llegada"):
+            g._l10n_pe_ne_validar()
+
+    def test_export_valida_ok(self):
+        g = self.Guia.create(self._vals_export())
+        g._l10n_pe_ne_validar()  # no lanza
+
+    def test_detalle_expone_dam(self):
+        g = self.Guia.create(self._vals_export())
+        self.assertEqual(g.l10n_pe_ne_guia_detalle()["damNumero"], "235-2024-40-123456")
+
+    def test_quick_guia_acepta_dam(self):
+        payload = {
+            "destinatarioId": self.cliente.id, "motivoTraslado": "09",
+            "damNumero": "235-2024-40-999999", "codEstabLlegada": "0001",
+            "ubigeoPartida": "150101", "dirPartida": "Av. Uno 100",
+            "ubigeoLlegada": "150102", "dirLlegada": "Av. Dos 200",
+            "items": [{"descripcion": "Bien exportado", "cantidad": 1}],
+        }
+        res = self.Guia.l10n_pe_ne_quick_guia(payload)
+        g = self.Guia.browse(res["id"])
+        self.assertEqual(g.dam_numero, "235-2024-40-999999")

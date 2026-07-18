@@ -45,7 +45,13 @@ UNIDADES_PESO = [('KGM', 'Kilogramos'), ('TNE', 'Toneladas')]
 # Motivos cuyo XML el biller sustenta completo hoy. 04 exige código de establecimiento
 # propio en ambos puntos (ver _l10n_pe_ne_validar); 08/09 contenedor/puerto — ampliar
 # biller + este set al soportarlos.
-SUPPORTED_MOTIVOS = ('01', '02', '04', '13', '14', '18')
+SUPPORTED_MOTIVOS = ('01', '02', '04', '09', '13', '14', '18')
+# Motivo 09 = Exportación (catálogo 20). Comercio exterior: exige una DAM/DUA relacionada
+# (DocumentTypeCode 50, régimen 40 = exportación definitiva) + el indicador de traslado
+# total DAM/DS, que relaja el nivel de línea. La importación (08) queda fuera por ahora:
+# su establecimiento de partida lleva el RUC de un tercero (SUNAT 3411), que el modelo de
+# establecimientos propios no representa aún.
+DAM_EXPORTACION_RE = r'^[0-9]{3}-[0-9]{4}-40-[1-9][0-9]{0,5}$'
 
 # Relación destinatario ↔ emisor según el motivo (SUNAT 2554/2555):
 #   - traslado interno (compra, entre establecimientos propios, itinerante): el destinatario
@@ -162,6 +168,10 @@ class L10nPeNeGuiaRemision(models.Model):
     # terceros) — nunca se manda un codEstab* sin su rucEstab* gemelo.
     cod_estab_partida = fields.Char(string='Cód. establecimiento partida')
     cod_estab_llegada = fields.Char(string='Cód. establecimiento llegada')
+    # Comercio exterior (motivo 09 Exportación): N° de la DAM/DUA (Declaración Aduanera de
+    # Mercancías). Viaja como documento relacionado DocumentTypeCode 50; su formato codifica
+    # el régimen 40 (exportación definitiva). Ver DAM_EXPORTACION_RE.
+    dam_numero = fields.Char(string='N° de DAM/DUA (exportación)')
 
     # Autorización de carga (permiso especial de transporte, catálogo D37 SUNAT).
     ent_autorizacion_carga = fields.Char(string='Entidad autorización de carga (D37)')
@@ -321,6 +331,11 @@ class L10nPeNeGuiaRemision(models.Model):
             cab['indRetornoVehiculoEnvaseVacio'] = '1'
         if self.ind_retorno_vacio:
             cab['indRetornoVehiculoVacio'] = '1'
+        # Exportación (09): el indicador de traslado total DAM/DS relaja el nivel de línea
+        # (así el detalle de bienes del baseline pasa el XSLT sin exigir unidad cat.65 ni
+        # cantidad). La DAM viaja como documento relacionado (ver _guia_doc_relacionado).
+        if self.motivo_traslado == '09':
+            cab['indTrasladoTotalDAMoDS'] = '1'
         # Establecimientos propios (motivo 04): el RUC gemelo SIEMPRE es el de esta
         # compañía — nunca se manda un codEstab* sin su rucEstab* (el biller lo rechaza).
         # Sin RUC de compañía configurado no hay con qué llenar rucEstab*: mejor fallar acá
@@ -423,10 +438,15 @@ class L10nPeNeGuiaRemision(models.Model):
         comprobante_ids (lista nueva) y cae al comprobante_id legado; descarta los que aún
         no fueron emitidos por este addon (sin serie_emit — _l10n_pe_ne_validar los rechaza)."""
         docs = self.comprobante_ids or self.comprobante_id
-        return [{
+        rel = [{
             'codTipDocRel': m.l10n_pe_ne_tipo_doc or '01',
             'numDocRel': '%s-%s' % (m.l10n_pe_ne_serie_emit, m.l10n_pe_ne_corr_emit or ''),
         } for m in docs if m.l10n_pe_ne_serie_emit]
+        # Exportación (09): la DAM/DUA como documento relacionado DocumentTypeCode 50 (no
+        # lleva IssuerParty — el gate 3380/3382 no aplica a 50/52).
+        if self.motivo_traslado == '09' and self.dam_numero:
+            rel.append({'codTipDocRel': '50', 'numDocRel': self.dam_numero})
+        return rel
 
     def _l10n_pe_ne_build_gre_transportista_payload(self):
         """Arma el JSON de la GRE transportista (`GreTransportistaRequest`, tipo 31). El emisor
@@ -567,6 +587,19 @@ class L10nPeNeGuiaRemision(models.Model):
                             % self.motivo_traslado)
         if self.motivo_traslado == '13' and not (self.des_motivo_traslado or '').strip():
             raise UserError(_('El motivo "Otros" requiere describir el motivo del traslado.'))
+        if self.motivo_traslado == '09':
+            # Exportación: la DAM/DUA es obligatoria (SUNAT 3440) y su N° codifica el régimen
+            # 40 (SUNAT 3441). Sin puerto declarado, el punto de llegada debe ser un
+            # establecimiento propio (SUNAT 3369 exige AddressTypeCode de llegada presente).
+            dam = (self.dam_numero or '').strip()
+            if not dam:
+                raise UserError(_('La exportación requiere el N° de DAM/DUA.'))
+            if not re.match(DAM_EXPORTACION_RE, dam):
+                raise UserError(_('El N° de DAM/DUA de exportación debe tener el formato '
+                                  'NNN-AAAA-40-NNNNNN (p. ej. 235-2024-40-123456).'))
+            if not self.cod_estab_llegada:
+                raise UserError(_('La exportación requiere indicar el establecimiento de '
+                                  'llegada (elige un punto de llegada registrado).'))
         if self.motivo_traslado == '02':
             if not self.proveedor_id:
                 raise UserError(_('El motivo "Compra" requiere indicar el proveedor.'))
@@ -810,6 +843,7 @@ class L10nPeNeGuiaRemision(models.Model):
             'fechaInicioTraslado': c.fecha_inicio_traslado.strftime('%Y-%m-%d') if c.fecha_inicio_traslado else '',
             'ubigeoPartida': c.ubigeo_partida or '', 'dirPartida': c.dir_partida or '',
             'ubigeoLlegada': c.ubigeo_llegada or '', 'dirLlegada': c.dir_llegada or '',
+            'damNumero': c.dam_numero or '',
             'numPlaca': c.num_placa or '',
             'conductorTipoDoc': c.conductor_tipo_doc or '1', 'conductorNumDoc': c.conductor_num_doc or '',
             'conductorNombres': c.conductor_nombres or '', 'conductorApellidos': c.conductor_apellidos or '',
@@ -955,6 +989,7 @@ class L10nPeNeGuiaRemision(models.Model):
             'ubigeoPartida': 'ubigeo_partida', 'dirPartida': 'dir_partida',
             'ubigeoLlegada': 'ubigeo_llegada', 'dirLlegada': 'dir_llegada',
             'codEstabPartida': 'cod_estab_partida', 'codEstabLlegada': 'cod_estab_llegada',
+            'damNumero': 'dam_numero',
             'entAutorizacionCarga': 'ent_autorizacion_carga',
             'numAutorizacionCarga': 'num_autorizacion_carga',
         }

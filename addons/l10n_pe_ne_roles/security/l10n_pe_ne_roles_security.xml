@@ -31,6 +31,9 @@
     <record id="privilege_ne_express" model="res.groups.privilege">
       <field name="name">NE Express</field>
       <field name="sequence">30</field>
+      <!-- La categoría hace que el privilege (y sus grupos) aparezca en la grilla de
+           Ajustes → Usuarios → Permisos, gestionable a mano mientras no exista el alta de H-4. -->
+      <field name="category_id" ref="base.module_category_accounting"/>
     </record>
 
     <!-- ── Roles operativos (hermanos; cada uno implica el Emisor del biller) ─────── -->

@@ -554,6 +554,14 @@ class AccountMove(models.Model):
             ]
         return out
 
+    # Establecimiento anexo emisor (código SUNAT de 4 dígitos). Va como codLocalEmisor en el XML;
+    # "0000" = domicilio fiscal. Para negocios con sucursales, cada comprobante declara su local.
+    l10n_pe_ne_cod_establecimiento = fields.Char(
+        string="Establecimiento emisor",
+        default="0000",
+        copy=False,
+        help="Código de establecimiento anexo SUNAT (4 dígitos). '0000' = domicilio fiscal.",
+    )
     l10n_pe_ne_forma_pago = fields.Selection(
         [("Contado", "Contado"), ("Credito", "Crédito")],
         default="Contado",
@@ -1018,7 +1026,7 @@ class AccountMove(models.Model):
             "fecVencimiento": self.invoice_date_due.strftime("%Y-%m-%d")
             if self.invoice_date_due
             else "",
-            "codLocalEmisor": "0000",
+            "codLocalEmisor": (self.l10n_pe_ne_cod_establecimiento or "0000"),
             "tipDocUsuario": self._l10n_pe_cliente_doc()[0],
             "numDocUsuario": self._l10n_pe_cliente_doc()[1],
             "rznSocialUsuario": partner.name or "",
@@ -4914,6 +4922,9 @@ class AccountMove(models.Model):
                 move.l10n_pe_ne_anticipo_tipo = a["tipo"]
         # Forma de pago: Crédito (con cuotas) emite cac:PaymentTerms; medios de pago
         # (efectivo/Yape/…) se guardan como dato interno del POS (no van al XML SUNAT).
+        # Establecimiento emisor (sucursal): código de local anexo SUNAT del comprobante.
+        if payload.get("codEstablecimiento"):
+            move.l10n_pe_ne_cod_establecimiento = payload["codEstablecimiento"]
         fp = payload.get("formaPago") or {}
         if fp.get("tipo") == "Credito" or fp.get("cuotas"):
             move.l10n_pe_ne_forma_pago = "Credito"

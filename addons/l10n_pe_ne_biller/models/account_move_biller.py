@@ -587,6 +587,13 @@ class AccountMove(models.Model):
         string="Tipo de guía referenciada",
         default="09",
     )
+    # Proyecto/contrato (facturación por avance de obra): controla que la suma de las
+    # valorizaciones no supere el valor total del contrato (QA-039).
+    l10n_pe_ne_proyecto_id = fields.Many2one(
+        "l10n_pe_ne.proyecto", string="Proyecto / contrato", copy=False,
+        help="Contrato al que pertenece esta valorización. El total facturado no puede superar "
+        "el valor del contrato.",
+    )
     l10n_pe_ne_forma_pago = fields.Selection(
         [("Contado", "Contado"), ("Credito", "Crédito")],
         default="Contado",
@@ -2202,6 +2209,21 @@ class AccountMove(models.Model):
             cot = self.env["l10n_pe_ne.cotizacion"].browse(int(cotid)).exists()
             if cot:
                 cot.l10n_pe_ne_vincular_comprobante(move.id)
+        # Avance de obra (QA-039): la suma de las valorizaciones no puede superar el valor total
+        # del contrato. Se valida con el move ya posteado (amount_total disponible); si se pasa,
+        # el raise revierte la transacción y no se emite.
+        proj = move.l10n_pe_ne_proyecto_id
+        if proj:
+            otras = move.amount_total or 0.0  # esta valorización
+            if round(proj.facturado + otras, 2) > round(proj.valor_total or 0.0, 2) + 0.01:
+                raise UserError(_(
+                    "Esta valorización (%s) haría que lo facturado del contrato «%s» supere su "
+                    "valor total. Facturado: %s · Contrato: %s · Esta: %s."
+                ) % (
+                    self._l10n_pe_fmt(otras), proj.name,
+                    self._l10n_pe_fmt(proj.facturado), self._l10n_pe_fmt(proj.valor_total),
+                    self._l10n_pe_fmt(otras),
+                ))
         move.action_l10n_pe_send_to_biller()
         return move.l10n_pe_ne_quick_result()
 
@@ -4976,6 +4998,9 @@ class AccountMove(models.Model):
             move.l10n_pe_ne_guia_ref = payload["guiaRef"]
             if payload.get("guiaTipo"):
                 move.l10n_pe_ne_guia_tipo = payload["guiaTipo"]
+        # Proyecto/contrato (avance de obra).
+        if payload.get("proyectoId"):
+            move.l10n_pe_ne_proyecto_id = int(payload["proyectoId"])
         fp = payload.get("formaPago") or {}
         if fp.get("tipo") == "Credito" or fp.get("cuotas"):
             move.l10n_pe_ne_forma_pago = "Credito"

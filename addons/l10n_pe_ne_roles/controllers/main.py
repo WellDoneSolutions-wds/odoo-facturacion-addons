@@ -153,3 +153,78 @@ class L10nPeNeEquipoApi(L10nPeNeApi):
         b = self._body() or {}
         return self._run(lambda: self._cot(uid, rec_id).l10n_pe_ne_entregar(
             b.get("receptorNombre"), b.get("receptorDoc")))
+
+    # ── CN-02: orden de trabajo (taller · adelanto → cola → toma → saldo) ──────
+    def _orden_model(self, uid):
+        return request.env["l10n_pe_ne.orden.trabajo"].with_user(uid)
+
+    def _orden(self, uid, rec_id):
+        return self._orden_model(uid).browse(int(rec_id))
+
+    @http.route("/ne/api/ordenes", **_POST)
+    def orden_crear(self, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(lambda: self._orden_model(uid).l10n_pe_ne_crear_orden(self._body() or {}))
+
+    @http.route("/ne/api/ordenes/cola", **_GET)
+    def orden_cola(self, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        off, lim = self._paginacion(kw)
+        return self._run(lambda: self._orden_model(uid).l10n_pe_ne_cola_ordenes(off, lim))
+
+    @http.route("/ne/api/ordenes/cola-saldo", **_GET)
+    def orden_cola_saldo(self, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        off, lim = self._paginacion(kw)
+        return self._run(lambda: self._orden_model(uid).l10n_pe_ne_cola_saldo(off, lim))
+
+    @http.route("/ne/api/ordenes/<int:rec_id>/adelanto", **_POST)
+    def orden_adelanto(self, rec_id, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        b = self._body() or {}
+        return self._run(lambda: self._orden(uid, rec_id).l10n_pe_ne_registrar_adelanto(
+            b.get("monto"), b.get("medio")))
+
+    @http.route("/ne/api/ordenes/<int:rec_id>/tomar", **_POST)
+    def orden_tomar(self, rec_id, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(lambda: self._orden(uid, rec_id).l10n_pe_ne_tomar())
+
+    @http.route("/ne/api/ordenes/<int:rec_id>/terminar", **_POST)
+    def orden_terminar(self, rec_id, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(lambda: self._orden(uid, rec_id).l10n_pe_ne_terminar())
+
+    @http.route("/ne/api/ordenes/<int:rec_id>/cobrar-saldo", **_POST)
+    def orden_cobrar_saldo(self, rec_id, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(lambda: self._orden(uid, rec_id).l10n_pe_ne_cobrar_saldo(self._body() or {}))
+
+    @http.route("/ne/api/ordenes/<int:rec_id>/anular", **_POST)
+    def orden_anular(self, rec_id, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        b = self._body() or {}
+        return self._run(lambda: self._orden(uid, rec_id).l10n_pe_ne_anular(b.get("motivo")))
+
+    @http.route("/ne/api/ordenes/<int:rec_id>/acciones", **_GET)
+    def orden_acciones(self, rec_id, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(lambda: self._orden(uid, rec_id)._acciones())

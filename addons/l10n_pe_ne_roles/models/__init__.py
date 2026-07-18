@@ -4,3 +4,5 @@ from . import res_company
 from . import res_company_gates
 from . import account_move_config
 from . import l10n_pe_ne_cotizacion_flujo
+from . import l10n_pe_ne_orden_trabajo
+from . import l10n_pe_ne_caja_adelanto

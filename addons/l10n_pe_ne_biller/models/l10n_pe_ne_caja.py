@@ -95,6 +95,14 @@ class L10nPeNeCajaSesion(models.Model):
         retiros = sum(mv.monto for mv in self.movimiento_ids if mv.tipo == "retiro")
         return round(ingresos, 2), round(retiros, 2)
 
+    def _l10n_pe_ne_por_medio_arqueo(self, agr):
+        """Por-medio que alimenta el esperado del arqueo. Seam de extensión: por defecto es el
+        por-medio de las ventas; el addon de roles (CN-02) le SUMA los adelantos 'a cuenta' por su
+        medio, para que el prepago físico del cliente cuadre el arqueo sin mezclarse con el fondo
+        propio (que iría por ingresos genéricos, solo Efectivo). Devuelve una copia (no muta agr)."""
+        self.ensure_one()
+        return dict(agr.get("porMedio") or {})
+
     def _l10n_pe_ne_movimientos_dicts(self):
         self.ensure_one()
         return [{
@@ -112,7 +120,7 @@ class L10nPeNeCajaSesion(models.Model):
         agr = agrupar_ventas(self._l10n_pe_ne_ventas_planas())
         ingresos, retiros = self._l10n_pe_ne_ingresos_retiros()
         filas, esperado_total, _c, _d = calcular_arqueo(
-            self.saldo_inicial, agr["porMedio"], ingresos, retiros, None)
+            self.saldo_inicial, self._l10n_pe_ne_por_medio_arqueo(agr), ingresos, retiros, None)
         return {
             "id": self.id,
             "estado": self.estado,
@@ -148,7 +156,7 @@ class L10nPeNeCajaSesion(models.Model):
             agr = agrupar_ventas(self._l10n_pe_ne_ventas_planas())
             ingresos, retiros = self._l10n_pe_ne_ingresos_retiros()
             arqueo, esperado_total, contado_total, diferencia_total = calcular_arqueo(
-                self.saldo_inicial, agr["porMedio"], ingresos, retiros, None)
+                self.saldo_inicial, self._l10n_pe_ne_por_medio_arqueo(agr), ingresos, retiros, None)
             ventas = base["ventas"]
         d = dict(base)
         d.pop("esperado", None)
@@ -174,7 +182,7 @@ class L10nPeNeCajaSesion(models.Model):
             agr = agrupar_ventas(self._l10n_pe_ne_ventas_planas())
             ingresos, retiros = self._l10n_pe_ne_ingresos_retiros()
             _f, esperado_total, contado_total, diferencia_total = calcular_arqueo(
-                self.saldo_inicial, agr["porMedio"], ingresos, retiros, None)
+                self.saldo_inicial, self._l10n_pe_ne_por_medio_arqueo(agr), ingresos, retiros, None)
         return {
             "id": self.id,
             "estado": self.estado,
@@ -239,7 +247,8 @@ class L10nPeNeCajaSesion(models.Model):
         if tipo == "retiro":
             agr = agrupar_ventas(sesion._l10n_pe_ne_ventas_planas())
             ingresos, retiros = sesion._l10n_pe_ne_ingresos_retiros()
-            disponible = round(sesion.saldo_inicial + agr["porMedio"].get(EFECTIVO, 0.0)
+            disponible = round(sesion.saldo_inicial
+                               + sesion._l10n_pe_ne_por_medio_arqueo(agr).get(EFECTIVO, 0.0)
                                + ingresos - retiros, 2)
             if round(monto, 2) > disponible:
                 raise UserError(_(
@@ -261,7 +270,7 @@ class L10nPeNeCajaSesion(models.Model):
         agr = agrupar_ventas(sesion._l10n_pe_ne_ventas_planas())
         ingresos, retiros = sesion._l10n_pe_ne_ingresos_retiros()
         filas, _et, _ct, _dt = calcular_arqueo(
-            sesion.saldo_inicial, agr["porMedio"], ingresos, retiros, conteos)
+            sesion.saldo_inicial, sesion._l10n_pe_ne_por_medio_arqueo(agr), ingresos, retiros, conteos)
         sesion.write({
             "estado": "cerrada",
             "fecha_cierre": fields.Datetime.now(),

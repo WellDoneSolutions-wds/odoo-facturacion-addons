@@ -64,3 +64,22 @@ class L10nPeNeEquipoApi(L10nPeNeApi):
         b = self._body() or {}
         return self._run(lambda: self._equipo(uid).l10n_pe_ne_duenio_add_codueno(
             int(rec_id), b.get("password")))
+
+    # ── Políticas de control (gates, iter 4) ──────────────────────────────────
+    @http.route("/ne/api/politicas", **_POST)
+    def set_politica(self, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        b = self._body() or {}
+        return self._run(lambda: request.env["res.company"].with_user(uid).l10n_pe_ne_set_politica(
+            b.get("key"), b.get("modo"), b.get("umbral")))
+
+    @http.route("/ne/api/politicas/segregacion", **_POST)
+    def set_segregacion(self, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        b = self._body() or {}
+        return self._run(lambda: request.env["res.company"].with_user(uid)
+                         .l10n_pe_ne_set_exigir_segregacion(b.get("activo")))

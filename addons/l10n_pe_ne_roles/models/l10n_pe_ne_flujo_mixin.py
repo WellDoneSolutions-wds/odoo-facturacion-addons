@@ -44,6 +44,20 @@ class L10nPeNeFlujoMixin(models.AbstractModel):
         [('0', 'Normal'), ('1', 'Urgente')], string='Prioridad',
         default='0', index=True)
 
+    # Aprobación de gates (iteración 4). NO es un estado del Selection (un estado que espera a un
+    # humano que quizá no exista es la violación blanda de la escala libre): es un ATRIBUTO. Un
+    # documento que cruzó un gate en modo aviso/bloquea queda 'excepcion' hasta que se revise.
+    control_estado = fields.Selection(
+        [('normal', 'Normal'), ('excepcion', 'Excepción'), ('revisado', 'Revisado')],
+        string='Control', default='normal', index=True, tracking=True)
+    excepcion_motivo = fields.Char(string='Motivo de la excepción')
+    excepcion_magnitud = fields.Float(string='Magnitud de la excepción')
+    aprobador_id = fields.Many2one('res.users', string='Aprobado por', tracking=True)
+    fecha_aprobacion = fields.Datetime(string='Fecha de aprobación')
+    # es_auto_aprobacion: quien operó también aprobó (el caso del negocio de 1 persona). NO se
+    # salta el gate: se atraviesa y se FIRMA. El registro es el punto (cae en el reporte del dueño).
+    es_auto_aprobacion = fields.Boolean(string='Auto-aprobado', readonly=True)
+
     # ─────────────────────────────────────────────── tabla de transiciones
     @api.model
     def _transiciones(self):
@@ -122,18 +136,65 @@ class L10nPeNeFlujoMixin(models.AbstractModel):
             getattr(self, guarda)()
         return t
 
-    # ─────────────────────────────────────────────── política (hook de iter 4)
+    # ─────────────────────────────────────────────── política de gates (iter 4)
     def _politica_de(self, t, magnitud=None):
-        """(modo_efectivo, magnitud) de la compuerta de política de esta transición.
+        """(modo_efectivo, magnitud) de la compuerta de política de esta transición. Lee la
+        política del RUC (res.company: off/aviso/bloquea + umbral). Sin gate en la transición o
+        sin company -> 'off'. La magnitud la calcula el MODELO (t['magnitud']); el modo lo decide
+        el RUC."""
+        key = t.get('gate')
+        if not key or 'company_id' not in self._fields or not self.company_id:
+            return 'off', magnitud
+        if magnitud is None and t.get('magnitud'):
+            magnitud = getattr(self, t['magnitud'])()
+        return self.company_id.l10n_pe_ne_gate(key, magnitud), magnitud
 
-        Iteración 1: SIEMPRE 'off' (no hay gates todavía). La iteración 4 lo sobrescribe
-        para leer la política del RUC (res.company: off/aviso/bloqueo + umbral) sin tocar
-        el resto del motor. Se deja como hook para que _avanzar y _acciones ya tengan su
-        forma final."""
-        return 'off', magnitud
+    def _puede_aprobar(self, t):
+        key = t.get('gate')
+        if not key:
+            return False
+        from .res_company_gates import _GATES
+        grupo = _GATES.get(key, {}).get('grupo')
+        return bool(grupo) and self.env.user.has_group(grupo)
+
+    def _politica_texto(self, t, modo, magnitud):
+        key = t.get('gate')
+        if not key or not self.company_id:
+            return ''
+        from .res_company_gates import _GATES
+        umbral = None
+        cfg = _GATES.get(key, {})
+        if cfg.get('umbral'):
+            umbral = self.company_id[cfg['umbral']]
+        return self.company_id._l10n_pe_ne_politica_frase(key, modo, umbral)
+
+    def _aplicar_politica(self, t, modo, magnitud):
+        """Vals que la política añade a la escritura de la transición. TRES caminos; el negocio de
+        1 persona solo conoce el primero (off) y la auto-aprobación."""
+        if modo == 'off':
+            return {}
+        exc = {
+            'control_estado': 'excepcion',
+            'excepcion_motivo': self._politica_texto(t, modo, magnitud),
+            'excepcion_magnitud': float(magnitud or 0.0),
+        }
+        if modo == 'aviso':
+            # NO bloquea: la operación sigue, la excepción queda marcada para revisión.
+            return exc
+        # modo == 'bloquea'
+        if self.aprobador_id:
+            return exc   # ya fue aprobado antes
+        if self._puede_aprobar(t) and not self.company_id.l10n_pe_ne_exigir_segregacion:
+            # AUTO-APROBACIÓN registrada (100% de los casos con 1 usuario). No se salta: se firma.
+            return {**exc, 'aprobador_id': self.env.user.id,
+                    'fecha_aprobacion': fields.Datetime.now(), 'es_auto_aprobacion': True}
+        # No puede aprobar (o el RUC exige segregación): NO se ejecuta la transición.
+        raise UserError(_(
+            "«%(a)s» necesita la aprobación de otra persona. Quedó pendiente.",
+            a=t.get('label') or self._estado_label(t.get('_destino', ''))))
 
     # ─────────────────────────────────────────────── avanzar (una transición)
-    def _avanzar(self, destino, motivo=None, vals=None):
+    def _avanzar(self, destino, motivo=None, vals=None, magnitud=None):
         """Ejecuta UNA transición: valida los tres ejes, aplica política, escribe y audita."""
         self.ensure_one()
         t = self._check_transicion(destino, motivo)
@@ -142,9 +203,29 @@ class L10nPeNeFlujoMixin(models.AbstractModel):
         # 'tomar' es atómico: un documento en cola pasa a ser de quien lo avanza.
         if not self.user_id and t.get('toma'):
             w['user_id'] = self.env.user.id
+        # Política del RUC (gate): off/aviso/bloquea. En 'bloquea' sin aprobación, LANZA (la
+        # transición no ocurre). En 'aviso' o auto-aprobación, añade la marca de excepción.
+        modo, mag = self._politica_de(t, magnitud)
+        w.update(self._aplicar_politica({**t, '_destino': destino}, modo, mag))
         self.write(w)
         self.message_post(body=self._bitacora(t, destino, motivo))
         return self
+
+    def l10n_pe_ne_aprobar(self, key_gate=None, motivo=None):
+        """Firma la aprobación de una excepción pendiente. NO cambia el estado del documento: el
+        operador reintenta su acción y ahora pasa (aprobador_id ya está). Es el ÚNICO sitio con una
+        comparación de identidades, y SOLO cuando el RUC activó exigir_segregacion."""
+        self.ensure_one()
+        t = {'gate': key_gate} if key_gate else None
+        if t and not self._puede_aprobar(t):
+            raise AccessError(_("No tienes permiso para aprobar esto."))
+        if self.company_id.l10n_pe_ne_exigir_segregacion and \
+                self.env.user == (self.user_id or self.create_uid):
+            raise UserError(_("Tu negocio exige que apruebe otra persona."))
+        self.write({'aprobador_id': self.env.user.id, 'fecha_aprobacion': fields.Datetime.now(),
+                    'es_auto_aprobacion': self.env.user == (self.user_id or self.create_uid)})
+        self.message_post(body=_("Aprobado por %s. %s") % (self.env.user.name, motivo or ''))
+        return True
 
     def _bitacora(self, t, destino, motivo):
         """Línea de auditoría para el chatter. Un modelo puede enriquecerla."""

@@ -567,3 +567,101 @@ class TestGuiaWizard(TestGuiaBase):
             detalle['comprobantes'],
             [{'id': move.id, 'numero': g._l10n_pe_ne_comprobante_numero(move)}])
         self.assertTrue(detalle['comprobantes'][0]['numero'])
+
+
+class TestGuiaTransportista(TestGuiaBase):
+    """GRE transportista (tipo 31): el emisor es el carrier y el remitente (quien envía los
+    bienes) es una parte NUEVA enviada por Odoo; el destinatario es el partner_id de siempre.
+    Un solo vehículo (placa + TUC) + un solo conductor, el MTC propio del carrier. Se saltan las
+    reglas de la remitente (motivo/modalidad/establecimiento/2554-2555/M1L/secundarios).
+
+    Los vals con sabor transportista se arman aquí sobre TestGuiaBase._vals() (que aporta
+    destinatario, ubigeos, placa y conductor legado + un bien), sin tocar el _vals() base."""
+
+    def setUp(self):
+        super().setUp()
+        self.remitente = self.env["res.partner"].create(
+            {"name": "Remitente SAC", "vat": "20507639024"})
+
+    def _vals_transportista(self, **extra):
+        v = self._vals()
+        v.update({
+            "tipo_gre": "31",
+            "remitente_id": self.remitente.id,
+            "num_reg_mtc": "0123456789",   # MTC propio del carrier
+            "num_tuc": "TUC-000123",       # TUC del vehículo (solo tipo 31)
+        })
+        v.update(extra)
+        return v
+
+    def test_payload_transportista(self):
+        g = self.Guia.create(self._vals_transportista())
+        p = g._l10n_pe_ne_build_gre_transportista_payload()
+        cab = p["cabecera"]
+        # Remitente (parte nueva) = quien envía los bienes.
+        self.assertEqual(cab["numDocRemitente"], "20507639024")
+        self.assertEqual(cab["tipDocRemitente"], "6")
+        self.assertEqual(cab["rznSocialRemitente"], "Remitente SAC")
+        # Destinatario = el partner_id existente (Cliente GRE, RUC de TestGuiaBase).
+        self.assertEqual(cab["tipDocDestinatario"], "6")
+        self.assertEqual(cab["numDocDestinatario"], "20601030013")
+        self.assertEqual(cab["rznSocialDestinatario"], "Cliente GRE")
+        # Vehículo único (placa + TUC) y MTC del carrier.
+        self.assertEqual(cab["numPlacaVehiculoPrincipal"], "ABC123")
+        self.assertEqual(cab["numTucVehiculoPrincipal"], "TUC-000123")
+        self.assertEqual(cab["numRegMtcTransportista"], "0123456789")
+        # Conductor único (campos legados de TestGuiaBase._vals()).
+        self.assertEqual(cab["numDocConductor"], "12345678")
+        self.assertEqual(cab["nomConductor"], "Juan")
+        self.assertEqual(cab["apeConductor"], "Pérez")
+        self.assertEqual(cab["licConductor"], "Q12345678")
+        # NO lleva nada propio de la remitente (motivo/modalidad).
+        for k in ("motTrasladoDatosEnvio", "modTrasladoDatosEnvio",
+                  "desMotivoTrasladoDatosEnvio", "modalidadTraslado", "motivoTraslado"):
+            self.assertNotIn(k, cab)
+        # detalle: el bien lleva desItem/canItem.
+        self.assertEqual(p["detalle"][0]["desItem"], "Caja de tornillos")
+        self.assertEqual(p["detalle"][0]["canItem"], "2.00")
+        self.assertEqual(p["id"]["serie"], "T001")
+
+    def test_validar_sin_remitente_rechaza(self):
+        g = self.Guia.create(self._vals_transportista(remitente_id=False))
+        with self.assertRaisesRegex(UserError, "remitente"):
+            g._l10n_pe_ne_validar()
+
+    def test_validar_transportista_ok(self):
+        g = self.Guia.create(self._vals_transportista())
+        g._l10n_pe_ne_validar()  # no lanza
+
+    def test_detalle_expone_transportista(self):
+        g = self.Guia.create(self._vals_transportista())
+        d = g.l10n_pe_ne_guia_detalle()
+        self.assertEqual(d["tipoGre"], "31")
+        self.assertEqual(d["remitenteId"], self.remitente.id)
+        self.assertEqual(d["remitente"], "Remitente SAC")
+        self.assertEqual(d["remitenteDoc"], "20507639024")
+        self.assertEqual(d["numTuc"], "TUC-000123")
+
+    def test_quick_guia_acepta_claves_transportista(self):
+        # Las claves SPA (tipoGre/remitenteId/numTuc) se traducen a los campos del modelo.
+        payload = {
+            "tipoGre": "31", "remitenteId": self.remitente.id, "numTuc": "TUC-999",
+            "numRegMtc": "5550001", "numPlaca": "XYZ789",
+            "destinatarioId": self.cliente.id,
+            "conductorNumDoc": "87654321", "conductorNombres": "Ana",
+            "conductorApellidos": "Ríos", "conductorLicencia": "A87654321",
+            "ubigeoPartida": "150101", "dirPartida": "Av. Uno 100",
+            "ubigeoLlegada": "150102", "dirLlegada": "Av. Dos 200",
+            "items": [{"descripcion": "Bien X", "cantidad": 1}],
+        }
+        res = self.Guia.l10n_pe_ne_quick_guia(payload)
+        g = self.Guia.browse(res["id"])
+        self.assertEqual(g.tipo_gre, "31")
+        self.assertEqual(g.remitente_id, self.remitente)
+        self.assertEqual(g.num_tuc, "TUC-999")
+
+    def test_tipo_gre_default_remitente(self):
+        # Regresión: sin tipo explícito la guía es remitente (09) y usa el builder clásico.
+        g = self.Guia.create(self._vals())
+        self.assertEqual(g.tipo_gre, "09")
+        self.assertIn("motTrasladoDatosEnvio", g._l10n_pe_ne_build_gre_payload()["cabecera"])

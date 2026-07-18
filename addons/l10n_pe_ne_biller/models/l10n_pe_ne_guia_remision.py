@@ -66,6 +66,11 @@ class L10nPeNeGuiaRemision(models.Model):
 
     name = fields.Char(string='Número', required=True, copy=False, readonly=True,
                        default=lambda s: _('Nueva'), index=True)
+    # Tipo de GRE: 09 remitente (el emisor manda los bienes) vs 31 transportista (el emisor
+    # es el carrier). Cambia qué partes lleva la cabecera, el endpoint del biller y el código
+    # de tipo del nombre de archivo (RUC-09-... vs RUC-31-...).
+    tipo_gre = fields.Selection([('09', 'Remitente'), ('31', 'Transportista')],
+                                string='Tipo de guía', default='09', required=True)
     serie = fields.Char(string='Serie', default='T001', required=True)
     correlativo = fields.Char(string='Correlativo', copy=False, readonly=True)
     company_id = fields.Many2one('res.company', required=True, index=True,
@@ -89,6 +94,11 @@ class L10nPeNeGuiaRemision(models.Model):
     # Destinatario (a quién se le entrega). El tipo/num doc se derivan del partner.
     partner_id = fields.Many2one('res.partner', string='Destinatario', required=True, index=True)
 
+    # Remitente (quien ENVÍA los bienes): solo aplica a la GRE transportista (tipo 31), donde
+    # el emisor es el carrier y el remitente es un tercero al que el carrier hace referencia.
+    # En la GRE remitente (09) el emisor ES el remitente y este campo queda vacío.
+    remitente_id = fields.Many2one('res.partner', string='Remitente (quien envía)')
+
     # Datos del traslado.
     motivo_traslado = fields.Selection(MOTIVOS_TRASLADO, string='Motivo de traslado',
                                        default='01', required=True)
@@ -111,6 +121,9 @@ class L10nPeNeGuiaRemision(models.Model):
 
     # Transporte privado (modalidad 02): vehículo + conductor.
     num_placa = fields.Char(string='Placa del vehículo')
+    # Tarjeta Única de Circulación del vehículo: solo GRE transportista (tipo 31). El MTC
+    # propio del carrier reusa num_reg_mtc.
+    num_tuc = fields.Char(string='TUC del vehículo')
     conductor_tipo_doc = fields.Selection([('1', 'DNI'), ('4', 'Carné ext.'), ('7', 'Pasaporte')],
                                           string='Tipo doc. conductor', default='1')
     conductor_num_doc = fields.Char(string='N° doc. conductor')
@@ -372,24 +385,6 @@ class L10nPeNeGuiaRemision(models.Model):
                     'apellidos': c.apellidos or '',
                     'licencia': c.licencia or '',
                 } for c in secundarios_cond]
-        detalle = [{
-            'canItem': '%.2f' % (l.cantidad or 0.0),
-            'uniMedidaItem': l.unidad or 'NIU',
-            'desItem': l.descripcion or (l.product_id.display_name or ''),
-            'codItem': (l.product_id.default_code or '') if l.product_id else '',
-            # Bien normalizado: código de producto SUNAT (cat.25) + GTIN del producto.
-            # Bien de texto libre (sin producto) → ambos vacíos y el biller omite los
-            # elementos cac:CommodityClassification / cac:StandardItemIdentification.
-            'codProductoSUNAT': (l.product_id.l10n_pe_ne_cod_producto_sunat or '') if l.product_id else '',
-            'gtin': (l.product_id.barcode or '') if l.product_id else '',
-        } for l in self.line_ids]
-        # docRelacionado: itera comprobante_ids (lista nueva); sin lista, cae al
-        # comprobante_id legado (compat guías viejas con un único documento).
-        docs = self.comprobante_ids or self.comprobante_id
-        doc_rel = [{
-            'codTipDocRel': m.l10n_pe_ne_tipo_doc or '01',
-            'numDocRel': '%s-%s' % (m.l10n_pe_ne_serie_emit, m.l10n_pe_ne_corr_emit or ''),
-        } for m in docs if m.l10n_pe_ne_serie_emit]
         return {
             'id': {
                 'ruc': self.company_id.vat or '',
@@ -397,11 +392,92 @@ class L10nPeNeGuiaRemision(models.Model):
                 'correlativo': self.correlativo or '1',
             },
             'cabecera': cab,
-            'detalle': detalle,
-            'docRelacionado': doc_rel,
+            # detalle (bien normalizado cat.25 + GTIN) y docRelacionado son idénticos en
+            # remitente y transportista → helpers compartidos.
+            'detalle': self._l10n_pe_ne_guia_detalle_lines(),
+            'docRelacionado': self._l10n_pe_ne_guia_doc_relacionado(),
+        }
+
+    def _l10n_pe_ne_guia_detalle_lines(self):
+        """detalle (bienes) del payload — idéntico en remitente y transportista: código
+        de producto SUNAT (cat.25) + GTIN del producto, vacíos si el bien es texto libre."""
+        return [{
+            'canItem': '%.2f' % (l.cantidad or 0.0),
+            'uniMedidaItem': l.unidad or 'NIU',
+            'desItem': l.descripcion or (l.product_id.display_name or ''),
+            'codItem': (l.product_id.default_code or '') if l.product_id else '',
+            'codProductoSUNAT': (l.product_id.l10n_pe_ne_cod_producto_sunat or '') if l.product_id else '',
+            'gtin': (l.product_id.barcode or '') if l.product_id else '',
+        } for l in self.line_ids]
+
+    def _l10n_pe_ne_guia_doc_relacionado(self):
+        """docRelacionado del payload — idéntico en remitente y transportista: itera
+        comprobante_ids (lista nueva) y cae al comprobante_id legado; descarta los que aún
+        no fueron emitidos por este addon (sin serie_emit — _l10n_pe_ne_validar los rechaza)."""
+        docs = self.comprobante_ids or self.comprobante_id
+        return [{
+            'codTipDocRel': m.l10n_pe_ne_tipo_doc or '01',
+            'numDocRel': '%s-%s' % (m.l10n_pe_ne_serie_emit, m.l10n_pe_ne_corr_emit or ''),
+        } for m in docs if m.l10n_pe_ne_serie_emit]
+
+    def _l10n_pe_ne_build_gre_transportista_payload(self):
+        """Arma el JSON de la GRE transportista (`GreTransportistaRequest`, tipo 31). El emisor
+        es el transportista y lo inyecta el biller desde el TaxPayer (igual que el emisor de la
+        remitente); acá van el remitente (quien envía), el destinatario, un único vehículo
+        (placa + TUC) y un único conductor. Claves = campos de GreTransportistaCabeceraRequest."""
+        self.ensure_one()
+        rem = self.remitente_id
+        dest = self.partner_id
+        # El conductor principal de la lista alimenta las claves; sin lista, valen los
+        # campos legados conductor_* (mismo patrón que el builder remitente).
+        cond = self._l10n_pe_ne_principal(self.conductor_ids)
+        cab = {
+            'ublVersionId': '2.1',
+            'customizationId': '2.0',
+            'fecEmision': self.fecha_emision.strftime('%Y-%m-%d') if self.fecha_emision else '',
+            'horEmision': self.hora_emision or '08:00:00',
+            'obsGuia': self.obs_guia or '',
+            'tipDocRemitente': self._l10n_pe_ne_doc_tipo(rem) if rem else '',
+            'numDocRemitente': (rem.vat or '') if rem else '',
+            'rznSocialRemitente': (rem.name or '') if rem else '',
+            'tipDocDestinatario': self._l10n_pe_ne_doc_tipo(dest),
+            'numDocDestinatario': dest.vat or '',
+            'rznSocialDestinatario': dest.name or '',
+            'psoBrutoTotalBienesDatosEnvio': '%.3f' % (self.peso_bruto or 0.0),
+            'uniMedidaPesoBrutoDatosEnvio': self.uni_medida_peso or 'KGM',
+            'numBultosDatosEnvio': str(self.num_bultos or 1),
+            'fecInicioTrasladoDatosEnvio': self.fecha_inicio_traslado.strftime('%Y-%m-%d')
+                if self.fecha_inicio_traslado else '',
+            'numRegMtcTransportista': self.num_reg_mtc or '',
+            'numPlacaVehiculoPrincipal': self.num_placa or '',
+            'numTucVehiculoPrincipal': self.num_tuc or '',
+            'tipDocConductor': (cond.tipo_doc if cond else self.conductor_tipo_doc) or '1',
+            'numDocConductor': (cond.num_doc if cond else self.conductor_num_doc) or '',
+            'nomConductor': (cond.nombres if cond else self.conductor_nombres) or '',
+            'apeConductor': (cond.apellidos if cond else self.conductor_apellidos) or '',
+            'licConductor': (cond.licencia if cond else self.conductor_licencia) or '',
+            'ubiPartida': self.ubigeo_partida or '',
+            'dirPartida': self.dir_partida or '',
+            'ubiLlegada': self.ubigeo_llegada or '',
+            'dirLlegada': self.dir_llegada or '',
+        }
+        return {
+            'id': {
+                'ruc': self.company_id.vat or '',
+                'serie': self.serie or 'T001',
+                'correlativo': self.correlativo or '1',
+            },
+            'cabecera': cab,
+            'detalle': self._l10n_pe_ne_guia_detalle_lines(),
+            'docRelacionado': self._l10n_pe_ne_guia_doc_relacionado(),
         }
 
     # ------------------------------------------------------------- emisión
+    def _l10n_pe_ne_tipo_cod(self):
+        """Código de tipo de documento SUNAT para el nombre de archivo: 31 transportista, 09
+        remitente (RUC-09-serie-corr / RUC-31-serie-corr)."""
+        return '31' if self.tipo_gre == '31' else '09'
+
     def _l10n_pe_ne_validar(self):
         self.ensure_one()
         if self.estado not in ESTADOS_EMITIBLES:
@@ -425,6 +501,28 @@ class L10nPeNeGuiaRemision(models.Model):
             if not m.l10n_pe_ne_serie_emit:
                 raise UserError(_('El comprobante relacionado %s aún no ha sido emitido a SUNAT.')
                                 % (m.name or m.id))
+        # GRE transportista (tipo 31): el emisor es el carrier; el remitente (quien envía) es
+        # una parte nueva, y hay un solo vehículo (placa + TUC) y un solo conductor. Se salta
+        # aquí (return) todo lo propio de la remitente: motivo/modalidad/establecimiento,
+        # 2554/2555, exención M1L y topes de secundarios.
+        if self.tipo_gre == '31':
+            if not self.remitente_id:
+                raise UserError(_('Indica el remitente (quien envía los bienes).'))
+            self._l10n_pe_ne_doc_tipo(self.remitente_id)  # valida RUC/DNI del remitente
+            # Un solo vehículo/conductor: placa desde num_placa; conductor desde el principal
+            # de la lista o los campos legados (misma lógica de completitud del privado).
+            cond = self._l10n_pe_ne_principal(self.conductor_ids)
+            efectivos = (
+                (_('la placa del vehículo'), self.num_placa or ''),
+                (_('el documento del conductor'), (cond.num_doc if cond else self.conductor_num_doc) or ''),
+                (_('los nombres del conductor'), (cond.nombres if cond else self.conductor_nombres) or ''),
+                (_('los apellidos del conductor'), (cond.apellidos if cond else self.conductor_apellidos) or ''),
+                (_('la licencia de conducir'), (cond.licencia if cond else self.conductor_licencia) or ''),
+            )
+            faltantes = [etiqueta for etiqueta, valor in efectivos if not valor.strip()]
+            if faltantes:
+                raise UserError(_('Guía transportista: falta %s.') % ', '.join(faltantes))
+            return
         if self.motivo_traslado not in SUPPORTED_MOTIVOS:
             raise UserError(_('El motivo de traslado %s aún no soportado para emisión.')
                             % self.motivo_traslado)
@@ -522,7 +620,7 @@ class L10nPeNeGuiaRemision(models.Model):
         except Exception:  # noqa: BLE001
             return '', ''
         att = self.env['ir.attachment'].create({
-            'name': 'R%s-09-%s.zip' % (self.company_id.vat or '', self.name),
+            'name': 'R%s-%s-%s.zip' % (self.company_id.vat or '', self._l10n_pe_ne_tipo_cod(), self.name),
             'res_model': 'l10n_pe_ne.guia_remision',
             'res_id': self.id,
             'mimetype': 'application/zip',
@@ -549,10 +647,12 @@ class L10nPeNeGuiaRemision(models.Model):
             self.l10n_pe_biller_message = _('Rechazada por SUNAT (ResponseCode %s). %s') % (code or '—', desc or '')
 
     def l10n_pe_ne_emitir_guia(self):
-        """Emite la GRE al biller (`POST /generator/guia`): firma, envía a SUNAT y recoge el CDR.
-        El biller devuelve el XML firmado en el body y el CDR (zip base64) en el header
-        `X-Sunat-Cdr` (igual que la factura). Guarda ambos y fija el estado según el ResponseCode
-        del CDR (0 = aceptado)."""
+        """Emite la GRE al biller: firma, envía a SUNAT y recoge el CDR. Según el tipo, va al
+        endpoint remitente (`POST /generator/guia`, tipo 09) o transportista
+        (`POST /generator/guiaTransportista`, tipo 31); solo cambian URL, payload y el código de
+        tipo del nombre de archivo. El biller devuelve el XML firmado en el body y el CDR (zip
+        base64) en el header `X-Sunat-Cdr` (igual que la factura). Guarda ambos y fija el estado
+        según el ResponseCode del CDR (0 = aceptado)."""
         self.ensure_one()
         # SUNAT valida fecEmision/horEmision contra el momento del envío: se estampan al
         # emitir (hora de Lima), no al crear el borrador. Solo en estados emitibles — una
@@ -567,9 +667,12 @@ class L10nPeNeGuiaRemision(models.Model):
         base = icp.get_param('l10n_pe_ne_biller.url', 'http://localhost:8090').rstrip('/')
         timeout = int(icp.get_param('l10n_pe_ne_biller.timeout', '240'))
         headers = {'X-Api-Key': self.company_id.sudo().l10n_pe_ne_api_key or ''}
-        payload = self._l10n_pe_ne_build_gre_payload()
+        if self.tipo_gre == '31':
+            endpoint, payload = '/generator/guiaTransportista', self._l10n_pe_ne_build_gre_transportista_payload()
+        else:
+            endpoint, payload = '/generator/guia', self._l10n_pe_ne_build_gre_payload()
         try:
-            resp = requests.post(base + '/generator/guia', json=payload, headers=headers,
+            resp = requests.post(base + endpoint, json=payload, headers=headers,
                                  timeout=(5, timeout))
         except requests.RequestException as exc:
             self.estado = 'error'
@@ -578,7 +681,7 @@ class L10nPeNeGuiaRemision(models.Model):
         body = resp.text or ''
         if resp.status_code == 200 and any(t in body for t in ('<DespatchAdvice', '<ext:UBLExtensions')):
             att = self.env['ir.attachment'].create({
-                'name': '%s-09-%s.xml' % (self.company_id.vat, self.name),
+                'name': '%s-%s-%s.xml' % (self.company_id.vat, self._l10n_pe_ne_tipo_cod(), self.name),
                 'res_model': 'l10n_pe_ne.guia_remision',
                 'res_id': self.id,
                 'mimetype': 'application/xml',
@@ -652,7 +755,14 @@ class L10nPeNeGuiaRemision(models.Model):
         return {
             **self._l10n_pe_ne_guia_dict(),
             'serie': c.serie, 'correlativo': c.correlativo or '',
+            'tipoGre': c.tipo_gre,
             'destinatarioId': c.partner_id.id,
+            # Remitente y TUC solo tienen sentido en la GRE transportista (tipo 31); en la
+            # remitente quedan vacíos. El id acompaña al nombre para el round-trip de la SPA.
+            'remitenteId': c.remitente_id.id if c.remitente_id else None,
+            'remitente': c.remitente_id.name if c.remitente_id else '',
+            'remitenteDoc': c.remitente_id.vat if c.remitente_id else '',
+            'numTuc': c.num_tuc or '',
             'horaEmision': c.hora_emision or '',
             'obsGuia': c.obs_guia or '',
             'motivoTraslado': c.motivo_traslado, 'desMotivoTraslado': c.des_motivo_traslado or '',
@@ -796,6 +906,7 @@ class L10nPeNeGuiaRemision(models.Model):
         vals = {}
         strmap = {
             'serie': 'serie', 'obsGuia': 'obs_guia', 'horaEmision': 'hora_emision',
+            'tipoGre': 'tipo_gre', 'numTuc': 'num_tuc',
             'motivoTraslado': 'motivo_traslado', 'desMotivoTraslado': 'des_motivo_traslado',
             'modalidadTraslado': 'modalidad_traslado', 'uniMedidaPeso': 'uni_medida_peso',
             'numPlaca': 'num_placa', 'conductorTipoDoc': 'conductor_tipo_doc',
@@ -835,6 +946,8 @@ class L10nPeNeGuiaRemision(models.Model):
             vals['transportista_id'] = int(payload['transportistaId']) if payload.get('transportistaId') else False
         if 'proveedorId' in payload:
             vals['proveedor_id'] = int(payload['proveedorId']) if payload.get('proveedorId') else False
+        if 'remitenteId' in payload:
+            vals['remitente_id'] = int(payload['remitenteId']) if payload.get('remitenteId') else False
         if 'vehiculos' in payload:
             # placa es required= en el modelo línea, pero eso solo garantiza NOT NULL en
             # SQL: un Char required acepta '' sin quejarse. Sin este guard, un vehículo sin

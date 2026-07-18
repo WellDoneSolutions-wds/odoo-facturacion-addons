@@ -3880,6 +3880,7 @@ class AccountMove(models.Model):
             "telefono": p.phone or "",
             "direccion": p.street or "",
             "exceptuadoPercepcion": p.l10n_pe_ne_exceptuado_percepcion,
+            "parteVinculada": p.l10n_pe_ne_parte_vinculada,
         }
 
     def _l10n_pe_ne_ident_type(self, tipoDoc):
@@ -3903,6 +3904,7 @@ class AccountMove(models.Model):
             ("telefono", "phone"),
             ("direccion", "street"),
             ("exceptuadoPercepcion", "l10n_pe_ne_exceptuado_percepcion"),
+            ("parteVinculada", "l10n_pe_ne_parte_vinculada"),
         ):
             if key in c:
                 vals[field] = c.get(key) or False

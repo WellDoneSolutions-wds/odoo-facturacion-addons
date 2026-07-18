@@ -13,3 +13,11 @@ class ResPartner(models.Model):
         help="Si está marcado, no se aplica percepción del IGV a este cliente "
         "aunque el bien esté afecto (cliente excluido del régimen).",
     )
+
+    # Parte vinculada (mismo grupo económico): informativo, para identificar y reportar
+    # operaciones sujetas a precios de transferencia (QA-046). No bloquea la emisión.
+    l10n_pe_ne_parte_vinculada = fields.Boolean(
+        string="Parte vinculada",
+        help="Cliente del mismo grupo económico. Marca la operación para el análisis de "
+        "precios de transferencia (declaración jurada anual informativa).",
+    )

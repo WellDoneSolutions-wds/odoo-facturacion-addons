@@ -286,7 +286,10 @@ class ResCompany(models.Model):
         Company = self.env['res.company'].sudo()
         out = []
         for c in Company.search([], order='name', limit=limit, offset=offset or 0):
-            emisores = Users.search([('company_id', '=', c.id), ('group_ids', 'in', grp.id)])
+            # all_group_ids (no group_ids): incluye a quien tiene emisor por IMPLICACIÓN de un
+            # rol (cajero/vendedor/… implican emisor). Con group_ids (solo explícitos) un usuario
+            # con solo un rol quedaría invisible en el panel de emisores (V6 del pentest).
+            emisores = Users.search([('company_id', '=', c.id), ('all_group_ids', 'in', grp.id)])
             out.append({
                 'companyId': c.id,
                 'company': c.name,

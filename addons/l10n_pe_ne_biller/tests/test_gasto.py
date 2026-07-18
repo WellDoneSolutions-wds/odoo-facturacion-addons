@@ -42,8 +42,9 @@ class TestGasto(TransactionCase):
             g.unlink()
 
     def test_unlink_bloqueado_por_acl(self):
-        """La ACL del emisor tiene perm_unlink=0: el borrado por la ruta ORM da AccessError
-        antes incluso del override."""
+        """La ACL del emisor tiene perm_unlink=0. El override append-only lanza PRIMERO (un
+        UserError base), así que para ejercitar la capa de ACL de Odoo hay que saltarlo con el
+        contexto de bypass: entonces super().unlink() llega a check_access y da AccessError."""
         d = self.Gasto.l10n_pe_ne_create_gasto({"descripcion": "Movilidad", "monto": 12})
         user = self.env["res.users"].create({
             "name": "Emisor G", "login": "emisor_gasto_it2",
@@ -51,7 +52,8 @@ class TestGasto(TransactionCase):
             "group_ids": [(4, self.env.ref("l10n_pe_ne_biller.group_l10n_pe_ne_emisor").id)],
         })
         with self.assertRaises(AccessError):
-            self.Gasto.browse(d["id"]).with_user(user).unlink()
+            self.Gasto.browse(d["id"]).with_user(user).with_context(
+                l10n_pe_ne_bypass_lock=True).unlink()
 
     def test_reversa_crea_contra_asiento(self):
         d = self.Gasto.l10n_pe_ne_create_gasto({"descripcion": "Compra útiles", "monto": 80})

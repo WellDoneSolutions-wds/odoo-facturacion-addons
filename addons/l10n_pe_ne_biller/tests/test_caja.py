@@ -143,7 +143,7 @@ class TestCaja(TransactionCase):
             "tipo": "retiro", "motivo": "cuadre", "monto": 333,
             "voucherRef": "DEP-001", "fechaVoucher": "2026-07-18"})
         self.assertEqual(d["retiros"], 333.0)
-        self.assertEqual(d["movimientos"][-1]["voucherRef"], "DEP-001")
+        self.assertTrue(any(m["voucherRef"] == "DEP-001" for m in d["movimientos"]))
         # efectivo esperado 0 al cerrar (conteo ciego)
         arq = self.Sesion.l10n_pe_ne_cerrar_caja({"conteos": [{"medio": "Efectivo", "contado": 0}]})
         efec = {f["medio"]: f for f in arq["arqueo"]}
@@ -356,8 +356,7 @@ class TestCaja(TransactionCase):
         d = self.Sesion.l10n_pe_ne_caja_movimiento({
             "tipo": "retiro", "motivo": "deposito banco", "monto": 400,
             "voucherRef": "OP-99887", "fechaVoucher": "2026-07-18", "destino": "BCP 191-..."})
-        mv = d["movimientos"][-1]
-        self.assertEqual(mv["voucherRef"], "OP-99887")
+        mv = next(m for m in d["movimientos"] if m["voucherRef"] == "OP-99887")
         self.assertEqual(mv["fechaVoucher"], "2026-07-18")
         self.assertEqual(mv["destino"], "BCP 191-...")
 

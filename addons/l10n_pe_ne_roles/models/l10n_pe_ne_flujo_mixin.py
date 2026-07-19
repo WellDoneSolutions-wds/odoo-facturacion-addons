@@ -197,37 +197,53 @@ class L10nPeNeFlujoMixin(models.AbstractModel):
             "«%(a)s» necesita la aprobación de otra persona. Quedó pendiente.",
             a=t.get('label') or self._estado_label(t.get('_destino', ''))))
 
-    # ─────────────────────────────────────────────── blindaje de la máquina de estados
+    # ─────────────────────────────────────────────── blindaje de la máquina de estados (y el dinero)
+    @api.model
+    def _campos_flujo(self):
+        """Campos que SOLO escriben las acciones controladas (con _FLUJO_OK) o el sistema (su): la
+        máquina de estados y, en los modelos que lo amplían, el REGISTRO DEL DINERO cobrado (A7) o
+        ejes de estado adicionales (A10). Cada modelo suma los suyos:
+        return super()._campos_flujo() + ('estado_despacho',)."""
+        return ("estado",)
+
     @api.model_create_multi
     def create(self, vals_list):
-        """Un documento de flujo NACE en su estado inicial (el default del campo), no directamente
-        en uno avanzado. Cierra el vector espejo del write: crear una cotización ya 'convertida' (sin
-        comprobante) o una orden ya 'entregada' por un create RPC. Sistema (su) y acciones internas
-        (_FLUJO_OK) sí pueden sembrar estados (migraciones, fixtures)."""
+        """Un documento de flujo NACE en su estado inicial (el default del campo) y sin cobros
+        registrados. Cierra el vector espejo del write: crear una cotización ya 'convertida' (sin
+        comprobante) o una orden ya 'entregada'/'cobrada' por un create RPC. Sistema (su) y acciones
+        internas (_FLUJO_OK) sí pueden sembrar (migraciones, fixtures)."""
         if not self.env.su and not self.env.context.get(_FLUJO_OK):
-            if any(v.get("estado") for v in vals_list):
+            protegidos = self._campos_flujo()
+            if any(v.get(f) for v in vals_list for f in protegidos):
                 raise UserError(_(
-                    "Un documento nuevo nace en su estado inicial; su avance va por las acciones "
-                    "del flujo, no se crea directamente en otro estado."))
+                    "Un documento nuevo nace en su estado inicial; su avance y su cobro van por "
+                    "las acciones del flujo, no se crea directamente en otro estado."))
         return super().create(vals_list)
 
     def write(self, vals):
-        """'estado' NO se escribe por un write RPC directo (que se saltaría _avanzar: has_group de
-        la arista, la toma atómica, la guarda de realidad, el gate del RUC y las reglas duras). Solo
-        pasa desde una acción controlada (que marca _FLUJO_OK) o en modo SISTEMA (env.su: migraciones,
-        cron, tests de fábrica). Cierra a nivel de MODELO el hueco de 'confiar en que solo el BFF
-        llama los métodos buenos' — vale para todos los modelos de flujo (CN-01 cotización, CN-02
-        orden, y los que vengan). La ir.rule limita QUÉ estados se ven; esto limita las TRANSICIONES.
+        """Los campos de flujo NO se escriben por un write RPC directo (que se saltaría _avanzar:
+        has_group de la arista, la toma atómica, la guarda de realidad, el gate del RUC y las reglas
+        duras). Solo pasan desde una acción controlada (que marca _FLUJO_OK) o en modo SISTEMA
+        (env.su: migraciones, cron, tests de fábrica). Cierra a nivel de MODELO el hueco de 'confiar
+        en que solo el BFF llama los métodos buenos' — vale para todos los modelos de flujo. La
+        ir.rule limita QUÉ registros se ven; esto limita las TRANSICIONES y el DINERO.
 
         GUARDARRAÍL: la solidez de _FLUJO_OK depende de que NINGÚN endpoint reenvíe el contexto del
         cliente al ORM. Hoy los controllers solo exponen métodos con nombre (el _body alimenta
         argumentos, no contexto); si algún día se expone un call_kw/execute_kw genérico, el flag se
-        volvería falsificable y habría que sacar 'estado' del write de emisor por otra vía."""
-        if "estado" in vals and not self.env.su and not self.env.context.get(_FLUJO_OK):
-            if any(rec.estado != vals["estado"] for rec in self):
-                raise UserError(_(
-                    "El estado de este documento se cambia por sus acciones (los botones del "
-                    "flujo), no escribiéndolo directamente."))
+        volvería falsificable y habría que sacar estos campos del write de emisor por otra vía."""
+        if not self.env.su and not self.env.context.get(_FLUJO_OK):
+            for f in self._campos_flujo():
+                if f not in vals:
+                    continue
+                es_m2o = self._fields[f].type == "many2one"
+                nuevo = (vals[f] or False) if es_m2o else vals[f]
+                for rec in self:
+                    actual = (rec[f].id or False) if es_m2o else rec[f]
+                    if actual != nuevo:   # el no-op (mismo valor) pasa; el cambio real, no
+                        raise UserError(_(
+                            "«%s» se cambia por las acciones del flujo (los botones), no "
+                            "escribiéndolo directamente.") % (self._fields[f].string or f))
         return super().write(vals)
 
     # ─────────────────────────────────────────────── serialización de fila

@@ -180,6 +180,42 @@ class TestCotizacionFlujo(TransactionCase):
         with self.assertRaisesRegex(UserError, "vigente"):
             cot.l10n_pe_ne_vincular_comprobante(move.id)
 
+    def test_despacho_no_por_write_rpc_directo(self):
+        # A10: estado_despacho (la 2ª máquina de estados) tiene el mismo blindaje que 'estado' —
+        # 'entregado' solo por l10n_pe_ne_entregar, nunca por un write directo.
+        cot = self._cot(estado="convertida")
+        cajero = self._user("caj_desp_cn01", ["l10n_pe_ne_roles.group_l10n_pe_ne_caja"])
+        with self.assertRaisesRegex(UserError, "no escribiéndolo directamente"):
+            cot.with_user(cajero).write({"estado_despacho": "entregado"})
+
+    def test_rechazada_se_reabre(self):
+        # A11: rechazada NO es terminal (piso H4 del biller) — el cliente que se arrepiente reabre.
+        cot = self._cot(estado="rechazada")
+        vendedor = self._user("ven_reabre_cn01", ["l10n_pe_ne_roles.group_l10n_pe_ne_ventas"])
+        cot.with_user(vendedor).l10n_pe_ne_set_estado("aceptada")
+        self.assertEqual(cot.estado, "aceptada")
+
+    def test_set_estado_rechazada_con_motivo(self):
+        # A11: la ruta legada /estado con 'rechazada' estaba muerta (la arista exige motivo y el
+        # override no lo pasaba). Ahora set_estado acepta motivo.
+        cot = self._cot(estado="aceptada")
+        vendedor = self._user("ven_setrech_cn01", ["l10n_pe_ne_roles.group_l10n_pe_ne_ventas"])
+        with self.assertRaisesRegex(UserError, "motivo"):
+            cot.with_user(vendedor).l10n_pe_ne_set_estado("rechazada")
+        cot.with_user(vendedor).l10n_pe_ne_set_estado("rechazada", "muy caro")
+        self.assertEqual(cot.estado, "rechazada")
+
+    def test_payload_ancla_cliente(self):
+        # A13: el payload lleva clienteId (ancla el comprobante al MISMO partner de la cotización)
+        # y el tipoDoc sale del tipo de identificación real, no de adivinar por longitud.
+        cot = self._cot()
+        cli = cot._l10n_pe_ne_payload_emision()["cliente"]
+        self.assertEqual(cli["clienteId"], self.cliente.id)
+        self.assertEqual(cli["tipoDoc"], "6")   # RUC (cat. 06), del identification type
+        # y quick_partner lo honra: devuelve ESE partner, no crea un homónimo
+        p = self.env["account.move"]._l10n_pe_ne_quick_partner(cli)
+        self.assertEqual(p, self.cliente)
+
     def test_cajero_no_edita_ni_borra(self):
         # A3: un cajero puro NO edita/borra una 'aceptada' (re-tarifar renovaría la vigencia y
         # esquivaría P6). Editar/borrar es del vendedor/supervisor.

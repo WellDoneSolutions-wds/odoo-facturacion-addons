@@ -180,6 +180,31 @@ class TestOrdenTrabajo(TransactionCase):
         with self.assertRaisesRegex(UserError, "no escribiéndolo directamente"):
             orden.with_user(cajero).write({"estado": "terminada"})
 
+    def test_dinero_no_por_write_rpc_directo(self):
+        # A7: el registro del cobro (adelanto/factura) no se reescribe por fuera de las acciones.
+        orden = self._orden(estado="terminada", adelanto=50.0)
+        cajero = self._user("caj_dinero_ot", ["l10n_pe_ne_roles.group_l10n_pe_ne_caja"])
+        with self.assertRaisesRegex(UserError, "no escribiéndolo directamente"):
+            orden.with_user(cajero).write({"adelanto_monto": 1.0})
+        move = self.env["account.move"].create(
+            {"move_type": "out_invoice", "partner_id": self.cliente.id})
+        with self.assertRaisesRegex(UserError, "no escribiéndolo directamente"):
+            orden.with_user(cajero).write({"factura_final_id": move.id})
+
+    def test_lineas_congeladas_fuera_de_borrador(self):
+        # A7: el detalle se edita solo en borrador; después, cambiar el precio divergiría el saldo
+        # del adelanto cobrado (o del comprobante emitido).
+        orden = self._orden(estado="terminada")
+        cajero = self._user("caj_linea_ot", ["l10n_pe_ne_roles.group_l10n_pe_ne_caja"])
+        with self.assertRaisesRegex(UserError, "ya no se edita"):
+            orden.linea_ids[0].with_user(cajero).write({"precio_unitario": 999.0})
+        with self.assertRaisesRegex(UserError, "ya no se edita"):
+            orden.linea_ids[0].with_user(cajero).unlink()
+        # en borrador SÍ se edita (la orden aún no tiene dinero encima)
+        o2 = self._orden()
+        o2.linea_ids[0].with_user(cajero).write({"precio_unitario": 99.0})
+        self.assertEqual(o2.linea_ids[0].precio_unitario, 99.0)
+
     def test_estado_no_por_create_rpc_directo(self):
         # un documento nuevo NACE en su estado inicial; no se crea directamente en uno avanzado.
         cajero = self._user("caj_crea_ot", ["l10n_pe_ne_roles.group_l10n_pe_ne_caja"])

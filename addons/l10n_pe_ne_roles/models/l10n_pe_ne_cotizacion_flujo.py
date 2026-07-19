@@ -62,16 +62,26 @@ class L10nPeNeCotizacionFlujo(models.Model):
             **super()._transiciones(),
             ("borrador", "enviada"): {"grupo": _G_VENTAS, "cadena": True, "label": "Enviar al cliente"},
             ("borrador", "aceptada"): {"grupo": _G_VENTAS, "cadena": True, "label": "Cliente acepta"},
+            ("borrador", "rechazada"): {"grupo": _G_VENTAS, "motivo": True, "label": "Cliente rechaza"},
             ("enviada", "aceptada"): {"grupo": _G_VENTAS, "cadena": True, "label": "Cliente acepta"},
             ("enviada", "rechazada"): {"grupo": _G_VENTAS, "motivo": True, "label": "Cliente rechaza"},
             ("aceptada", "rechazada"): {"grupo": _G_VENTAS, "motivo": True, "label": "Cliente rechaza"},
+            # A11: rechazada NO es terminal — el cliente que se arrepiente reabre (piso H4 del
+            # biller: rechazada→aceptada). La vigencia P6 sigue aplicando al cobrar.
+            ("rechazada", "aceptada"): {"grupo": _G_VENTAS, "label": "El cliente aceptó (reabrir)"},
             # 'convertida' (por emisión) y 'vencida' (por el cron, escritura directa) NO son aristas:
             # no se transicionan a mano. 'aceptada' sale por 'rechazada' o por el fold de cobro.
         }
 
     @api.model
     def _estados_terminales(self):
-        return ("convertida", "rechazada", "vencida")
+        return ("convertida", "vencida")
+
+    @api.model
+    def _campos_flujo(self):
+        # A10: el eje de despacho es la SEGUNDA máquina de estados del modelo — mismo blindaje que
+        # 'estado' (lo escriben solo entregar/vincular_comprobante, nunca un write RPC directo).
+        return super()._campos_flujo() + ("estado_despacho",)
 
     # Transiciones con nombre (reemplazan al setter crudo; cada una valida los 3 ejes vía _avanzar).
     def l10n_pe_ne_enviar(self):
@@ -87,13 +97,16 @@ class L10nPeNeCotizacionFlujo(models.Model):
         self._avanzar("rechazada", motivo=motivo)
         return self._l10n_pe_ne_cotizacion_dict()
 
-    def l10n_pe_ne_set_estado(self, estado):
+    def l10n_pe_ne_set_estado(self, estado, motivo=None):
         """Override: la ruta legada /estado se mapea a la transición con nombre (así queda gateada
-        por grupo). 'convertida'/'vencida' no se setean a mano por aquí."""
+        por grupo). 'convertida'/'vencida' no se setean a mano por aquí. A11: acepta motivo — sin
+        él, 'rechazada' por esta ruta estaba muerta (la arista exige motivo y siempre lanzaba)."""
         self.ensure_one()
         metodo = _ESTADO_METODO.get(estado)
         if not metodo:
             raise UserError(_("No se puede pasar de «%(o)s» a «%(d)s».", o=self.estado, d=estado))
+        if estado == "rechazada":
+            return getattr(self, metodo)(motivo)
         return getattr(self, metodo)()
 
     # ───────────────────────────────────────────── edición gateada (revisión Fable A3)
@@ -174,7 +187,8 @@ class L10nPeNeCotizacionFlujo(models.Model):
         res = super(L10nPeNeCotizacionFlujo,
                     self.with_context(l10n_pe_ne_flujo_ok=True)).l10n_pe_ne_vincular_comprobante(comprobante_id)
         if self._l10n_pe_ne_tiene_despacho() and self.estado_despacho == "no_aplica":
-            self.estado_despacho = "pendiente"
+            # Escritura AUTORIZADA del eje despacho (A10): la emisión abre la cola de entrega.
+            self.with_context(l10n_pe_ne_flujo_ok=True).write({"estado_despacho": "pendiente"})
         return res
 
     def l10n_pe_ne_entregar(self, receptor_nombre=None, receptor_doc=None):
@@ -184,7 +198,8 @@ class L10nPeNeCotizacionFlujo(models.Model):
             raise AccessError(_("No tienes permiso para entregar mercadería."))
         if self.estado != "convertida" or self.estado_despacho != "pendiente":
             raise UserError(_("Solo se entrega mercadería ya cobrada y pendiente de despacho."))
-        self.write({
+        # Escritura AUTORIZADA del eje despacho (A10): esta ES la acción de entrega.
+        self.with_context(l10n_pe_ne_flujo_ok=True).write({
             "estado_despacho": "entregado",
             "despachador_id": self.env.uid,
             "fecha_entrega": fields.Datetime.now(),
@@ -236,8 +251,10 @@ class L10nPeNeCotizacionFlujo(models.Model):
         (afecto: /(1+IGV); no gravado: tal cual), o el comprobante saldría ~18% más alto."""
         self.ensure_one()
         p = self.partner_id
-        # tipoDoc por el documento del cliente (11=RUC→factura, si no boleta).
-        tipo_doc = "01" if (p.vat and len(p.vat) == 11) else "03"
+        # A13: tipoDoc por el TIPO de identificación del partner (cat. 06 SUNAT); el fallback es la
+        # heurística por longitud. Sin esto un CE/pasaporte se declaraba DNI.
+        vat_code = p.l10n_latam_identification_type_id.l10n_pe_vat_code or ""
+        tipo_doc = "01" if (vat_code == "6" or (p.vat and len(p.vat) == 11)) else "03"
         lineas = []
         for l in self.line_ids:
             base = round(l.precio_unitario / (1 + IGV_RATE), 6) if l.afecto_igv else l.precio_unitario
@@ -252,7 +269,10 @@ class L10nPeNeCotizacionFlujo(models.Model):
             })
         payload = {
             "tipoDoc": tipo_doc,
-            "cliente": {"tipoDoc": "6" if tipo_doc == "01" else "1",
+            # A13: clienteId ancla el comprobante AL MISMO partner de la cotización (sin él, un
+            # cliente sin documento se re-creaba homónimo en cada cobro).
+            "cliente": {"clienteId": p.id,
+                        "tipoDoc": vat_code or ("6" if tipo_doc == "01" else "1"),
                         "numDoc": p.vat or "", "razonSocial": p.name or ""},
             "lineas": lineas,
             "cotizacionId": self.id,

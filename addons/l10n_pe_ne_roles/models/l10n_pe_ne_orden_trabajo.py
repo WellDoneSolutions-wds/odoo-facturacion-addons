@@ -131,6 +131,15 @@ class L10nPeNeOrdenTrabajo(models.Model):
     def _estados_terminales(self):
         return ("entregada", "anulada")
 
+    @api.model
+    def _campos_flujo(self):
+        # A7: el blindaje cubre también el DINERO — el registro del cobro (adelanto y comprobante
+        # final) lo escriben SOLO registrar_adelanto/cobrar_saldo (con _FLUJO_OK), nunca un write
+        # RPC directo. Sin esto, un operativo podía reescribir adelanto_monto/factura_final_id de
+        # una orden ya entregada, divergiendo el registro del comprobante emitido.
+        return super()._campos_flujo() + (
+            "adelanto_monto", "medio_adelanto", "adelanto_movimiento_id", "factura_final_id")
+
     # Transiciones con nombre (validan los 3 ejes vía _avanzar).
     def l10n_pe_ne_tomar(self):
         """El operario toma la orden de la cola (encolada→en_proceso). 'toma' asigna user_id
@@ -236,7 +245,9 @@ class L10nPeNeOrdenTrabajo(models.Model):
         emit espera precioUnitario SIN IGV → se convierte (afecto: /(1+IGV); no gravado: tal cual)."""
         self.ensure_one()
         p = self.partner_id
-        tipo_doc = "01" if (p.vat and len(p.vat) == 11) else "03"
+        # A13: tipoDoc por el TIPO de identificación real (cat. 06); fallback a la heurística.
+        vat_code = p.l10n_latam_identification_type_id.l10n_pe_vat_code or ""
+        tipo_doc = "01" if (vat_code == "6" or (p.vat and len(p.vat) == 11)) else "03"
         lineas = []
         for l in self.linea_ids:
             base = round(l.precio_unitario / (1 + IGV_RATE), 6) if l.afecto_igv else l.precio_unitario
@@ -251,7 +262,9 @@ class L10nPeNeOrdenTrabajo(models.Model):
             })
         return {
             "tipoDoc": tipo_doc,
-            "cliente": {"tipoDoc": "6" if tipo_doc == "01" else "1",
+            # A13: clienteId ancla el comprobante al MISMO partner de la orden.
+            "cliente": {"clienteId": p.id,
+                        "tipoDoc": vat_code or ("6" if tipo_doc == "01" else "1"),
                         "numDoc": p.vat or "", "razonSocial": p.name or ""},
             "lineas": lineas,
             "formaPago": {"tipo": "Contado",
@@ -409,3 +422,31 @@ class L10nPeNeOrdenTrabajoLinea(models.Model):
             bruto = (line.cantidad or 0.0) * (line.precio_unitario or 0.0)
             factor = 1 - (line.descuento or 0.0) / 100.0
             line.subtotal = round(bruto * factor, 2)
+
+    # ───────────────────────────────────────────── freeze (A7 · revisión Fable)
+    def _check_orden_editable(self):
+        """El detalle se edita SOLO en borrador (antes del adelanto). Después, cambiar precio o
+        cantidad divergiría el saldo del adelanto ya cobrado (y, entregada, del comprobante
+        emitido). Sistema (su) y acciones internas (_FLUJO_OK) quedan exentos."""
+        if self.env.su or self.env.context.get("l10n_pe_ne_flujo_ok"):
+            return
+        for line in self:
+            if line.orden_id.estado != "borrador":
+                raise UserError(_(
+                    "El detalle de la orden %(o)s ya no se edita (está «%(e)s»): el trabajo y el "
+                    "dinero cobrados no se reescriben.",
+                    o=line.orden_id.name, e=line.orden_id.estado))
+
+    def write(self, vals):
+        self._check_orden_editable()
+        return super().write(vals)
+
+    def unlink(self):
+        self._check_orden_editable()
+        return super().unlink()
+
+    @api.model_create_multi
+    def create(self, vals_list):
+        lines = super().create(vals_list)
+        lines._check_orden_editable()   # tras crear: el orden_id ya está resuelto
+        return lines

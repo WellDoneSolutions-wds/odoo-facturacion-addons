@@ -176,6 +176,14 @@ class L10nPeNeEquipoApi(L10nPeNeApi):
         off, lim = self._paginacion(kw)
         return self._run(lambda: self._orden_model(uid).l10n_pe_ne_cola_ordenes(off, lim))
 
+    @http.route("/ne/api/ordenes/cola-adelanto", **_GET)
+    def orden_cola_adelanto(self, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        off, lim = self._paginacion(kw)
+        return self._run(lambda: self._orden_model(uid).l10n_pe_ne_cola_adelanto(off, lim))
+
     @http.route("/ne/api/ordenes/cola-saldo", **_GET)
     def orden_cola_saldo(self, **kw):
         uid = self._identify()

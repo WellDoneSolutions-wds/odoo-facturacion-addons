@@ -259,6 +259,16 @@ class TestOrdenTrabajo(TransactionCase):
         orden.factura_final_id = move.id
         self.assertIn("Adelanto a cuenta: S/ 50.00 (Yape)", move._l10n_pe_ne_ticket_adicional())
 
+    def test_cola_adelanto(self):
+        # Hallazgo del e2e segregado: el cajero necesita SU bandeja de borradores por cobrar
+        # (sin ella, una orden creada por recepción era invisible en la UI del cajero).
+        o_borr = self._orden()                      # borrador → en la cola
+        o_enc = self._orden(estado="encolada")      # ya adelantada → fuera
+        cola = self.Orden.l10n_pe_ne_cola_adelanto()
+        ids = [i["id"] for i in cola["items"]]
+        self.assertIn(o_borr.id, ids)
+        self.assertNotIn(o_enc.id, ids)
+
     # ── colas + segregación por ir.rule ─────────────────────────────────────────
     def test_colas_y_segregacion(self):
         o_enc = self._orden(estado="encolada")

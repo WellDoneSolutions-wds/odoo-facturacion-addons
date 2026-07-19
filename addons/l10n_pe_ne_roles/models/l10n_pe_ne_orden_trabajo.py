@@ -411,6 +411,14 @@ class L10nPeNeOrdenTrabajo(models.Model):
             [("estado", "in", ("encolada", "en_proceso"))], offset, limit)
 
     @api.model
+    def l10n_pe_ne_cola_adelanto(self, offset=0, limit=10):
+        """Cola de cobro del ADELANTO (cajero): órdenes en borrador que recepción creó y esperan el
+        adelanto que las encola al taller. Sin esta bandeja, un cajero SEGREGADO no tenía cómo
+        encontrarlas — hallazgo del e2e con roles puros (con el usuario modal no se veía: el que
+        creaba también cobraba en el mismo modal)."""
+        return self._l10n_pe_ne_cola_dict([("estado", "=", "borrador")], offset, limit)
+
+    @api.model
     def l10n_pe_ne_cola_saldo(self, offset=0, limit=10):
         """Cola de cobro del cajero: órdenes terminadas con saldo por cobrar."""
         return self._l10n_pe_ne_cola_dict(

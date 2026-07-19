@@ -317,6 +317,9 @@ class L10nPeNeCotizacionFlujo(models.Model):
             "despachador": self.despachador_id.name or "",
             "receptorNombre": self.receptor_nombre or "",
             "vendedor": self.user_id.name or "",
+            # A18/A13: el tipo de documento REAL del cliente (cat. 06) — la SPA no adivina por
+            # longitud (un CE no es un DNI) al precargar Emitir.
+            "clienteTipoDoc": self.partner_id.l10n_latam_identification_type_id.l10n_pe_vat_code or "",
         })
         return d
 

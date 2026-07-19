@@ -23,6 +23,7 @@ _G = "l10n_pe_ne_roles."
 _G_VENTAS = _G + "group_l10n_pe_ne_ventas"
 _G_CAJA = _G + "group_l10n_pe_ne_caja"
 _G_DESPACHO = _G + "group_l10n_pe_ne_despacho"
+_G_SUPERVISOR = _G + "group_l10n_pe_ne_supervisor"
 
 # Estado→método de transición (para el override de set_estado, que así queda grupo-gateado).
 _ESTADO_METODO = {
@@ -95,6 +96,24 @@ class L10nPeNeCotizacionFlujo(models.Model):
             raise UserError(_("No se puede pasar de «%(o)s» a «%(d)s».", o=self.estado, d=estado))
         return getattr(self, metodo)()
 
+    # ───────────────────────────────────────────── edición gateada (revisión Fable A3)
+    @api.model
+    def l10n_pe_ne_update_cotizacion(self, payload):
+        """Editar una cotización es del VENDEDOR (o supervisor). Un cajero no re-tarifa ni renueva
+        la vigencia de una 'aceptada' para esquivar P6 —aunque la ir.rule por rol se la deje ver, el
+        ACL de emisor es full-CRUD y el freeze del biller solo bloquea 'convertida'—."""
+        if not (self.env.su or self.env.user.has_group(_G_VENTAS)
+                or self.env.user.has_group(_G_SUPERVISOR)):
+            raise AccessError(_("Solo el vendedor edita cotizaciones."))
+        return super().l10n_pe_ne_update_cotizacion(payload)
+
+    @api.model
+    def l10n_pe_ne_delete_cotizacion(self, rec_id):
+        if not (self.env.su or self.env.user.has_group(_G_VENTAS)
+                or self.env.user.has_group(_G_SUPERVISOR)):
+            raise AccessError(_("Solo el vendedor elimina cotizaciones."))
+        return super().l10n_pe_ne_delete_cotizacion(rec_id)
+
     # ───────────────────────────────────────────── P6 · vigencia (vinculante)
     def _l10n_pe_ne_vencida(self):
         """¿La cotización pasó su validez? (fecha + validez_dias < hoy)."""
@@ -134,7 +153,18 @@ class L10nPeNeCotizacionFlujo(models.Model):
             for l in self.line_ids)
 
     def l10n_pe_ne_vincular_comprobante(self, comprobante_id):
-        """Al emitir: además de vincular+convertir (biller), abre el eje de despacho si hay mercadería."""
+        """Al emitir: además de vincular+convertir (biller), abre el eje de despacho si hay mercadería.
+
+        BLINDAJE (revisión Fable A1): 'convertida' es la puerta a un comprobante fiscal, y POST
+        /ne/api/emitir con cotizacionId llega DIRECTO aquí (no solo por el fold). Se revalida la
+        REALIDAD también en este punto —P6 vigencia + no reconversión + estado vigente— para que
+        NINGUNA vía convierta una cotización vencida (al precio viejo), rechazada o borrador."""
+        self.ensure_one()
+        self._l10n_pe_ne_guard_cobrable()
+        if self.estado not in ("aceptada", "enviada"):
+            raise UserError(_(
+                "No se emite un comprobante desde una cotización «%s»; debe estar vigente.")
+                % self._estado_label(self.estado))
         # El biller escribe estado='convertida' aquí dentro: autorizamos esa escritura con _FLUJO_OK
         # (es la ÚNICA vía legítima a 'convertida', tras crear el comprobante fiscal).
         res = super(L10nPeNeCotizacionFlujo,
@@ -170,7 +200,9 @@ class L10nPeNeCotizacionFlujo(models.Model):
         payload = payload or {}
         if not self.env.user.has_group(_G_CAJA):
             raise AccessError(_("No tienes permiso para cobrar."))
-        # P6: no cobrar una cotización vencida al precio viejo (ni una ya convertida).
+        # A2: serializa la fila — dos cobros concurrentes (doble clic) no emiten dos comprobantes.
+        self._l10n_pe_ne_lock()
+        # P6: no cobrar una cotización vencida al precio viejo (ni una ya convertida). Bajo el lock.
         self._l10n_pe_ne_guard_cobrable()
         # D4: asegurar 'aceptada' (recorre borrador/enviada→aceptada por cadenas, auditado). En modo
         # segregado el cajero la recibe ya aceptada desde su cola; el salto requiere ventas+caja.

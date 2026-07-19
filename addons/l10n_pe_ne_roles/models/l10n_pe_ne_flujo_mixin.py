@@ -230,21 +230,29 @@ class L10nPeNeFlujoMixin(models.AbstractModel):
                     "flujo), no escribiéndolo directamente."))
         return super().write(vals)
 
+    # ─────────────────────────────────────────────── serialización de fila
+    def _l10n_pe_ne_lock(self):
+        """Bloquea la fila (SELECT … FOR UPDATE) y re-lee su estado real. Lo usan _avanzar Y los
+        FOLDS de cobro (cobrar_entregar/cobrar_saldo/registrar_adelanto): dos POST concurrentes
+        (doble clic) sobre el mismo documento no pueden emitir DOS comprobantes a SUNAT para la
+        misma venta — el segundo bloquea aquí, y al re-leer ve el comprobante ya vinculado y aborta
+        ANTES del efecto externo. flush ANTES del SQL crudo (el ORM no lo hace por cr.execute), e
+        invalidate DESPUÉS para forzar la re-lectura bajo el lock."""
+        self.ensure_one()
+        self.flush_recordset()
+        self.env.cr.execute(
+            "SELECT id FROM %s WHERE id = %%s FOR UPDATE" % self._table, (self.id,))
+        self.invalidate_recordset()
+
     # ─────────────────────────────────────────────── avanzar (una transición)
     def _avanzar(self, destino, motivo=None, vals=None, magnitud=None):
         """Ejecuta UNA transición: valida los tres ejes, aplica política, escribe y audita."""
         self.ensure_one()
         # Serializa la fila ANTES de validar: dos usuarios que avanzan el MISMO documento a la vez
-        # no se pisan. El segundo bloquea aquí hasta que el primero commitea, luego re-lee el estado
-        # ya cambiado y su transición deja de existir (p. ej. la TOMA de cola: el segundo operario
-        # ve la orden ya en 'en_proceso' y _check_transicion lanza). Así la 'toma' es atómica de
-        # verdad (NULL→yo bajo carrera), no solo de palabra.
-        # flush ANTES del SQL crudo (el ORM no lo hace por cr.execute): baja cualquier escritura
-        # pendiente de esta fila para que, tras invalidar, se re-lea el estado real bajo el lock.
-        self.flush_recordset()
-        self.env.cr.execute(
-            "SELECT id FROM %s WHERE id = %%s FOR UPDATE" % self._table, (self.id,))
-        self.invalidate_recordset()
+        # no se pisan. El segundo bloquea hasta que el primero commitea, luego re-lee el estado ya
+        # cambiado y su transición deja de existir (p. ej. la TOMA de cola: el segundo operario ve
+        # la orden ya en 'en_proceso' y _check_transicion lanza). La 'toma' es atómica de verdad.
+        self._l10n_pe_ne_lock()
         t = self._check_transicion(destino, motivo)
         w = dict(vals or {})
         w['estado'] = destino

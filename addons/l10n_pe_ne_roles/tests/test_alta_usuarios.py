@@ -101,6 +101,19 @@ class TestAltaUsuarios(TransactionCase):
         with self.assertRaisesRegex(UserError, "ti mismo"):
             self._duenio().l10n_pe_ne_duenio_set_activo(self.duenio.id, False)
 
+    def test_desactivar_revoca_apikeys(self):
+        # A4 (revisión Fable): desactivar por el dueño revoca las API keys (el Bearer del BFF) — un
+        # empleado dado de baja no sigue autenticando hasta el TTL.
+        from datetime import datetime, timedelta
+        u = self._crear("op_key_h4", ["l10n_pe_ne_roles.group_l10n_pe_ne_caja"])
+        self.env["res.users.apikeys"].with_user(u)._generate(
+            "l10n_pe_ne", "k", datetime.now() + timedelta(hours=1))
+        Keys = self.env["res.users.apikeys"].sudo()
+        self.assertTrue(Keys.search_count([("user_id", "=", u.id)]))
+        self._duenio().l10n_pe_ne_duenio_set_activo(u.id, False)
+        self.assertFalse(Keys.search_count([("user_id", "=", u.id)]),
+                         "las API keys se revocan al desactivar")
+
     def test_v3_no_ultimo_duenio(self):
         # self.duenio es el único dueño NO-sistema (el admin no cuenta). Excluirlo deja 0 -> lanza.
         with self.assertRaisesRegex(UserError, "último dueño"):

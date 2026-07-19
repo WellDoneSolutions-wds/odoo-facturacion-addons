@@ -158,3 +158,34 @@ class TestCotizacionFlujo(TransactionCase):
         cot.write({"fecha": fields.Date.context_today(self) - timedelta(days=40), "validez_dias": 15})
         self.Cot._l10n_pe_ne_cron_vencer()
         self.assertEqual(cot.estado, "vencida")
+
+    # ── revisión Fable: agujeros cerrados ───────────────────────────────────────
+    def test_emitir_vencida_bloqueado(self):
+        # A1: POST /emitir con cotizacionId NO convierte una cotización vencida (bypass de P6). El
+        # guard vive en vincular_comprobante, la única puerta a 'convertida'.
+        cot = self._cot(estado="aceptada")
+        cot.write({"fecha": fields.Date.context_today(self) - timedelta(days=40), "validez_dias": 15})
+        self.assertTrue(cot._l10n_pe_ne_vencida())
+        move = self.env["account.move"].create(
+            {"move_type": "out_invoice", "partner_id": self.cliente.id})
+        with self.assertRaisesRegex(UserError, "venció"):
+            cot.l10n_pe_ne_vincular_comprobante(move.id)
+        self.assertNotEqual(cot.estado, "convertida")
+
+    def test_emitir_borrador_bloqueado(self):
+        # A1: tampoco desde un borrador (no aceptada ni enviada).
+        cot = self._cot()   # borrador
+        move = self.env["account.move"].create(
+            {"move_type": "out_invoice", "partner_id": self.cliente.id})
+        with self.assertRaisesRegex(UserError, "vigente"):
+            cot.l10n_pe_ne_vincular_comprobante(move.id)
+
+    def test_cajero_no_edita_ni_borra(self):
+        # A3: un cajero puro NO edita/borra una 'aceptada' (re-tarifar renovaría la vigencia y
+        # esquivaría P6). Editar/borrar es del vendedor/supervisor.
+        cot = self._cot(estado="aceptada")
+        cajero = self._user("caj_edit_cn01", ["l10n_pe_ne_roles.group_l10n_pe_ne_caja"])
+        with self.assertRaises(AccessError):
+            self.Cot.with_user(cajero).l10n_pe_ne_update_cotizacion({"id": cot.id, "notas": "x"})
+        with self.assertRaises(AccessError):
+            self.Cot.with_user(cajero).l10n_pe_ne_delete_cotizacion(cot.id)

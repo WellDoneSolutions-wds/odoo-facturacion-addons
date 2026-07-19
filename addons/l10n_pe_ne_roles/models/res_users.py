@@ -224,6 +224,11 @@ class ResUsers(models.Model):
         else:
             company._l10n_pe_ne_check_cupo_usuarios()   # V2: el cupo también aplica al reactivar
         target.sudo().write({"active": activo})
+        if not activo:
+            # A4 (revisión Fable): al desactivar, revocar sus API keys (el Bearer del BFF es una key
+            # nativa). Un usuario dado de baja no debe seguir autenticando en /ne/api hasta el TTL.
+            # Paridad con el path admin del biller.
+            self.env["res.users.apikeys"].sudo().search([("user_id", "=", target.id)]).unlink()
         return self._l10n_pe_ne_equipo_dict(target)
 
     def _l10n_pe_ne_check_no_ultimo_duenio(self, company, excluir):
@@ -253,6 +258,9 @@ class ResUsers(models.Model):
         target = self._l10n_pe_ne_duenio_target(target_id, company)
         temp = self._l10n_pe_ne_gen_password()
         target.sudo().write({"password": temp, "l10n_pe_ne_must_change_password": True})
+        # A4 (revisión Fable): rotar la contraseña revoca también las API keys existentes; si se
+        # resetea por sospecha de robo, el Bearer viejo deja de autenticar de inmediato.
+        self.env["res.users.apikeys"].sudo().search([("user_id", "=", target.id)]).unlink()
         return {"login": target.login, "name": target.name, "password": temp}
 
     @api.model

@@ -201,6 +201,14 @@ class L10nPeNeCajaSesion(models.Model):
                               ("company_id", "=", self.env.company.id)], limit=1)
         if not sesion:
             raise UserError(_("No hay una caja abierta."))
+        # Bloquea la fila de la sesión y re-lee su estado bajo el lock: serializa cualquier
+        # movimiento (ingreso/retiro/adelanto) contra el CIERRE de caja. Sin esto, un movimiento
+        # puede colgarse de una sesión ya cerrada —dinero cobrado fuera de todo arqueo—.
+        self.env.cr.execute(
+            "SELECT id FROM l10n_pe_ne_caja_sesion WHERE id = %s FOR UPDATE", (sesion.id,))
+        sesion.invalidate_recordset(["estado"])
+        if sesion.estado != "abierta":
+            raise UserError(_("La caja se acaba de cerrar; abre una nueva para continuar."))
         return sesion
 
     # -------------------------------------------------------- métodos públicos

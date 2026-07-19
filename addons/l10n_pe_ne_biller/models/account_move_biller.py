@@ -2386,7 +2386,14 @@ class AccountMove(models.Model):
             return ""
         P = self.env["res.partner"].sudo()
         data = None
-        for fetch in (P._l10n_pe_query_external_db, P._l10n_pe_query_sunat):
+        # getattr: si el addon l10n_pe_partner_lookup NO está instalado, _l10n_pe_query_external_db
+        # no existe en res.partner; se omite en vez de reventar con AttributeError (degradación con
+        # gracia — este método NUNCA bloquea la emisión). Acceder al atributo directo en la tupla
+        # lanzaba ANTES del try. (Hallazgo del run real en Odoo 19.)
+        for fetch in (getattr(P, "_l10n_pe_query_external_db", None),
+                      getattr(P, "_l10n_pe_query_sunat", None)):
+            if not fetch:
+                continue
             try:
                 data = fetch(num)
             except Exception:  # noqa: BLE001 — fuente no configurada / red: seguimos

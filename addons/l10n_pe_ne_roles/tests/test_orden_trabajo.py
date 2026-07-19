@@ -151,6 +151,14 @@ class TestOrdenTrabajo(TransactionCase):
         with self.assertRaises(AccessError):
             orden.with_user(taller).l10n_pe_ne_cobrar_saldo({})
 
+    def test_cobrar_saldo_saldo_invalido(self):
+        # A6 (revisión Fable): si el adelanto iguala/supera el total (saldo<=0), cobrar_saldo lo
+        # rechaza ANTES de emitir con medios negativos (una fila que desaparecería del arqueo).
+        orden = self._orden(precio=118.0, estado="terminada", adelanto=118.0)   # saldo = 0
+        cajero = self._user("caj_saldoinv_ot", ["l10n_pe_ne_roles.group_l10n_pe_ne_caja"])
+        with self.assertRaisesRegex(UserError, "frente al total"):
+            orden.with_user(cajero).l10n_pe_ne_cobrar_saldo({})
+
     def test_no_entregada_a_mano(self):
         orden = self._orden(estado="terminada")
         with self.assertRaisesRegex(UserError, "No se puede pasar"):

@@ -156,6 +156,8 @@ class L10nPeNeOrdenTrabajo(models.Model):
         self.ensure_one()
         if not self.env.user.has_group(_G_CAJA):
             raise AccessError(_("No tienes permiso para cobrar el adelanto."))
+        # A2: serializa la fila — dos registros de adelanto concurrentes no se duplican.
+        self._l10n_pe_ne_lock()
         if self.estado != "borrador":
             raise UserError(_("El adelanto solo se registra sobre una orden en borrador."))
         if self.adelanto_movimiento_id:
@@ -191,6 +193,8 @@ class L10nPeNeOrdenTrabajo(models.Model):
         payload = payload or {}
         if not self.env.user.has_group(_G_CAJA):
             raise AccessError(_("No tienes permiso para cobrar."))
+        # A2: serializa la fila — dos cobros concurrentes (doble clic) no emiten dos comprobantes.
+        self._l10n_pe_ne_lock()
         if self.estado != "terminada":
             raise UserError(_("Solo se cobra el saldo de una orden TERMINADA (trabajo listo)."))
         if self.factura_final_id:
@@ -198,7 +202,15 @@ class L10nPeNeOrdenTrabajo(models.Model):
                             % (self.factura_final_id.name or self.factura_final_id.id))
         if not self.linea_ids:
             raise UserError(_("La orden no tiene líneas que facturar."))
-        medios = [{"medio": (payload.get("medio") or self.medio_adelanto or "Efectivo"),
+        # A6: saldo positivo y no mayor al total. Si las líneas cambiaron tras el adelanto y el total
+        # cayó por debajo del adelanto, un saldo negativo emitiría medios=[{monto:-X}] y esa fila
+        # DESAPARECERÍA del arqueo (el filtro esperado>0) → descuadre silencioso.
+        if self.saldo <= 0 or self.saldo > self.amount_total:
+            raise UserError(_(
+                "El saldo por cobrar (S/ %(s).2f) es inválido frente al total (S/ %(t).2f); revisa "
+                "las líneas y el adelanto.", s=self.saldo, t=self.amount_total))
+        medio = (payload.get("medio") or self.medio_adelanto or "Efectivo").strip() or "Efectivo"
+        medios = [{"medio": medio,
                    "monto": self.saldo}]
         res = self.env["account.move"].l10n_pe_ne_quick_emit(
             self._l10n_pe_ne_payload_emision(medios))

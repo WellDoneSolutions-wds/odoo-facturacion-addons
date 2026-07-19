@@ -217,7 +217,12 @@ class L10nPeNeFlujoMixin(models.AbstractModel):
         pasa desde una acción controlada (que marca _FLUJO_OK) o en modo SISTEMA (env.su: migraciones,
         cron, tests de fábrica). Cierra a nivel de MODELO el hueco de 'confiar en que solo el BFF
         llama los métodos buenos' — vale para todos los modelos de flujo (CN-01 cotización, CN-02
-        orden, y los que vengan). La ir.rule limita QUÉ estados se ven; esto limita las TRANSICIONES."""
+        orden, y los que vengan). La ir.rule limita QUÉ estados se ven; esto limita las TRANSICIONES.
+
+        GUARDARRAÍL: la solidez de _FLUJO_OK depende de que NINGÚN endpoint reenvíe el contexto del
+        cliente al ORM. Hoy los controllers solo exponen métodos con nombre (el _body alimenta
+        argumentos, no contexto); si algún día se expone un call_kw/execute_kw genérico, el flag se
+        volvería falsificable y habría que sacar 'estado' del write de emisor por otra vía."""
         if "estado" in vals and not self.env.su and not self.env.context.get(_FLUJO_OK):
             if any(rec.estado != vals["estado"] for rec in self):
                 raise UserError(_(

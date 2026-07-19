@@ -38,6 +38,10 @@ class L10nPeNeCajaSesion(models.Model):
     company_id = fields.Many2one("res.company", required=True, index=True,
                                  default=lambda s: s.env.company)
 
+    # D-2 (integridad): campos del arqueo que quedan congelados al cerrar la sesión.
+    _CAMPOS_SNAPSHOT = ("conteos_cierre", "ventas_cierre", "saldo_inicial", "estado",
+                        "fecha_apertura", "fecha_cierre")
+
     def init(self):
         # Índice único parcial: imposibilita la carrera de doble apertura simultánea
         # (una sola sesión 'abierta' por compañía). La guarda amigable vive en el método
@@ -46,6 +50,17 @@ class L10nPeNeCajaSesion(models.Model):
             CREATE UNIQUE INDEX IF NOT EXISTS l10n_pe_ne_caja_sesion_unica_abierta
             ON l10n_pe_ne_caja_sesion (company_id) WHERE estado = 'abierta'
         """)
+
+    def write(self, vals):
+        """D-2: una sesión cerrada es inmutable en su arqueo. Se comprueba el estado ALMACENADO
+        (aún 'abierta' durante la transición de cierre, así l10n_pe_ne_cerrar_caja no se rompe);
+        una vez 'cerrada', reescribir el snapshot por la ruta /web queda bloqueado. El contexto
+        l10n_pe_ne_bypass_lock deja pasar migraciones/mantenimiento."""
+        if not self.env.context.get("l10n_pe_ne_bypass_lock") and (set(vals) & set(self._CAMPOS_SNAPSHOT)):
+            for s in self:
+                if s.estado == "cerrada":
+                    raise UserError(_("La sesión de caja está cerrada: su arqueo es inmutable."))
+        return super().write(vals)
 
     # -------------------------------------------------------- helpers privados
     def _l10n_pe_ne_fmt_dt(self, dt):
@@ -112,14 +127,28 @@ class L10nPeNeCajaSesion(models.Model):
             "monto": mv.monto or 0.0,
             "fecha": self._l10n_pe_ne_fmt_dt(mv.fecha),
             "usuario": mv.usuario_id.name or "",
+            "voucherRef": mv.voucher_ref or "",
+            "fechaVoucher": mv.fecha_voucher.strftime("%Y-%m-%d") if mv.fecha_voucher else "",
+            "destino": mv.destino or "",
         } for mv in self.movimiento_ids]
 
     def _l10n_pe_ne_sesion_dict(self):
-        """Sesión con movimientos + esperado EN VIVO por medio (contrato GET /ne/api/caja)."""
+        """Sesión con movimientos (contrato GET /ne/api/caja).
+
+        D-1 CONTEO CIEGO: con la sesión abierta NO se sirve el 'esperado' por medio ni el
+        'esperadoTotal'. Si el cajero ve cuánto debería haber en la misma pantalla donde
+        teclea el conteo, el arqueo es una DECLARACIÓN, no una medición: puede copiar el
+        esperado y el descuadre nunca aflora. Solo se emiten los NOMBRES de los medios
+        (para sembrar las filas de conteo en la SPA, incluidos los no estándar). El esperado
+        y la diferencia se revelan recién en la respuesta del CIERRE (_l10n_pe_ne_arqueo_dict
+        con estado 'cerrada')."""
         self.ensure_one()
         agr = agrupar_ventas(self._l10n_pe_ne_ventas_planas())
         ingresos, retiros = self._l10n_pe_ne_ingresos_retiros()
-        filas, esperado_total, _c, _d = calcular_arqueo(
+        # MERGE conteo-ciego × adelantos: se calcula el arqueo solo para extraer los NOMBRES de
+        # medios con movimiento (los importes NO se serializan con la sesión abierta, D-1), pero
+        # con el SEAM — así un adelanto por Yape (CN-02) también siembra su fila de conteo.
+        filas, _et, _c, _d = calcular_arqueo(
             self.saldo_inicial, self._l10n_pe_ne_por_medio_arqueo(agr), ingresos, retiros, None)
         return {
             "id": self.id,
@@ -137,8 +166,8 @@ class L10nPeNeCajaSesion(models.Model):
             "retiros": retiros,
             "ventas": {"count": agr["count"], "total": agr["total"], "sinMedio": agr["sinMedio"],
                        "countUsd": agr["countUsd"], "totalUsd": agr["totalUsd"]},
-            "esperado": [{"medio": f["medio"], "monto": f["esperado"]} for f in filas],
-            "esperadoTotal": esperado_total,
+            # Solo nombres (sin montos): la SPA siembra una fila de conteo por cada medio.
+            "medios": [f["medio"] for f in filas],
         }
 
     def _l10n_pe_ne_arqueo_dict(self):
@@ -153,13 +182,25 @@ class L10nPeNeCajaSesion(models.Model):
             contado_total = round(sum(f.get("contado") or 0.0 for f in arqueo), 2)
             diferencia_total = round(contado_total - esperado_total, 2)
         else:
+            # D-1 CONTEO CIEGO: el "corte parcial" mid-turno (Imprimir corte) tampoco revela
+            # el esperado mientras la sesión esté abierta — solo los medios con movimiento.
+            # El esperado/contado/diferencia vuelven en el cierre (rama cerrada, arriba).
             agr = agrupar_ventas(self._l10n_pe_ne_ventas_planas())
             ingresos, retiros = self._l10n_pe_ne_ingresos_retiros()
-            arqueo, esperado_total, contado_total, diferencia_total = calcular_arqueo(
+            # MERGE conteo-ciego × adelantos: nombres por el SEAM (el adelanto siembra su medio),
+            # importes en null hasta el cierre (D-1).
+            filas, _et, _c, _d = calcular_arqueo(
                 self.saldo_inicial, self._l10n_pe_ne_por_medio_arqueo(agr), ingresos, retiros, None)
+            arqueo = [{"medio": f["medio"], "esperado": None, "contado": None,
+                       "diferencia": None} for f in filas]
+            esperado_total = contado_total = diferencia_total = None
             ventas = base["ventas"]
         d = dict(base)
         d.pop("esperado", None)
+        # "medios" es la semilla del conteo ciego (nombres en vivo); no pertenece a la vista
+        # de arqueo y, en una sesión cerrada, re-calcularla en vivo rompería la inmutabilidad
+        # del snapshot (una venta anulada tras el cierre cambiaría los nombres).
+        d.pop("medios", None)
         d.update({
             "empresa": {"razonSocial": self.company_id.name or "", "ruc": self.company_id.vat or ""},
             "ventas": ventas,
@@ -179,10 +220,9 @@ class L10nPeNeCajaSesion(models.Model):
             contado_total = round(sum(f.get("contado") or 0.0 for f in arqueo), 2)
             diferencia_total = round(contado_total - esperado_total, 2)
         else:
-            agr = agrupar_ventas(self._l10n_pe_ne_ventas_planas())
-            ingresos, retiros = self._l10n_pe_ne_ingresos_retiros()
-            _f, esperado_total, contado_total, diferencia_total = calcular_arqueo(
-                self.saldo_inicial, self._l10n_pe_ne_por_medio_arqueo(agr), ingresos, retiros, None)
+            # D-1 CONTEO CIEGO: la fila abierta del historial no revela el esperado en vivo
+            # (igual que contado/diferencia). Se conoce recién al cerrar.
+            esperado_total = contado_total = diferencia_total = None
         return {
             "id": self.id,
             "estado": self.estado,
@@ -252,6 +292,8 @@ class L10nPeNeCajaSesion(models.Model):
         # Un RETIRO no puede superar el efectivo disponible = saldo inicial + ventas en efectivo
         # + ingresos − retiros previos (misma fórmula que el esperado del arqueo). Sin esto, el
         # esperado en efectivo podía quedar NEGATIVO (imposible físicamente en una caja).
+        voucher_ref = (datos.get("voucherRef") or "").strip()
+        fecha_voucher = datos.get("fechaVoucher") or False
         if tipo == "retiro":
             agr = agrupar_ventas(sesion._l10n_pe_ne_ventas_planas())
             ingresos, retiros = sesion._l10n_pe_ne_ingresos_retiros()
@@ -262,9 +304,21 @@ class L10nPeNeCajaSesion(models.Model):
                 raise UserError(_(
                     "No puedes retirar S/ %(monto).2f: la caja solo tiene S/ %(disp).2f "
                     "en efectivo.", monto=round(monto, 2), disp=disponible))
+            # D-4 (integridad): un retiro sobre el umbral del RUC exige contraparte documental.
+            # Sin esto, un retiro solo resta del esperado y el arqueo cuadra sin rastro de a
+            # dónde fue la plata.
+            umbral = sesion.company_id.l10n_pe_ne_retiro_umbral or 0.0
+            if round(monto, 2) > umbral and not (voucher_ref and fecha_voucher):
+                raise UserError(_(
+                    "Un retiro de S/ %(monto).2f necesita número de voucher/depósito y fecha "
+                    "(el negocio exige respaldo para retiros mayores a S/ %(umbral).2f).",
+                    monto=round(monto, 2), umbral=round(umbral, 2)))
         self.env["l10n_pe_ne.caja.movimiento"].create({
             "sesion_id": sesion.id, "tipo": tipo,
             "motivo": motivo, "monto": round(monto, 2),
+            "voucher_ref": voucher_ref or False,
+            "fecha_voucher": fecha_voucher,
+            "destino": (datos.get("destino") or "").strip() or False,
         })
         return sesion._l10n_pe_ne_sesion_dict()
 
@@ -325,6 +379,19 @@ class L10nPeNeCajaMovimiento(models.Model):
     monto = fields.Monetary(currency_field="currency_id")  # > 0, validado en método
     fecha = fields.Datetime(default=fields.Datetime.now)
     usuario_id = fields.Many2one("res.users", default=lambda s: s.env.user)
+    # D-4 (integridad): contraparte documental de un retiro sobre umbral (texto libre, no
+    # verificable en línea, pero deja rastro auditable de a dónde fue la plata).
+    voucher_ref = fields.Char(string="N° de voucher / depósito")
+    fecha_voucher = fields.Date(string="Fecha del voucher")
+    destino = fields.Char(string="Destino (banco / cuenta)")
+
+    def write(self, vals):
+        """D-2: un movimiento de una sesión cerrada no se edita (el unlink ya lo tapa la ACL)."""
+        if not self.env.context.get("l10n_pe_ne_bypass_lock"):
+            for mv in self:
+                if mv.sesion_id.estado == "cerrada":
+                    raise UserError(_("La sesión de caja está cerrada: sus movimientos son inmutables."))
+        return super().write(vals)
     currency_id = fields.Many2one("res.currency", default=lambda s: s.env.company.currency_id)
     # company_id PROPIO (no related) para que la ir.rule aplique directa sobre el movimiento.
     company_id = fields.Many2one("res.company", required=True, index=True,

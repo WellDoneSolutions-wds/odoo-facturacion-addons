@@ -1086,6 +1086,16 @@ class L10nPeNeApi(http.Controller):
             return self._unauth()
         return self._run(lambda: self._gasto(uid).l10n_pe_ne_delete_gasto(int(rec_id)))
 
+    @http.route("/ne/api/gastos/<int:rec_id>/reversar", **_POST)
+    def reversar_gasto(self, rec_id, **kw):
+        # D-2 (integridad): el gasto es append-only; corregir = contra-asiento.
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(
+            lambda: self._gasto(uid).l10n_pe_ne_reversar_gasto(
+                int(rec_id), (self._body() or {}).get("motivo")))
+
     # ----------------------------------------------------------------- compras
     @http.route("/ne/api/compras", **_GET)
     def list_compras(self, q=None, periodo=None, **kw):

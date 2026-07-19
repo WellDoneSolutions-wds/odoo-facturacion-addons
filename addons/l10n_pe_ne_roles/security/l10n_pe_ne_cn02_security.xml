@@ -1,0 +1,93 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+  <data>
+    <!--
+      CN-02: seguridad de la ORDEN DE TRABAJO.
+
+      Dos capas, como en el resto del sistema:
+      1) GLOBAL (AND siempre): aislamiento por compañía (multi-tenant). Sin grupos => aplica a todos.
+      2) NO-GLOBAL por rol (OR entre los grupos del usuario): segrega qué ve cada rol.
+
+      SUTILEZA de Odoo que dicta los dominios: una transición NO puede sacar el registro fuera del
+      dominio de la regla del actor (Odoo lanza AccessError si tras el write ya no lo "ve"). Por eso
+      la regla de cada rol cubre el estado ORIGEN y el DESTINO de SUS transiciones:
+        · taller: toma (encolada→en_proceso) y termina (en_proceso→terminada) → ve {encolada, en_proceso, terminada}
+        · caja:   adelanto (borrador→encolada), cobro de saldo (terminada→entregada), anular (borrador→anulada)
+                  → ve todo salvo 'en_proceso' (trabajo del taller en curso)
+      La segregación FINA de acciones no vive aquí sino en has_group de cada transición; estas reglas
+      son la bandeja de cada rol. Las colas server-side (l10n_pe_ne_cola_*) filtran con precisión.
+    -->
+
+    <!-- 1) Aislamiento por compañía — GLOBAL. -->
+    <record id="rule_orden_company" model="ir.rule">
+      <field name="name">Orden de trabajo: aislamiento por compañía</field>
+      <field name="model_id" ref="model_l10n_pe_ne_orden_trabajo"/>
+      <field name="global" eval="True"/>
+      <field name="domain_force">[('company_id', 'in', company_ids)]</field>
+    </record>
+    <record id="rule_orden_linea_company" model="ir.rule">
+      <field name="name">Línea de orden: aislamiento por compañía</field>
+      <field name="model_id" ref="model_l10n_pe_ne_orden_trabajo_linea"/>
+      <field name="global" eval="True"/>
+      <field name="domain_force">[('orden_id.company_id', 'in', company_ids)]</field>
+    </record>
+
+    <!-- 2) Segregación por rol — NO globales (OR por grupo). -->
+    <record id="rule_orden_taller" model="ir.rule">
+      <field name="name">Orden: el operario ve su cola (encolada/en proceso/terminada)</field>
+      <field name="model_id" ref="model_l10n_pe_ne_orden_trabajo"/>
+      <field name="groups" eval="[(4, ref('group_l10n_pe_ne_taller'))]"/>
+      <field name="domain_force">[('estado', 'in', ['encolada', 'en_proceso', 'terminada'])]</field>
+    </record>
+    <record id="rule_orden_caja" model="ir.rule">
+      <field name="name">Orden: el cajero ve las de adelanto y cobro de saldo</field>
+      <field name="model_id" ref="model_l10n_pe_ne_orden_trabajo"/>
+      <field name="groups" eval="[(4, ref('group_l10n_pe_ne_caja'))]"/>
+      <field name="domain_force">[('estado', 'in', ['borrador', 'encolada', 'terminada', 'entregada', 'anulada'])]</field>
+    </record>
+    <record id="rule_orden_supervisor" model="ir.rule">
+      <field name="name">Orden: el supervisor ve todas</field>
+      <field name="model_id" ref="model_l10n_pe_ne_orden_trabajo"/>
+      <field name="groups" eval="[(4, ref('group_l10n_pe_ne_supervisor'))]"/>
+      <field name="domain_force">[(1, '=', 1)]</field>
+    </record>
+    <!-- Ventas/recepción CREA las órdenes: ve todas (regla explícita 've todo', no por implicar emisor). -->
+    <record id="rule_orden_ventas" model="ir.rule">
+      <field name="name">Orden: recepción/ventas ve todas</field>
+      <field name="model_id" ref="model_l10n_pe_ne_orden_trabajo"/>
+      <field name="groups" eval="[(4, ref('group_l10n_pe_ne_ventas'))]"/>
+      <field name="domain_force">[(1, '=', 1)]</field>
+    </record>
+
+    <!--
+      Segregación de la LÍNEA por estado, ESPEJO de la cabecera (blindaje iter 7): sin esto un
+      operativo lee/escribe las líneas (precio, cantidad) de órdenes cuya cabecera está fuera de su
+      bandeja. El dominio referencia orden_id.estado, replicando el de cada grupo. (La compañía ya
+      la AND-ea la regla global de la línea de arriba.)
+    -->
+    <record id="rule_orden_linea_taller" model="ir.rule">
+      <field name="name">Línea de orden: el operario ve las de su cola</field>
+      <field name="model_id" ref="model_l10n_pe_ne_orden_trabajo_linea"/>
+      <field name="groups" eval="[(4, ref('group_l10n_pe_ne_taller'))]"/>
+      <field name="domain_force">[('orden_id.estado', 'in', ['encolada', 'en_proceso', 'terminada'])]</field>
+    </record>
+    <record id="rule_orden_linea_caja" model="ir.rule">
+      <field name="name">Línea de orden: el cajero ve las de adelanto y cobro</field>
+      <field name="model_id" ref="model_l10n_pe_ne_orden_trabajo_linea"/>
+      <field name="groups" eval="[(4, ref('group_l10n_pe_ne_caja'))]"/>
+      <field name="domain_force">[('orden_id.estado', 'in', ['borrador', 'encolada', 'terminada', 'entregada', 'anulada'])]</field>
+    </record>
+    <record id="rule_orden_linea_supervisor" model="ir.rule">
+      <field name="name">Línea de orden: el supervisor ve todas</field>
+      <field name="model_id" ref="model_l10n_pe_ne_orden_trabajo_linea"/>
+      <field name="groups" eval="[(4, ref('group_l10n_pe_ne_supervisor'))]"/>
+      <field name="domain_force">[(1, '=', 1)]</field>
+    </record>
+    <record id="rule_orden_linea_ventas" model="ir.rule">
+      <field name="name">Línea de orden: recepción/ventas ve todas</field>
+      <field name="model_id" ref="model_l10n_pe_ne_orden_trabajo_linea"/>
+      <field name="groups" eval="[(4, ref('group_l10n_pe_ne_ventas'))]"/>
+      <field name="domain_force">[(1, '=', 1)]</field>
+    </record>
+  </data>
+</odoo>

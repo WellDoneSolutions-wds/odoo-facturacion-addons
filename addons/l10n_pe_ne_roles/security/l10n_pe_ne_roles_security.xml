@@ -1,0 +1,93 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+  <data>
+    <!--
+      Modelo de roles de NE Express (iteración 3, H-2).
+
+      Odoo 19 agrupa los grupos por res.groups.privilege (privilege_id), NO por category_id.
+      Los grupos NUEVOS cuelgan del privilege "NE Express". A propósito NO se modifica el grupo
+      Emisor del biller (re-declararlo desde este módulo es frágil: un -u solo del biller
+      revertiría el cambio). Los roles operativos IMPLICAN el Emisor y así heredan su acceso.
+
+      Jerarquía (implied_ids es acumulativo y transitivo):
+        emisor (biller) ── implica account.group_account_user (escribe account.move). Intacto.
+         ▲
+        ventas / caja / despacho / taller / supervisor ── roles operativos, HERMANOS entre sí;
+                   cada uno implica emisor (heredan su ACL operativo). La SEGREGACIÓN de "cada
+                   uno ve lo suyo" NO vive en el ACL: son capacidades que _check_transicion
+                   comprueba con has_group cuando aterricen los procesos (CN-01/CN-02, iter 5-6).
+                   Aquí solo gatean el MENÚ de la SPA vía el perfil (H-3).
+        contador ── SOLO LECTURA: implica account.group_account_readonly (NO emisor), con su
+                   propio ACL de lectura sobre los modelos del addon (ir.model.access.csv).
+        duenio ── el dueño del RUC: implica supervisor (opera y aprueba) y es el marcador que
+                   habilita la gestión de usuarios (H-4, por métodos sudo() con whitelist —
+                   NUNCA por ACL sobre res.users). NO está en la whitelist de grupos otorgables.
+
+      Segregación por RUC (compañía): la dan las ir.rule multi-compañía nativas y las del biller.
+      Segregación por ESTABLECIMIENTO/sucursal: NO existe eje usuario↔local (decisión de producto
+      2026-07-18: se segrega por RUC + rol, no por sucursal).
+    -->
+
+    <record id="privilege_ne_express" model="res.groups.privilege">
+      <field name="name">NE Express</field>
+      <field name="sequence">30</field>
+      <!-- La categoría hace que el privilege (y sus grupos) aparezca en la grilla de
+           Ajustes → Usuarios → Permisos, gestionable a mano mientras no exista el alta de H-4. -->
+      <field name="category_id" ref="base.module_category_accounting"/>
+    </record>
+
+    <!-- ── Roles operativos (hermanos; cada uno implica el Emisor del biller) ─────── -->
+    <record id="group_l10n_pe_ne_ventas" model="res.groups">
+      <field name="name">Vendedor / Cotizador NE Express</field>
+      <field name="privilege_id" ref="privilege_ne_express"/>
+      <field name="implied_ids" eval="[(4, ref('l10n_pe_ne_biller.group_l10n_pe_ne_emisor'))]"/>
+      <field name="comment">Cotiza y arma la venta. Gatea el menú de Cotizaciones.</field>
+    </record>
+    <record id="group_l10n_pe_ne_caja" model="res.groups">
+      <field name="name">Cajero NE Express</field>
+      <field name="privilege_id" ref="privilege_ne_express"/>
+      <field name="implied_ids" eval="[(4, ref('l10n_pe_ne_biller.group_l10n_pe_ne_emisor'))]"/>
+      <field name="comment">Cobra y abre/cierra caja. Gatea el menú de Caja/POS.</field>
+    </record>
+    <record id="group_l10n_pe_ne_despacho" model="res.groups">
+      <field name="name">Despachador NE Express</field>
+      <field name="privilege_id" ref="privilege_ne_express"/>
+      <field name="implied_ids" eval="[(4, ref('l10n_pe_ne_biller.group_l10n_pe_ne_emisor'))]"/>
+      <field name="comment">Entrega la mercadería. Gatea la cola de despacho (CN-01).</field>
+    </record>
+    <record id="group_l10n_pe_ne_taller" model="res.groups">
+      <field name="name">Operario / Taller NE Express</field>
+      <field name="privilege_id" ref="privilege_ne_express"/>
+      <field name="implied_ids" eval="[(4, ref('l10n_pe_ne_biller.group_l10n_pe_ne_emisor'))]"/>
+      <field name="comment">Atiende la cola de órdenes de trabajo (CN-02).</field>
+    </record>
+    <record id="group_l10n_pe_ne_supervisor" model="res.groups">
+      <field name="name">Supervisor NE Express</field>
+      <field name="privilege_id" ref="privilege_ne_express"/>
+      <field name="implied_ids" eval="[(4, ref('l10n_pe_ne_biller.group_l10n_pe_ne_emisor'))]"/>
+      <field name="comment">Aprueba las compuertas de política encendidas por el RUC y cierra
+        la revisión asíncrona. NO impone 'aprobador ≠ solicitante' (escala libre).</field>
+    </record>
+
+    <!-- Contador externo: SOLO LECTURA. Implica account.group_account_readonly (account.move
+         1,0,0,0), NO emisor. Su lectura de los modelos propios del addon la dan las filas de
+         ir.model.access.csv. -->
+    <record id="group_l10n_pe_ne_contador" model="res.groups">
+      <field name="name">Contador NE Express (solo lectura)</field>
+      <field name="privilege_id" ref="privilege_ne_express"/>
+      <field name="implied_ids" eval="[(4, ref('account.group_account_readonly'))]"/>
+      <field name="comment">Ve comprobantes, reportes y libros; no emite ni edita nada.</field>
+    </record>
+
+    <!-- Dueño del RUC: opera y aprueba (implica supervisor) y habilita la gestión de usuarios
+         (H-4, por métodos sudo() con whitelist — NUNCA por ACL sobre res.users). NO está en la
+         whitelist de grupos otorgables: un dueño no clona ni destituye a otro por la vía de roles. -->
+    <record id="group_l10n_pe_ne_duenio" model="res.groups">
+      <field name="name">Dueño del RUC NE Express</field>
+      <field name="privilege_id" ref="privilege_ne_express"/>
+      <field name="implied_ids" eval="[(4, ref('group_l10n_pe_ne_supervisor'))]"/>
+      <field name="comment">Da de alta, edita, desactiva y asigna roles a la gente de SU RUC (y
+        solo de su RUC). No puede otorgar base.group_system.</field>
+    </record>
+  </data>
+</odoo>

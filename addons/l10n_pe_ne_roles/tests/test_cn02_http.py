@@ -86,11 +86,13 @@ class TestCn02Http(EnvioSincronoMixin, HttpCase):
         self.assertEqual(r["estado"], "encolada")
         self.assertEqual(r["adelanto"], 50.0)
         self.assertEqual(r["saldo"], 68.0)
-        # el adelanto cuadra el arqueo POR SU MEDIO (Yape), no como efectivo genérico
+        # el adelanto cuadra el arqueo POR SU MEDIO (Yape). Con el CONTEO CIEGO (D-1, iter2) la
+        # sesión abierta solo sirve los NOMBRES de los medios — el adelanto siembra su fila de
+        # conteo; el monto se verifica al CIERRE (abajo).
         sc, caja = self._get("/caja", self.cajero)
         self.assertEqual(sc, 200)
-        esperado = {f["medio"]: f["monto"] for f in caja["sesion"]["esperado"]}
-        self.assertEqual(esperado.get("Yape"), 50.0)
+        self.assertIn("Yape", caja["sesion"]["medios"])
+        self.assertNotIn("esperado", caja["sesion"])         # D-1: sin montos en vivo
         self.assertEqual(caja["sesion"]["ingresos"], 0.0)   # no es un ingreso genérico
         # el operario toma de la cola (toma atómica NULL->yo)
         sc, cola = self._get("/ordenes/cola", self.operario)
@@ -111,6 +113,15 @@ class TestCn02Http(EnvioSincronoMixin, HttpCase):
         self.assertEqual(sc, 200, r)
         self.assertEqual(r["estado"], "entregada")
         self.assertEqual(r["saldoCobrado"], 68.0)
+        # CIERRE: el arqueo congelado revela los montos (D-1) y cuenta el adelanto POR SU MEDIO
+        # (seam) + la venta por el saldo — Yape 50 y Efectivo 68, sin doble conteo.
+        sc, arq = self._post("/caja/cerrar", self.cajero,
+                             {"conteos": [{"medio": "Efectivo", "contado": 68},
+                                          {"medio": "Yape", "contado": 50}]})
+        self.assertEqual(sc, 200, arq)
+        esperados = {f["medio"]: f["esperado"] for f in arq["arqueo"]}
+        self.assertEqual(esperados.get("Yape"), 50.0)
+        self.assertEqual(esperados.get("Efectivo"), 68.0)
 
     # ── escala libre: 1 usuario con todos los roles ─────────────────────────────
     def test_escala_libre_un_usuario(self):

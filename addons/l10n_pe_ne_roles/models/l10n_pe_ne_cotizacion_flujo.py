@@ -120,7 +120,11 @@ class L10nPeNeCotizacionFlujo(models.Model):
         self.ensure_one()
         if not self.fecha or not self.validez_dias:
             return False
-        return (self.fecha + timedelta(days=self.validez_dias)) < fields.Date.context_today(self)
+        # A12 (revisión Fable): comparar contra HOY en Lima, no UTC. El cron corre como sistema sin
+        # tz y entre 00:00-05:00 UTC (19:00-medianoche Lima) marcaría 'vencida' hasta 5h antes —un
+        # falso positivo TERMINAL que, con el enforcement de P6 (A1), bloquea cobros legítimos.
+        hoy = fields.Date.context_today(self.with_context(tz="America/Lima"))
+        return (self.fecha + timedelta(days=self.validez_dias)) < hoy
 
     def _l10n_pe_ne_guard_cobrable(self):
         """REALIDAD (no permiso): no se cobra al precio viejo una cotización vencida (P6 vinculante).

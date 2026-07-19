@@ -36,6 +36,11 @@ fiscal definitivo. Todo lo demás (estados, montos, arqueo, segregación) se val
 6. Datos: cliente con **RUC** (11 díg → factura) y cliente con **DNI** (8 díg → boleta); un producto
    **almacenable** (`type=consu`, storable) y un **servicio** (no storable); caja **abierta**.
 7. Políticas/gates en **off** (default) salvo los escenarios de §6.
+8. **Prerrequisito de los tests que emiten** (HttpCase `cobrar-entregar`/`cobrar-saldo` y todo §7):
+   la compañía debe tener el **Plan Contable l10n_pe** cargado (diario `sale` + IGV de venta
+   `l10n_pe_edi_tax_code=1000`) — mismo supuesto que los tests de emisión del biller — y
+   **`stock_account`** instalado (auto_install) para que el cobro de CN-01 mueva stock corriendo
+   como el cajero. Los tests de segregación/arqueo NO necesitan esto.
 
 Convención de resultados: **OK** = 2xx + JSON esperado; **AccessError** = 403 con `{message}`;
 **UserError/Validation** = 400 con `{message}` legible.

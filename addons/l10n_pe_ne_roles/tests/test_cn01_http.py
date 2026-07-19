@@ -14,7 +14,15 @@ _OK = type("R", (), {"status_code": 200, "text": '<?xml version="1.0"?><Invoice/
 
 @tagged("post_install", "-at_install")
 class TestCn01Http(EnvioSincronoMixin, HttpCase):
-    """CN-01 (mostrador) e2e por /ne/api/*: cotiza → cobra → despacho, gateado por rol de verdad."""
+    """CN-01 (mostrador) e2e por /ne/api/*: cotiza → cobra → despacho, gateado por rol de verdad.
+
+    REQUISITOS DE ENTORNO para los 2 tests que emiten (los de segregación pasan sin esto):
+      · Plan Contable l10n_pe en la compañía (diario `sale` + IGV de venta `l10n_pe_edi_tax_code=1000`),
+        mismo supuesto que l10n_pe_ne_biller/tests/test_stock_emision.py.
+      · `stock_account` instalado (auto_install): el cobro mueve stock corriendo como el CAJERO
+        (no-root), que accede a stock.move por la cadena emisor→account.group_account_invoice. Sin
+        ese módulo, el `create` del stock.move daría AccessError→403.
+    """
 
     def setUp(self):
         super().setUp()

@@ -13,7 +13,11 @@ _OK = type("R", (), {"status_code": 200, "text": '<?xml version="1.0"?><Invoice/
 @tagged("post_install", "-at_install")
 class TestCn02Http(EnvioSincronoMixin, HttpCase):
     """CN-02 (taller) e2e por /ne/api/*: adelanto → cola → toma → saldo, gateado por rol de verdad.
-    Verifica también que el adelanto cuadra el arqueo POR SU MEDIO (endpoint /ne/api/caja)."""
+    Verifica también que el adelanto cuadra el arqueo POR SU MEDIO (endpoint /ne/api/caja).
+
+    REQUISITO DE ENTORNO para el test que emite (los de segregación/arqueo pasan sin esto): Plan
+    Contable l10n_pe en la compañía (diario `sale` + IGV `1000`). El servicio no mueve stock, así
+    que aquí no aplica lo de stock_account (ver test_cn01_http)."""
 
     def setUp(self):
         super().setUp()

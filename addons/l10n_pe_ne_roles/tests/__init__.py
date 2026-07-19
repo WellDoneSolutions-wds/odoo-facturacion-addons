@@ -5,3 +5,5 @@ from . import test_alta_usuarios
 from . import test_gates
 from . import test_cotizacion_flujo
 from . import test_orden_trabajo
+from . import test_cn01_http
+from . import test_cn02_http

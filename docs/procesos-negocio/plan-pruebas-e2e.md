@@ -15,7 +15,7 @@ Pirámide de capas:
 | Capa | Herramienta | Qué valida | Estado |
 |---|---|---|---|
 | Unit | `odoo-bin --test-enable` (TransactionCase) | lógica de modelo aislada | **ya existen** (ver §9) |
-| Integración API | Odoo `HttpCase` → `/ne/api/*` con Bearer por rol | flujo real por el controller, gating por rol, JSON de respuesta | a escribir (patrón: `biller/tests/test_caja_http.py`) |
+| Integración API | Odoo `HttpCase` → `/ne/api/*` con Bearer por rol | flujo real por el controller, gating por rol, JSON de respuesta | **hecho**: `roles/tests/test_cn01_http.py`, `test_cn02_http.py` (emisión doblada) |
 | SPA | Playwright sobre el build de `web-bff` | render, navegación, que la SPA llama el endpoint correcto | a escribir |
 | E2E fiscal | pila completa + facturador → **SUNAT beta** | emisión real, XML/CDR, montos | manual/staging |
 
@@ -234,9 +234,20 @@ real (no el BFF), para simular el bypass del BFF.
 
 ## 10. Automatización recomendada
 
-- **API (prioridad 1):** una clase `HttpCase` por proceso (`test_cn01_http.py`, `test_cn02_http.py`)
-  que hace login por rol (obtiene Bearer), recorre las tablas de §2/§3 golpeando `/ne/api/*` y
-  asevera el JSON. Molde: `biller/tests/test_caja_http.py`. Corre con `--test-enable` en CI real.
+- **API (prioridad 1) — HECHO:** `roles/tests/test_cn01_http.py` y `test_cn02_http.py`. Cada una
+  crea un usuario por rol (Bearer scoped key), recorre el camino feliz (segregado + escala libre) y
+  los negativos de segregación golpeando `/ne/api/*`, y asevera el JSON. La emisión a SUNAT se
+  DOBLA (`patch` de `requests.post`, molde `test_stock_emision.py`) para ejercer el fold completo
+  sin el facturador. CN-02 además verifica el arqueo por `/ne/api/caja` (adelanto por su medio).
+  Corre con `odoo-bin --test-enable -u l10n_pe_ne_roles`. Cubre lo que los unit (root, su=True) NO
+  pueden: la segregación real por `with_user`+`has_group`. PENDIENTE de ejecutar en entorno con Odoo
+  (aquí no hay); ver notas de riesgo abajo.
+
+  Notas de ejecución (verificar en el primer run real): (a) el `patch` de `requests.post` debe
+  aplicar al hilo del servidor de `HttpCase` (mismo proceso — debería, pero confirmar); (b) la
+  lectura del `account.move` tras el request usa `env.invalidate_all()` + browse (visibilidad por
+  cursor compartido del test-mode); (c) el arqueo asume que la sesión ABIERTA sí sirve `esperado`
+  (cierto en esta rama; si se mergea la iter 2 'conteo ciego', ajustar a leer al cerrar).
 - **SPA:** Playwright sobre `web-bff` (build): que `/ordenes` y `/cotizaciones` pinten las colas y
   disparen el endpoint correcto (mockear `/ne/api/*` o apuntar a un Odoo de staging).
 - **Fiscal:** un smoke manual/nightly contra SUNAT beta (1 factura + 1 boleta por proceso).

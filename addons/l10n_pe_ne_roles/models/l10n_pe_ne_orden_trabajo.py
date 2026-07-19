@@ -61,8 +61,10 @@ class L10nPeNeOrdenTrabajo(models.Model):
     adelanto_movimiento_id = fields.Many2one(
         "l10n_pe_ne.caja.movimiento", string="Movimiento del adelanto", readonly=True,
         ondelete="set null")
+    # A16: restrict — el comprobante de una entrega no se borra por debajo (un set null silencioso
+    # dejaría una 'entregada' sin factura a nivel SQL, esquivando la constraint).
     factura_final_id = fields.Many2one("account.move", string="Comprobante final", readonly=True,
-                                       ondelete="set null")
+                                       ondelete="restrict")
     fecha_entrega = fields.Datetime(string="Fecha de entrega", readonly=True)
 
     amount_untaxed = fields.Monetary(string="Valor venta", compute="_compute_amounts", store=True,
@@ -123,6 +125,10 @@ class L10nPeNeOrdenTrabajo(models.Model):
                                           "label": "Terminar trabajo"},
             ("borrador", "anulada"): {"grupo": _G_CAJA, "motivo": True, "label": "Anular"},
             ("encolada", "anulada"): {"grupo": _G_SUPERVISOR, "motivo": True, "label": "Anular"},
+            # A17: cancelar con el trabajo EN CURSO es real (cliente desiste, vehículo retirado);
+            # sin esta arista había que 'terminar' un trabajo no terminado (bitácora mentirosa).
+            ("en_proceso", "anulada"): {"grupo": _G_SUPERVISOR, "motivo": True,
+                                        "label": "Anular (trabajo en curso)"},
             ("terminada", "anulada"): {"grupo": _G_SUPERVISOR, "motivo": True,
                                        "label": "Anular (no recogido)"},
         }
@@ -175,9 +181,12 @@ class L10nPeNeOrdenTrabajo(models.Model):
         if monto <= 0:
             raise UserError(_("El adelanto debe ser mayor a 0."))
         if monto >= self.amount_total:
+            # A17: en Vía B el pago 100% adelantado NO tiene flujo (habría que emitir al recibirlo,
+            # que es exactamente la Vía A / anticipo 0104, aún no construida). Mensaje honesto.
             raise UserError(_(
                 "El adelanto (S/ %(a).2f) no puede cubrir o superar el total (S/ %(t).2f): es un "
-                "pago PARCIAL. Para cobrar el total, usa el cobro normal.",
+                "pago PARCIAL a cuenta. Si el cliente paga todo por adelantado, emite el "
+                "comprobante de una vez (el trabajo queda pendiente de entrega).",
                 a=monto, t=self.amount_total))
         medio = (medio or "Efectivo").strip() or "Efectivo"
         # La caja (biller) crea el movimiento estructurado sobre la sesión abierta.
@@ -224,6 +233,14 @@ class L10nPeNeOrdenTrabajo(models.Model):
         res = self.env["account.move"].l10n_pe_ne_quick_emit(
             self._l10n_pe_ne_payload_emision(medios))
         move_id = res.get("id") if isinstance(res, dict) else False
+        # A14: el motor de impuestos redondea por línea; si el total del comprobante difiere en
+        # céntimos del total de la orden, el arqueo debe contar el dinero REAL: se reescribe el
+        # monto del medio único con (total del move − adelanto).
+        if move_id:
+            move = self.env["account.move"].browse(move_id)
+            real = round((move.amount_total or 0.0) - (self.adelanto_monto or 0.0), 2)
+            if real > 0 and abs(real - self.saldo) > 0.005:
+                move.sudo().l10n_pe_ne_medios_pago = [{"medio": medio, "monto": real}]
         # Flag _FLUJO_OK: escritura de estado AUTORIZADA (fold de cobro, tras emitir). La constraint
         # de 'entregada exige comprobante' igual la valida (factura_final_id se setea en el mismo write).
         self.with_context(l10n_pe_ne_flujo_ok=True).write({
@@ -308,10 +325,18 @@ class L10nPeNeOrdenTrabajo(models.Model):
         lineas = self._l10n_pe_ne_build_lines(payload.get("items") or payload.get("lineas"))
         if not lineas:
             raise UserError(_("La orden necesita al menos un ítem."))
+        # A16: la referencia a la cotización de origen se VALIDA (exists + leerla dispara la
+        # ir.rule → cross-RUC = AccessError), no se siembra cruda como int.
+        cot_id = False
+        if payload.get("cotizacionId"):
+            cot = self.env["l10n_pe_ne.cotizacion"].browse(int(payload["cotizacionId"])).exists()
+            if cot:
+                cot.company_id   # noqa: B018 — lectura a propósito: dispara la regla de compañía
+                cot_id = cot.id
         orden = self.create({
             "company_id": self.env.company.id,
             "partner_id": partner.id,
-            "cotizacion_id": int(payload["cotizacionId"]) if payload.get("cotizacionId") else False,
+            "cotizacion_id": cot_id,
             "fecha_pactada": payload.get("fechaPactada") or False,
             "linea_ids": lineas,
         })

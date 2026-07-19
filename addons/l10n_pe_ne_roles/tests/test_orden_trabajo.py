@@ -232,6 +232,33 @@ class TestOrdenTrabajo(TransactionCase):
         self.assertEqual(len(medios), 1)
         self.assertEqual(medios[0]["monto"], 68.0)
 
+    # ── lote menores (A14/A16/A17) ──────────────────────────────────────────────
+    def test_anular_en_proceso(self):
+        # A17: cancelar con el trabajo en curso existe (supervisor + motivo); el operario no puede.
+        orden = self._orden(estado="en_proceso")
+        taller = self._user("tal_anula_ot", ["l10n_pe_ne_roles.group_l10n_pe_ne_taller"])
+        with self.assertRaises(AccessError):
+            orden.with_user(taller).l10n_pe_ne_anular("se retiró")
+        sup = self._user("sup_anula_ot", ["l10n_pe_ne_roles.group_l10n_pe_ne_supervisor"])
+        orden.with_user(sup).l10n_pe_ne_anular("cliente desistió")
+        self.assertEqual(orden.estado, "anulada")
+
+    def test_crear_orden_cotizacion_invalida(self):
+        # A16: un cotizacionId inexistente no se siembra crudo — queda False, sin crash.
+        r = self.Orden.l10n_pe_ne_crear_orden({
+            "clienteId": self.cliente.id, "cotizacionId": 999999,
+            "items": [{"descripcion": "Trabajo x", "cantidad": 1, "precio": 10}]})
+        self.assertFalse(self.Orden.browse(r["id"]).cotizacion_id)
+
+    def test_ticket_menciona_adelanto(self):
+        # A14: el ticket del comprobante final explica el cobro en dos tiempos.
+        orden = self._orden(estado="terminada", adelanto=50.0)
+        orden.medio_adelanto = "Yape"
+        move = self.env["account.move"].create(
+            {"move_type": "out_invoice", "partner_id": self.cliente.id})
+        orden.factura_final_id = move.id
+        self.assertIn("Adelanto a cuenta: S/ 50.00 (Yape)", move._l10n_pe_ne_ticket_adicional())
+
     # ── colas + segregación por ir.rule ─────────────────────────────────────────
     def test_colas_y_segregacion(self):
         o_enc = self._orden(estado="encolada")

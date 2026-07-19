@@ -232,6 +232,14 @@ class L10nPeNeCotizacionFlujo(models.Model):
             self._l10n_pe_ne_payload_emision(payload.get("medios")))
         # (quick_emit ya hizo: post + mover_stock + vincular_comprobante(→convertida + despacho
         # pendiente) + send_to_biller.)
+        # A14: si el medio default (Efectivo por el total de la COTIZACIÓN) difiere en céntimos del
+        # total del comprobante (redondeo por línea del motor de impuestos), el arqueo cuenta el
+        # dinero REAL del move. Solo cuando el medio lo construimos nosotros (la SPA no mandó medios).
+        if not payload.get("medios") and self.comprobante_id:
+            move = self.comprobante_id
+            if abs((move.amount_total or 0.0) - self.amount_total) > 0.005:
+                move.sudo().l10n_pe_ne_medios_pago = [
+                    {"medio": "Efectivo", "monto": round(move.amount_total or 0.0, 2)}]
         entregado = False
         if payload.get("entregar") and self.estado_despacho == "pendiente" \
                 and self.env.user.has_group(_G_DESPACHO):

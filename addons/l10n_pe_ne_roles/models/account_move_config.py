@@ -26,3 +26,17 @@ class AccountMove(models.Model):
             if p and (not p.company_id or p.company_id == self.env.company):
                 return p
         return super()._l10n_pe_ne_quick_partner(c)
+
+    def _l10n_pe_ne_ticket_adicional(self):
+        """A14 (CN-02): el ticket del comprobante final de una orden de taller explica el cobro en
+        dos tiempos — sin esta línea imprimía 'Pago: S/ <saldo>' contra un total mayor, y el
+        cliente no veía dónde quedó su adelanto."""
+        txt = super()._l10n_pe_ne_ticket_adicional()
+        orden = self.env["l10n_pe_ne.orden.trabajo"].sudo().search(
+            [("factura_final_id", "=", self.id)], limit=1)
+        if orden and orden.adelanto_monto:
+            linea = "Adelanto a cuenta: S/ %.2f%s" % (
+                orden.adelanto_monto,
+                (" (%s)" % orden.medio_adelanto) if orden.medio_adelanto else "")
+            txt = (txt + "\n" + linea) if txt else linea
+        return txt

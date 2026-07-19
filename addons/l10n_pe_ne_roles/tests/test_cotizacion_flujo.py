@@ -115,7 +115,10 @@ class TestCotizacionFlujo(TransactionCase):
         self.assertEqual(cot.receptor_nombre, "Juan Perez")
 
     def test_entregar_solo_pendiente(self):
-        cot = self._cot(estado="aceptada")   # no convertida
+        # convertida pero SIN despacho pendiente (estado_despacho=no_aplica por default): el
+        # despachador SÍ la ve (su ir.rule = convertida) pero la guarda de realidad la frena. Una
+        # 'aceptada' ni la vería (ir.rule del despacho = solo convertida → AccessError, no la guarda).
+        cot = self._cot(estado="convertida")
         desp = self._user("des2_cn01", ["l10n_pe_ne_roles.group_l10n_pe_ne_despacho"])
         with self.assertRaisesRegex(UserError, "cobrada"):
             cot.with_user(desp).l10n_pe_ne_entregar()

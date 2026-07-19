@@ -233,19 +233,18 @@ class ResUsers(models.Model):
         la segunda espera a la primera y ve su efecto."""
         self.env.cr.execute("SELECT id FROM res_company WHERE id = %s FOR UPDATE", (company.id,))
         duenio = self.env.ref(_ROL_DUENIO)
-        dominio = [
+        # El admin de plataforma (base.group_system) tiene el grupo dueño en todos los RUC, pero NO
+        # cuenta como dueño DEL TENANT: si contara, el guard nunca dispararía y el tenant podría
+        # dejarse sin ningún dueño de autoservicio. Se lo EXCLUYE en Python con has_group: el filtro
+        # de dominio ('all_group_ids','not in',system.id) NO excluye bien un m2m COMPUTADO (both
+        # scalar and list forms devuelven al admin igual — confirmado en el e2e con Odoo real).
+        otros = self.sudo().search([
             ("id", "!=", excluir.id),
             ("active", "=", True),
             ("company_ids", "in", company.ids),
             ("all_group_ids", "in", duenio.id),
-        ]
-        # El admin de plataforma (base.group_system) tiene el grupo dueño en todos los RUC, pero
-        # NO cuenta como dueño DEL TENANT: si contara, el guard nunca dispararía y el tenant podría
-        # dejarse sin ningún dueño de autoservicio. Se lo excluye.
-        system = self.env.ref("base.group_system", raise_if_not_found=False)
-        if system:
-            dominio.append(("all_group_ids", "not in", system.id))
-        if not self.sudo().search_count(dominio):
+        ]).filtered(lambda u: not u.has_group("base.group_system"))
+        if not otros:
             raise UserError(_("No puedes desactivar al último dueño del negocio."))
 
     @api.model

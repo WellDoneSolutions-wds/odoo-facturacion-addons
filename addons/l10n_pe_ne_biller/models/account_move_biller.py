@@ -5270,6 +5270,19 @@ class AccountMove(models.Model):
             "target": "self",
         }
 
+    def _l10n_pe_ne_medios_pago_texto(self):
+        """Detalle de medios de pago del POS ('Efectivo S/ 50.00, Yape S/ 68.00') para la
+        representación impresa. NO va al XML SUNAT (es interno del punto de venta). Devuelve
+        "" si no hay medios con importe (medio sin detallar → no se muestra el bloque). Lo usan
+        el ticket 80mm (dentro del bloque POS `adicionalTxt`) y el A4 (param `MEDIOS_PAGO`)."""
+        self.ensure_one()
+        medios = self.l10n_pe_ne_medios_pago or []
+        return ", ".join(
+            "%s S/ %.2f" % (m.get("medio") or "", float(m.get("monto") or 0))
+            for m in medios
+            if float(m.get("monto") or 0) > 0
+        )
+
     def _l10n_pe_ne_ticket_adicional(self):
         """Bloque de pago del ticket 80mm (se manda como `adicionalTxt`): medios de pago del
         POS, vuelto, cajero y nota. Estos datos NO van al XML SUNAT (son internos del punto de
@@ -5278,11 +5291,8 @@ class AccountMove(models.Model):
         self.ensure_one()
         partes = []
         medios = self.l10n_pe_ne_medios_pago or []
-        if medios:
-            det = ", ".join(
-                "%s S/ %.2f" % (m.get("medio") or "", float(m.get("monto") or 0))
-                for m in medios
-            )
+        det = self._l10n_pe_ne_medios_pago_texto()
+        if det:
             partes.append("Pago: " + det)
             pagado = sum(float(m.get("monto") or 0) for m in medios)
             vuelto = round(pagado - (self.amount_total or 0.0), 2)
@@ -5342,6 +5352,10 @@ class AccountMove(models.Model):
             # Vendedor/cajero que atendió (no va al XML SUNAT): va en ambos formatos como
             # "Atendido por" (el ticket ya lo traía en el bloque POS; ahora también el A4).
             "atendidoPor": self.invoice_user_id.name or "",
+            # Medios de pago del POS (Efectivo/Yape/Plin…): NO van al XML SUNAT. El A4 los
+            # muestra junto a la forma de pago (param MEDIOS_PAGO); el ticket ya los trae en
+            # el bloque POS (adicionalTxt). "" si no hay medios detallados.
+            "mediosPago": self._l10n_pe_ne_medios_pago_texto(),
         }
         # Logo del emisor (si lo tiene): va en ambos formatos (A4 y ticket).
         logo = self.company_id.logo

@@ -1471,12 +1471,12 @@ class L10nPeNeApi(http.Controller):
         return self._run(lambda: self._lote(uid).l10n_pe_ne_crear_lote(self._body()))
 
     @http.route("/ne/api/lotes/plantilla", **_GET)
-    def lote_plantilla(self, **kw):
+    def lote_plantilla(self, tipo=None, **kw):
         uid = self._identify()
         if not uid:
             return self._unauth()
         try:
-            return self._json(self._lote(uid).l10n_pe_ne_plantilla())
+            return self._json(self._lote(uid).l10n_pe_ne_plantilla(tipo or "comprobante"))
         except Exception as e:  # noqa: BLE001
             return self._fail(e)
 

@@ -165,6 +165,10 @@ class L10nPeNeApi(http.Controller):
         u = self._user(uid)
         return request.env["l10n_pe_ne.establecimiento"].with_user(uid).with_company(u.company_id)
 
+    def _proyecto(self, uid):
+        u = self._user(uid)
+        return request.env["l10n_pe_ne.proyecto"].with_user(uid).with_company(u.company_id)
+
     def _caja(self, uid):
         u = self._user(uid)
         return request.env["l10n_pe_ne.caja.sesion"].with_user(uid).with_company(u.company_id)
@@ -1386,6 +1390,24 @@ class L10nPeNeApi(http.Controller):
         return self._run(
             lambda: self._estab(uid).l10n_pe_ne_upsert(self._body())._l10n_pe_ne_dict()
         )
+
+    # ------------------------------------------------ proyectos (avance de obra)
+    @http.route("/ne/api/proyectos", **_GET)
+    def list_proyectos(self, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        try:
+            return self._json(self._proyecto(uid).l10n_pe_ne_list())
+        except Exception as e:  # noqa: BLE001
+            return self._fail(e)
+
+    @http.route("/ne/api/proyectos", **_POST)
+    def upsert_proyecto(self, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(lambda: self._proyecto(uid).l10n_pe_ne_upsert(self._body()))
 
     @http.route("/ne/api/establecimientos/<int:rec_id>", **_DEL)
     def delete_establecimiento(self, rec_id, **kw):

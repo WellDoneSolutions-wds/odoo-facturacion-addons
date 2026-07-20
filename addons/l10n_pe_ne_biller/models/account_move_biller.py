@@ -5275,6 +5275,9 @@ class AccountMove(models.Model):
             "dirCliente": ", ".join(
                 p for p in (self.partner_id.street, self.partner_id.street2) if p
             ),
+            # Vendedor/cajero que atendió (no va al XML SUNAT): va en ambos formatos como
+            # "Atendido por" (el ticket ya lo traía en el bloque POS; ahora también el A4).
+            "atendidoPor": self.invoice_user_id.name or "",
         }
         # Logo del emisor (si lo tiene): va en ambos formatos (A4 y ticket).
         logo = self.company_id.logo

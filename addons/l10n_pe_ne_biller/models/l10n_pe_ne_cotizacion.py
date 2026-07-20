@@ -8,6 +8,7 @@ Modelo propio simplificado (misma filosofía que l10n_pe_ne.gasto): TODA la lóg
 Aislado por compañía (regla multi-compañía global en security). El PDF se genera con
 un reporte QWeb nativo de Odoo (report/cotizacion_report.xml)."""
 import base64
+from datetime import timedelta
 
 from odoo import _, api, fields, models
 from odoo.exceptions import UserError
@@ -187,6 +188,20 @@ class L10nPeNeCotizacion(models.Model):
             }))
         return vals
 
+    def _l10n_pe_ne_moneda_currency(self, payload):
+        """res.currency de la moneda elegida en el payload (PEN/USD). Default PEN (soles):
+        una proforma peruana es en soles salvo que se pida dólares. NO se hereda la moneda
+        de la compañía — con compañías configuradas en USD eso dejaba TODA cotización en
+        dólares (y la lista mostraba '$' donde debía ir 'S/'). Devuelve recordset vacío solo
+        si la moneda no existe en el padrón (entonces el create cae al default del campo)."""
+        nombre = (payload.get('moneda') or 'PEN').strip().upper()
+        if nombre not in ('PEN', 'USD'):
+            nombre = 'PEN'
+        # active_test=False: PEN/USD pueden estar inactivas en una compañía USD-only, pero
+        # el registro existe (data base de Odoo) y sirve igual como moneda de la proforma.
+        return self.env['res.currency'].with_context(active_test=False).search(
+            [('name', '=', nombre)], limit=1)
+
     @staticmethod
     def _l10n_pe_ne_condiciones_vals(payload):
         """Extrae las condiciones comerciales del payload (formaPago/tiempoEntrega/garantia)
@@ -231,6 +246,9 @@ class L10nPeNeCotizacion(models.Model):
             # (se creaba, pero "invisible"). Anclándola igual que la factura, la cotización
             # queda siempre en la misma compañía del emisor y se ve donde se ven las facturas.
             'company_id': self.env.company.id,
+            # Moneda explícita del payload (default PEN); no se hereda la de la compañía.
+            'currency_id': (self._l10n_pe_ne_moneda_currency(payload).id
+                            or self.env.company.currency_id.id),
             'partner_id': partner.id,
             'fecha': payload.get('fecha') or fields.Date.context_today(self),
             'validez_dias': int(payload.get('validezDias') or 15),
@@ -254,6 +272,10 @@ class L10nPeNeCotizacion(models.Model):
             vals['fecha'] = payload['fecha']
         if payload.get('validezDias') is not None:
             vals['validez_dias'] = int(payload['validezDias'])
+        if payload.get('moneda'):
+            cur = self._l10n_pe_ne_moneda_currency(payload)
+            if cur:
+                vals['currency_id'] = cur.id
         if 'notas' in payload:
             vals['notas'] = payload.get('notas') or False
         vals.update(self._l10n_pe_ne_condiciones_vals(payload))
@@ -280,6 +302,14 @@ class L10nPeNeCotizacion(models.Model):
         if cot:
             cot.unlink()
         return {'ok': True, 'modo': 'eliminado'}
+
+    def l10n_pe_ne_valida_hasta(self):
+        """'dd/mm/aaaa' de fecha + validez, para la representación impresa (el cliente ve
+        la fecha límite concreta, no cuántos días contar)."""
+        self.ensure_one()
+        if not self.fecha:
+            return ''
+        return (self.fecha + timedelta(days=self.validez_dias or 0)).strftime('%d/%m/%Y')
 
     def l10n_pe_ne_importe_en_letras(self):
         """Importe total en letras, formato peruano estándar: 'OCHO CON 50/100 SOLES'.

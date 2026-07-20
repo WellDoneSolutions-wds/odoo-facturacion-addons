@@ -16,6 +16,22 @@ _TC_API_REFERER_DEFAULT = "https://apis.net.pe/"
 class ResCompany(models.Model):
     _inherit = 'res.company'
 
+    # ===================================================== Alta de empresas
+    # Modelo multi-DB: 1 empresa = 1 base de datos = 1 RUC. Dentro de una BD-tenant
+    # NO se crean res.company adicionales — cada empresa es su propia base, dada de
+    # alta por el provisioner. Una 2a empresa creada a mano (Ajustes -> Empresas)
+    # nace con un RUC sin certificado ni registro en el biller y no puede facturar.
+    # El provisioning sancionado (l10n_pe_ne_provision_tenant, modo multi-RUC) pasa
+    # el bypass 'l10n_pe_ne_allow_company_create' por contexto.
+    @api.model_create_multi
+    def create(self, vals_list):
+        if not self.env.context.get('l10n_pe_ne_allow_company_create'):
+            raise UserError(_(
+                "En esta plataforma cada empresa es su propia base de datos (un RUC "
+                "por base). No se crea una empresa adicional aquí: el alta de una "
+                "empresa nueva se hace por el aprovisionador de tenants."))
+        return super().create(vals_list)
+
     # =========================================================== Tipo de cambio
     # SUNAT exige declarar el TC 'venta' del día en operaciones en dólares. Se
     # obtiene el TC oficial desde una API pública y se CACHEA en la tabla nativa
@@ -219,7 +235,7 @@ class ResCompany(models.Model):
         if company:
             company.write(cvals)
         else:
-            company = Company.create(cvals)
+            company = Company.with_context(l10n_pe_ne_allow_company_create=True).create(cvals)
 
         # --- Usuario emisor (en el grupo NE Express, atado SOLO a su company) ---
         grp = self.env.ref('l10n_pe_ne_biller.group_l10n_pe_ne_emisor')

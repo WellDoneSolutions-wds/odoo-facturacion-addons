@@ -1,0 +1,112 @@
+from odoo.exceptions import UserError
+from odoo.tests import TransactionCase, tagged
+
+
+@tagged("post_install", "-at_install")
+class TestDireccionesEstablec(TransactionCase):
+    """Establecimientos anexos y direcciones de cliente atados a un distrito de Perú:
+    el ubigeo de 6 dígitos sale automático (ya no se tipea a mano)."""
+
+    def _miraflores(self):
+        d = self.env["l10n_pe.res.city.district"].search([("code", "=", "150122")], limit=1)
+        self.assertTrue(d, "debe existir el distrito 150122 (Miraflores) en los datos base")
+        return d
+
+    # --------------------------------------------------------- establecimiento
+    def test_establecimiento_con_distrito_sincroniza_ubigeo(self):
+        d = self._miraflores()
+        E = self.env["l10n_pe_ne.establecimiento"]
+        rec = E.l10n_pe_ne_upsert({"codigo": "0002", "direccion": "X", "distritoId": d.id})
+        self.assertEqual(rec.ubigeo, "150122")
+        self.assertEqual(rec.distrito_id.id, d.id)
+        row = next(i for i in E.l10n_pe_ne_list() if i["codigo"] == "0002")
+        self.assertEqual(row["distrito"], "Miraflores")
+        self.assertEqual(row["distritoId"], d.id)
+        self.assertEqual(row["ubigeo"], "150122")
+
+    def test_establecimiento_sin_distrito_conserva_ubigeo_tipeado(self):
+        E = self.env["l10n_pe_ne.establecimiento"]
+        rec = E.l10n_pe_ne_upsert({"codigo": "0003", "direccion": "Y", "ubigeo": "150110"})
+        self.assertEqual(rec.ubigeo, "150110")
+
+    def test_upsert_ubigeo_manual_limpia_distrito_previo(self):
+        # Si un establecimiento tenía distrito y luego se hace upsert con ubigeo a mano
+        # (sin distritoId), el distrito_id se limpia para no quedar desincronizado.
+        d = self._miraflores()
+        E = self.env["l10n_pe_ne.establecimiento"]
+        rec = E.l10n_pe_ne_upsert({"codigo": "0004", "direccion": "Z", "distritoId": d.id})
+        self.assertEqual(rec.distrito_id.id, d.id)
+        rec2 = E.l10n_pe_ne_upsert({"codigo": "0004", "direccion": "Z", "ubigeo": "040101"})
+        self.assertEqual(rec2.id, rec.id)
+        self.assertEqual(rec2.ubigeo, "040101")
+        self.assertFalse(rec2.distrito_id, "distrito_id debe limpiarse al tipear ubigeo a mano")
+        self.assertFalse(rec.distrito_id)
+
+    # --------------------------------------------------------- direcciones cliente
+    def test_crear_direccion_cliente(self):
+        d = self._miraflores()
+        p = self.env["res.partner"].create({"name": "Cliente Dir SAC", "vat": "20601030013"})
+        E = self.env["l10n_pe_ne.establecimiento"]
+        row = E.l10n_pe_ne_crear_direccion(p.id, {"direccion": "Av X", "distritoId": d.id})
+        self.assertGreater(row["id"], 0)
+        child = self.env["res.partner"].browse(row["id"])
+        self.assertEqual(child.parent_id, p)
+        self.assertEqual(child.type, "delivery")
+        self.assertEqual(child.street, "Av X")
+        self.assertEqual(child.l10n_pe_district.code, "150122")
+        dirs = E.l10n_pe_ne_direcciones_partner(p.id)
+        self.assertTrue(any(x["id"] == row["id"] and x["ubigeo"] == "150122" for x in dirs))
+
+    def test_editar_direccion_cliente(self):
+        d = self._miraflores()
+        p = self.env["res.partner"].create({"name": "Cliente Dir SAC", "vat": "20601030013"})
+        E = self.env["l10n_pe_ne.establecimiento"]
+        row = E.l10n_pe_ne_crear_direccion(p.id, {"direccion": "Av X", "distritoId": d.id})
+        edited = E.l10n_pe_ne_editar_direccion(p.id, row["id"], {"direccion": "Av Y"})
+        self.assertEqual(edited["direccion"], "Av Y")
+        self.assertEqual(self.env["res.partner"].browse(row["id"]).street, "Av Y")
+
+    def test_eliminar_direccion_cliente_archiva(self):
+        d = self._miraflores()
+        p = self.env["res.partner"].create({"name": "Cliente Dir SAC", "vat": "20601030013"})
+        E = self.env["l10n_pe_ne.establecimiento"]
+        row = E.l10n_pe_ne_crear_direccion(p.id, {"direccion": "Av X", "distritoId": d.id})
+        res = E.l10n_pe_ne_eliminar_direccion(p.id, row["id"])
+        self.assertTrue(res["ok"])
+        dirs = E.l10n_pe_ne_direcciones_partner(p.id)
+        self.assertFalse(any(x["id"] == row["id"] for x in dirs))
+        child = self.env["res.partner"].browse(row["id"])
+        self.assertFalse(child.active)
+
+    def test_crear_direccion_sin_distrito_falla(self):
+        p = self.env["res.partner"].create({"name": "Cliente Dir SAC", "vat": "20601030013"})
+        E = self.env["l10n_pe_ne.establecimiento"]
+        with self.assertRaisesRegex(UserError, "distrito"):
+            E.l10n_pe_ne_crear_direccion(p.id, {"direccion": "Av X"})
+
+    def test_editar_direccion_no_permite_editar_principal(self):
+        p = self.env["res.partner"].create({"name": "Cliente Dir SAC", "vat": "20601030013",
+                                            "street": "Jr. Bolognesi 125, Miraflores"})
+        E = self.env["l10n_pe_ne.establecimiento"]
+        with self.assertRaisesRegex(UserError, "no encontrada"):
+            E.l10n_pe_ne_editar_direccion(p.id, p.id, {"direccion": "Av Z"})
+
+    def test_direccion_hija_lleva_company(self):
+        # Seguridad: el hijo DEBE quedar con company_id (si queda False, la record rule nativa
+        # lo hace visible/editable por todos los tenants).
+        d = self._miraflores()
+        p = self.env["res.partner"].create({"name": "Cliente Dir SAC", "vat": "20601030013"})
+        E = self.env["l10n_pe_ne.establecimiento"]
+        row = E.l10n_pe_ne_crear_direccion(p.id, {"direccion": "Av X", "distritoId": d.id})
+        child = self.env["res.partner"].browse(row["id"])
+        self.assertTrue(child.company_id, "la dirección hija debe tener company_id")
+
+    def test_editar_direccion_de_otro_cliente_falla(self):
+        # Un addr_id que no pertenece al partner_id de la URL no se puede tocar.
+        d = self._miraflores()
+        E = self.env["l10n_pe_ne.establecimiento"]
+        p1 = self.env["res.partner"].create({"name": "Cliente 1", "vat": "20601030013"})
+        p2 = self.env["res.partner"].create({"name": "Cliente 2", "vat": "20100190797"})
+        row = E.l10n_pe_ne_crear_direccion(p1.id, {"direccion": "Av X", "distritoId": d.id})
+        with self.assertRaisesRegex(UserError, "no encontrada"):
+            E.l10n_pe_ne_editar_direccion(p2.id, row["id"], {"direccion": "Hack"})

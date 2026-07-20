@@ -149,3 +149,25 @@ class TestBillerSerie(TransactionCase):
         previo.l10n_pe_ne_corr_emit = '00000042'
         nuevo = self._asigna('F888')
         self.assertEqual(nuevo.l10n_pe_ne_corr_emit, '00000043')
+
+    def test_serie_no_habilitada_bloquea(self):
+        """QA-074: emitir con una serie inventada (no configurada ni default) se bloquea antes de
+        asignar correlativo; una serie por defecto (F001) sí pasa."""
+        from odoo.exceptions import UserError
+        self.journal.l10n_pe_ne_serie = 'F001'
+        inventada = self._move(l10n_pe_serie='F099')
+        inventada.action_post()
+        self.assertEqual(inventada.l10n_pe_serie, 'F099')
+        with self.assertRaises(UserError):
+            inventada._l10n_pe_check_serie()
+        ok = self._move()   # toma F001 del diario
+        ok.action_post()
+        ok._l10n_pe_check_serie()   # no levanta
+
+    def test_serie_configurada_en_diario_habilitada(self):
+        """Una serie no-default pero configurada en un diario de venta sí está habilitada."""
+        self.journal.l10n_pe_ne_serie = 'F050'
+        move = self._move(l10n_pe_serie='F050')
+        move.action_post()
+        move._l10n_pe_check_serie()   # no levanta
+        self.assertIn('F050', move._l10n_pe_ne_series_habilitadas())

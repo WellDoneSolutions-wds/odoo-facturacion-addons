@@ -42,7 +42,7 @@ class TestCaja(TransactionCase):
         mov_a = self.Movimiento.create({
             "sesion_id": ses_a.id, "tipo": "ingreso", "motivo": "Fondo", "monto": 10.0,
         })
-        company_b = self.env["res.company"].create({"name": "CAJA B SAC"})
+        company_b = self.env["res.company"].with_context(l10n_pe_ne_allow_company_create=True).create({"name": "CAJA B SAC"})
         user_b = self.env["res.users"].create({
             "name": "Cajero B", "login": "cajero_b_qw07",
             "company_id": company_b.id, "company_ids": [(6, 0, [company_b.id])],
@@ -224,6 +224,23 @@ class TestCaja(TransactionCase):
         move.invalidate_recordset(["create_date"])
         return move
 
+    def test_medios_pago_texto(self):
+        """Detalle de medios de pago del POS para la representación impresa (lo usan el A4
+        via param MEDIOS_PAGO y el ticket via el bloque `adicionalTxt`): 'Medio S/ monto'
+        separados por coma, omitiendo importes 0; "" si no hay medios detallados."""
+        self._caja_fixtures()
+        self._caja_abrir(100)
+        v = self._venta_enviada("1401", medios=[{"medio": "Efectivo", "monto": 50},
+                                                {"medio": "Yape", "monto": 68}])
+        self.assertEqual(v._l10n_pe_ne_medios_pago_texto(), "Efectivo S/ 50.00, Yape S/ 68.00")
+        # Medio con importe 0 se omite (medio sin detallar no debe ensuciar la línea).
+        v0 = self._venta_enviada("1402", medios=[{"medio": "Efectivo", "monto": 118},
+                                                 {"medio": "Yape", "monto": 0}])
+        self.assertEqual(v0._l10n_pe_ne_medios_pago_texto(), "Efectivo S/ 118.00")
+        # Sin medios detallados -> "" (el A4/ticket no muestra el detalle de medios).
+        vsin = self._venta_enviada("1403", medios=None)
+        self.assertEqual(vsin._l10n_pe_ne_medios_pago_texto(), "")
+
     def test_amarre_ventas(self):
         self._caja_fixtures()
         usd = self.env.ref("base.USD")
@@ -304,7 +321,7 @@ class TestCaja(TransactionCase):
 
     def test_arqueo_cross_tenant(self):
         d = self.Sesion.l10n_pe_ne_abrir_caja({"saldoInicial": 10})
-        company_b = self.env["res.company"].create({"name": "CAJA C SAC"})
+        company_b = self.env["res.company"].with_context(l10n_pe_ne_allow_company_create=True).create({"name": "CAJA C SAC"})
         user_b = self.env["res.users"].create({
             "name": "Cajero C", "login": "cajero_c_qw07",
             "company_id": company_b.id, "company_ids": [(6, 0, [company_b.id])],

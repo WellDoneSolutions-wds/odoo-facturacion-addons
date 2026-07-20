@@ -157,6 +157,18 @@ class L10nPeNeApi(http.Controller):
         u = self._user(uid)
         return request.env["l10n_pe_ne.guia_remision"].with_user(uid).with_company(u.company_id)
 
+    def _flota(self, uid, model):
+        u = self._user(uid)
+        return request.env[model].with_user(uid).with_company(u.company_id)
+
+    def _estab(self, uid):
+        u = self._user(uid)
+        return request.env["l10n_pe_ne.establecimiento"].with_user(uid).with_company(u.company_id)
+
+    def _proyecto(self, uid):
+        u = self._user(uid)
+        return request.env["l10n_pe_ne.proyecto"].with_user(uid).with_company(u.company_id)
+
     def _caja(self, uid):
         u = self._user(uid)
         return request.env["l10n_pe_ne.caja.sesion"].with_user(uid).with_company(u.company_id)
@@ -583,6 +595,33 @@ class L10nPeNeApi(http.Controller):
         except Exception as e:  # noqa: BLE001
             return self._fail(e)
 
+    @http.route("/ne/api/reportes/ple-compras", **_GET)
+    def ple_compras(self, periodo=None, **kw):
+        """PLE 8.1 (Registro de Compras) del periodo YYYYMM. Devuelve
+        {filename, contentB64, count, total} — el txt que el contador sube a SUNAT.
+
+        ⚠ Estructura pendiente de validación contable (ver la nota en el modelo)."""
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        try:
+            return self._json(self._move(uid).l10n_pe_ne_ple_compras(periodo))
+        except Exception as e:  # noqa: BLE001
+            return self._fail(e)
+
+    @http.route("/ne/api/reportes/ple-inventario", **_GET)
+    def ple_inventario(self, periodo=None, **kw):
+        """PLE 12.1 (Inventario Permanente en Unidades Físicas) del periodo YYYYMM.
+
+        ⚠ Estructura pendiente de validación contable (ver la nota en el modelo)."""
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        try:
+            return self._json(self._move(uid).l10n_pe_ne_ple_inventario(periodo))
+        except Exception as e:  # noqa: BLE001
+            return self._fail(e)
+
     @http.route("/ne/api/reportes/rvie-reemplazo", **_GET)
     def rvie_reemplazo(self, periodo=None, **kw):
         """SIRE RVIE — archivo de reemplazo de la propuesta (ZIP) del periodo YYYYMM."""
@@ -815,6 +854,48 @@ class L10nPeNeApi(http.Controller):
             return self._unauth()
         return self._run(lambda: self._move(uid).l10n_pe_ne_delete_cliente(int(rec_id)))
 
+    @http.route("/ne/api/clientes/<int:partner_id>/direcciones", **_GET)
+    def cliente_direcciones(self, partner_id, **kw):
+        """Direcciones registradas del cliente (principal + hijas delivery/other)
+        para poblar el punto de llegada del wizard de la GRE sin tipear a mano."""
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        try:
+            return self._json(self._estab(uid).l10n_pe_ne_direcciones_partner(partner_id))
+        except Exception as e:  # noqa: BLE001
+            return self._fail(e)
+
+    @http.route("/ne/api/clientes/<int:partner_id>/direcciones", **_POST)
+    def crear_direccion_cliente(self, partner_id, **kw):
+        """Crea una dirección adicional (hija) del cliente, atada a un distrito."""
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(
+            lambda: self._estab(uid).l10n_pe_ne_crear_direccion(partner_id, self._body())
+        )
+
+    @http.route("/ne/api/clientes/<int:partner_id>/direcciones/<int:addr_id>", **_PUT)
+    def editar_direccion_cliente(self, partner_id, addr_id, **kw):
+        """Edita una dirección (hija) existente del cliente."""
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(
+            lambda: self._estab(uid).l10n_pe_ne_editar_direccion(partner_id, addr_id, self._body())
+        )
+
+    @http.route("/ne/api/clientes/<int:partner_id>/direcciones/<int:addr_id>", **_DEL)
+    def eliminar_direccion_cliente(self, partner_id, addr_id, **kw):
+        """Elimina (archiva) una dirección (hija) del cliente."""
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(
+            lambda: self._estab(uid).l10n_pe_ne_eliminar_direccion(partner_id, addr_id)
+        )
+
     # ------------------------------------------------ clientes: lookup externo
     # Reutiliza el motor del addon l10n_pe_partner_lookup (búsqueda por DNI/RUC en
     # API HTTP / DynamoDB / SUNAT) SIN duplicarlo. Integración OPCIONAL: si ese
@@ -919,6 +1000,32 @@ class L10nPeNeApi(http.Controller):
         return self._run(
             lambda: self._move(uid).l10n_pe_ne_create_producto(self._body())
         )
+
+    @http.route("/ne/api/negocio/margen", **_GET)
+    def negocio_margen(self, **kw):
+        """Margen de venta por defecto del negocio (%), para precargar el cálculo del precio
+        cuando se crea un producto desde una compra."""
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._json({"margen": self._move(uid)._l10n_pe_ne_margen_default()})
+
+    @http.route("/ne/api/productos/revisar-tipos", **_GET)
+    def revisar_tipos(self, **kw):
+        """Productos que quedaron como servicio por el default viejo y parecen bienes.
+        PROPONE: no cambia nada. Aplicar es otra llamada, con los ids que el usuario elija."""
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(lambda: self._move(uid).l10n_pe_ne_revisar_tipos(self._body() if False else None))
+
+    @http.route("/ne/api/productos/aplicar-tipos", **_POST)
+    def aplicar_tipos(self, **kw):
+        """Reclasifica SOLO los ids confirmados por el usuario."""
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(lambda: self._move(uid).l10n_pe_ne_aplicar_tipos(self._body()))
 
     @http.route("/ne/api/productos/plantilla", **_GET)
     def productos_plantilla(self, **kw):
@@ -1027,6 +1134,17 @@ class L10nPeNeApi(http.Controller):
         if not uid:
             return self._unauth()
         return self._run(lambda: self._move(uid).l10n_pe_ne_create_compra(self._body()))
+
+    @http.route("/ne/api/compras/importar-xml", **_POST)
+    def importar_compra_xml(self, **kw):
+        """Lee el XML de la factura del proveedor y devuelve el payload de la compra para que
+        el usuario lo revise. NO registra: el mapeo de productos necesita a un humano."""
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(
+            lambda: self._move(uid).l10n_pe_ne_importar_compra_xml(self._body())
+        )
 
     @http.route("/ne/api/compras/<int:rec_id>", **_PUT)
     def update_compra(self, rec_id, **kw):
@@ -1187,6 +1305,119 @@ class L10nPeNeApi(http.Controller):
         except Exception as e:  # noqa: BLE001
             return self._fail(e)
 
+    # ------------------------------------------------- maestros frecuentes (GRE)
+    # Vehículos y conductores 'frecuentes' que el wizard de guías reutiliza al
+    # emitir (mismo criterio que el wizard de SUNAT: se guardan al usarlos).
+    @http.route("/ne/api/vehiculos", **_GET)
+    def list_vehiculos(self, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        try:
+            return self._json(self._flota(uid, "l10n_pe_ne.vehiculo").l10n_pe_ne_list())
+        except Exception as e:  # noqa: BLE001
+            return self._fail(e)
+
+    @http.route("/ne/api/vehiculos", **_POST)
+    def upsert_vehiculo(self, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(
+            lambda: self._flota(uid, "l10n_pe_ne.vehiculo")
+            .l10n_pe_ne_upsert(self._body())
+            ._l10n_pe_ne_dict()
+        )
+
+    @http.route("/ne/api/vehiculos/<int:rec_id>", **_DEL)
+    def delete_vehiculo(self, rec_id, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(
+            lambda: self._flota(uid, "l10n_pe_ne.vehiculo")
+            .l10n_pe_ne_delete_vehiculo(rec_id)
+        )
+
+    @http.route("/ne/api/conductores", **_GET)
+    def list_conductores(self, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        try:
+            return self._json(self._flota(uid, "l10n_pe_ne.conductor").l10n_pe_ne_list())
+        except Exception as e:  # noqa: BLE001
+            return self._fail(e)
+
+    @http.route("/ne/api/conductores", **_POST)
+    def upsert_conductor(self, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(
+            lambda: self._flota(uid, "l10n_pe_ne.conductor")
+            .l10n_pe_ne_upsert(self._body())
+            ._l10n_pe_ne_dict()
+        )
+
+    @http.route("/ne/api/conductores/<int:rec_id>", **_DEL)
+    def delete_conductor(self, rec_id, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(
+            lambda: self._flota(uid, "l10n_pe_ne.conductor")
+            .l10n_pe_ne_delete_conductor(rec_id)
+        )
+
+    # Establecimientos anexos del emisor: SIEMPRE incluye primero el domicilio
+    # fiscal (código '0000') derivado de la compañía, luego los propios creados.
+    @http.route("/ne/api/establecimientos", **_GET)
+    def list_establecimientos(self, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        try:
+            return self._json(self._estab(uid).l10n_pe_ne_list())
+        except Exception as e:  # noqa: BLE001
+            return self._fail(e)
+
+    @http.route("/ne/api/establecimientos", **_POST)
+    def upsert_establecimiento(self, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(
+            lambda: self._estab(uid).l10n_pe_ne_upsert(self._body())._l10n_pe_ne_dict()
+        )
+
+    # ------------------------------------------------ proyectos (avance de obra)
+    @http.route("/ne/api/proyectos", **_GET)
+    def list_proyectos(self, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        try:
+            return self._json(self._proyecto(uid).l10n_pe_ne_list())
+        except Exception as e:  # noqa: BLE001
+            return self._fail(e)
+
+    @http.route("/ne/api/proyectos", **_POST)
+    def upsert_proyecto(self, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(lambda: self._proyecto(uid).l10n_pe_ne_upsert(self._body()))
+
+    @http.route("/ne/api/establecimientos/<int:rec_id>", **_DEL)
+    def delete_establecimiento(self, rec_id, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(
+            lambda: self._estab(uid).l10n_pe_ne_delete_establecimiento(rec_id)
+        )
+
     # ------------------------------------------------------------------- caja
     @http.route("/ne/api/caja", **_GET)
     def caja_actual(self, **kw):
@@ -1262,12 +1493,12 @@ class L10nPeNeApi(http.Controller):
         return self._run(lambda: self._lote(uid).l10n_pe_ne_crear_lote(self._body()))
 
     @http.route("/ne/api/lotes/plantilla", **_GET)
-    def lote_plantilla(self, **kw):
+    def lote_plantilla(self, tipo=None, **kw):
         uid = self._identify()
         if not uid:
             return self._unauth()
         try:
-            return self._json(self._lote(uid).l10n_pe_ne_plantilla())
+            return self._json(self._lote(uid).l10n_pe_ne_plantilla(tipo or "comprobante"))
         except Exception as e:  # noqa: BLE001
             return self._fail(e)
 

@@ -97,3 +97,55 @@ class TestBillerSerie(TransactionCase):
         factura.action_post()
         with self.assertRaises(UserError):
             factura._l10n_pe_target()
+
+    def _asigna(self, serie):
+        """Simula el chokepoint de emisión: postea y fija la identidad fiscal (sin ir a SUNAT)."""
+        move = self._move(l10n_pe_serie=serie)
+        move.action_post()
+        move._l10n_pe_ne_assign_numero()
+        return move
+
+    def test_correlativo_por_serie_no_comparte_contador(self):
+        """El correlativo es POR SERIE: intercalar emisiones de F888 y F777 no crea huecos en
+        ninguna. Antes el folio del diario era un contador global compartido entre series (F001
+        se saltaba números cuando una boleta/nota tomaba el correlativo intermedio)."""
+        a1 = self._asigna('F888')
+        b1 = self._asigna('F777')
+        a2 = self._asigna('F888')
+        a3 = self._asigna('F888')
+        b2 = self._asigna('F777')
+        self.assertEqual((a1.l10n_pe_ne_serie_emit, a1.l10n_pe_ne_corr_emit), ('F888', '00000001'))
+        self.assertEqual(a2.l10n_pe_ne_corr_emit, '00000002')
+        self.assertEqual(a3.l10n_pe_ne_corr_emit, '00000003')  # consecutivo pese a las F777 en medio
+        self.assertEqual((b1.l10n_pe_ne_serie_emit, b1.l10n_pe_ne_corr_emit), ('F777', '00000001'))
+        self.assertEqual(b2.l10n_pe_ne_corr_emit, '00000002')
+
+    def test_asignar_numero_es_idempotente(self):
+        """Fijar el número dos veces no lo avanza: la identidad fiscal se asigna una sola vez."""
+        move = self._asigna('F888')
+        corr = move.l10n_pe_ne_corr_emit
+        move._l10n_pe_ne_assign_numero()
+        self.assertEqual(move.l10n_pe_ne_corr_emit, corr)
+        # y _l10n_pe_serie_correlativo devuelve el valor CONGELADO, no el folio del asiento
+        self.assertEqual(move._l10n_pe_serie_correlativo(), ('F888', str(int(corr))))
+
+    def test_correlativo_manual_sigue_teniendo_prioridad(self):
+        """Un correlativo manual se respeta y NO consume la secuencia por serie."""
+        manual = self._move(l10n_pe_serie='F888', l10n_pe_correlativo='500')
+        manual.action_post()
+        manual._l10n_pe_ne_assign_numero()
+        self.assertEqual(manual.l10n_pe_ne_corr_emit, '00000500')
+        # la secuencia arranca en 1 (el manual no la tocó)
+        auto = self._asigna('F888')
+        self.assertEqual(auto.l10n_pe_ne_corr_emit, '00000001')
+
+    def test_secuencia_siembra_desde_lo_ya_emitido(self):
+        """Al primer uso, la secuencia por serie se siembra tras el correlativo más alto ya
+        emitido en esa serie (migración transparente desde el folio global previo)."""
+        previo = self._move(l10n_pe_serie='F888')
+        previo.action_post()
+        # simula un histórico emitido con corr 42 (como los que dejó el folio global)
+        previo.l10n_pe_ne_serie_emit = 'F888'
+        previo.l10n_pe_ne_corr_emit = '00000042'
+        nuevo = self._asigna('F888')
+        self.assertEqual(nuevo.l10n_pe_ne_corr_emit, '00000043')

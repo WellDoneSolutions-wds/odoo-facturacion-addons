@@ -1079,7 +1079,7 @@ class L10nPeNeGuiaRemision(models.Model):
     # ------------------------------------------------------- serialización
     def _l10n_pe_ne_guia_dict(self):
         self.ensure_one()
-        return {
+        resp = {
             'id': self.id,
             'numero': self.name,
             'destinatario': self.partner_id.name or '',
@@ -1091,6 +1091,10 @@ class L10nPeNeGuiaRemision(models.Model):
             'items': len(self.line_ids),
             'mensaje': self.l10n_pe_biller_message or '',
         }
+        _logger.info("----------------------- Guia %s ---------------------", self.name)
+        _logger.info('guia_dict: %s', resp)
+        _logger.info('estado: %s', self.estado)
+        return resp
 
     def l10n_pe_ne_guia_detalle(self):
         """Detalle completo para el formulario/PDF: cabecera + bienes."""

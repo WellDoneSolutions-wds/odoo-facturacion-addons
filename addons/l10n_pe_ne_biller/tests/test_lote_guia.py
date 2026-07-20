@@ -118,6 +118,22 @@ class TestLoteGuia(TransactionCase):
         # El detalle expone el tipo para que la SPA rotule columnas/errores.
         self.assertEqual(lote.l10n_pe_ne_lote_detalle()["tipo"], "guia")
 
+    def test_guia_motivo_numerico_se_normaliza(self):
+        # Excel suele traer el motivo como número sin cero a la izquierda (1): debe
+        # normalizarse a "01" y validar, no rechazarse con "solo 01 soportado".
+        row = list(_G1); row[3] = 1
+        rep = self._crear([row])
+        self.assertEqual(rep["estado"], "validado", rep.get("errores"))
+        p = json.loads(self.Lote.browse(rep["id"]).fila_ids.payload_json)
+        self.assertEqual(p["motivoTraslado"], "01")
+
+    def test_guia_unidad_se_normaliza_a_mayuscula(self):
+        row = list(_G1); row[17] = "niu"
+        rep = self._crear([row])
+        self.assertEqual(rep["estado"], "validado", rep.get("errores"))
+        p = json.loads(self.Lote.browse(rep["id"]).fila_ids.payload_json)
+        self.assertEqual(p["items"][0]["unidad"], "NIU")
+
     def test_guia_fila_error_validacion(self):
         # Sin destinatario doc → error de validación en esa guía; lote con_errores, sin filas.
         mal = list(_G1); mal[1] = ""

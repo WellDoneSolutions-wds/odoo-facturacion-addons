@@ -445,7 +445,14 @@ class L10nPeNeLote(models.Model):
         ruc_emisor = (self.env.company.vat or "").strip()
         if len(doc) == 11 and doc == ruc_emisor:
             local.append((fn, _("Para el motivo Venta el destinatario no puede ser tu propia empresa")))
-        motivo = first["motivo"] or "01"
+        # Normaliza el motivo: Excel suele traerlo numérico y sin el cero a la izquierda
+        # (1 / 1.0 → "01"), lo que antes disparaba un rechazo confuso "solo 01 soportado".
+        motivo_raw = first["motivo"]
+        if isinstance(motivo_raw, float) and motivo_raw.is_integer():
+            motivo_raw = int(motivo_raw)
+        motivo = (str(motivo_raw).strip() or "01") if motivo_raw not in (None, "") else "01"
+        if motivo.isdigit():
+            motivo = motivo.zfill(2)
         if motivo != "01":
             local.append((fn, _("Solo el motivo 01 (Venta) está soportado en emisión masiva de "
                                 "guías; usa el formulario individual")))
@@ -478,8 +485,10 @@ class L10nPeNeLote(models.Model):
             cant = self._l10n_pe_ne_num(f["cantidad_raw"])
             if cant is None or cant <= 0:
                 local.append((fx, _("La cantidad debe ser mayor a 0"))); cant = cant or 0.0
-            items.append({"descripcion": f["producto"], "cantidad": cant,
-                          "unidad": f["unidad"] or "NIU"})
+            # Unidad SUNAT (cat.06): normaliza a mayúscula ("niu" → "NIU") con default NIU;
+            # una unidad inválida la rechaza el biller/SUNAT por fila (no corrompe el lote).
+            unidad = (str(f["unidad"]).strip().upper() if f["unidad"] else "NIU") or "NIU"
+            items.append({"descripcion": f["producto"], "cantidad": cant, "unidad": unidad})
         if local:
             for fx, msg in local:
                 errores.append({"filaExcel": fx, "venta": guia, "mensaje": msg})

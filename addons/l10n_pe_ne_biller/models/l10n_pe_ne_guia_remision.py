@@ -982,6 +982,8 @@ class L10nPeNeGuiaRemision(models.Model):
         base = icp.get_param('l10n_pe_ne_biller.url', 'http://localhost:8090').rstrip('/')
         timeout = int(icp.get_param('l10n_pe_ne_biller.timeout', '240'))
         headers = {'X-Api-Key': self.company_id.sudo().l10n_pe_ne_api_key or ''}
+        _logger.info("----------------------- Guia %s ---------------------", self.name)
+        _logger.info('tipo_gre: %s', self.tipo_gre)
         if self.tipo_gre == '31':
             endpoint, payload = '/generator/guiaTransportista', self._l10n_pe_ne_build_gre_transportista_payload()
         else:

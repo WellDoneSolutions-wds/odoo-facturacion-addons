@@ -520,7 +520,7 @@ class L10nPeNeGuiaRemision(models.Model):
                     'apellidos': c.apellidos or '',
                     'licencia': c.licencia or '',
                 } for c in secundarios_cond]
-        return {
+        resp = {
             'id': {
                 'ruc': self.company_id.vat or '',
                 'serie': self.serie or 'T001',
@@ -532,6 +532,10 @@ class L10nPeNeGuiaRemision(models.Model):
             'detalle': self._l10n_pe_ne_guia_detalle_lines(),
             'docRelacionado': self._l10n_pe_ne_guia_doc_relacionado(),
         }
+        _logger.info("--------------------- PAYLOAD GRE ---------------------")
+        _logger.debug('GRE payload: %s', json.dumps(resp, indent=2, ensure_ascii=False))
+        _logger.info("--------------------- FIN PAYLOAD GRE ---------------------")
+        return resp
 
     def _l10n_pe_ne_guia_detalle_lines(self):
         """detalle (bienes) del payload — idéntico en remitente y transportista: código

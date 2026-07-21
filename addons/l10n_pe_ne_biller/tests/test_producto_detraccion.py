@@ -101,3 +101,32 @@ class TestProductoDetraccion(TransactionCase):
         p = self.env['product.product'].browse(d['id'])
         self.assertEqual(p.l10n_pe_ne_detraccion_cod, '027')
         self.assertEqual(p.list_price, 999.0)
+
+    def test_import_columna_presente_celda_vacia_limpia_en_existente(self):
+        """Contracara del test anterior: acá la columna DETRACCIÓN SÍ viene en la plantilla
+        (está en `idx`), pero la celda para este CÓDIGO viene VACÍA — el usuario borró el
+        código a propósito. A diferencia de la columna AUSENTE (no se toca el campo), la
+        celda vacía CON columna presente sí debe limpiar el código de detracción ya guardado."""
+        import io, base64, xlsxwriter
+
+        d = self.Move.l10n_pe_ne_create_producto({
+            'descripcion': 'ALQUILER DE ANDAMIOS', 'codigo': 'DTR005',
+            'precio': 300.0, 'taxCode': '1000', 'tipo': 'servicio', 'detraCod': '022',
+        })
+        self.assertEqual(d['detraCod'], '022')
+
+        buf = io.BytesIO()
+        wb = xlsxwriter.Workbook(buf, {"in_memory": True})
+        ws = wb.add_worksheet("Productos")
+        # Columna DETRACCIÓN presente, celda vacía para el mismo CÓDIGO (DTR005).
+        ws.write_row(0, 0, ["CÓDIGO", "NOMBRE", "UNIDAD", "PRECIO VENTA", "AFECTACIÓN", "DETRACCIÓN"])
+        ws.write_row(1, 0, ["DTR005", "ALQUILER DE ANDAMIOS", "UNIDAD", 300, "GRAVADO", ""])
+        wb.close()
+        res = self.Move.l10n_pe_ne_importar_productos({
+            "contentB64": base64.b64encode(buf.getvalue()).decode(),
+            "commit": True,
+        })
+        self.assertFalse(res.get("errores"), res)
+
+        p = self.env['product.product'].browse(d['id'])
+        self.assertFalse(p.l10n_pe_ne_detraccion_cod)

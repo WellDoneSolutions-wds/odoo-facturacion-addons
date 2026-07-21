@@ -82,6 +82,17 @@ class ResCompanyGates(models.Model):
         help="Si se activa, quien registra no puede aprobar lo suyo. Actívalo solo si tienes dos "
              "aprobadores reales, o los documentos se quedarán esperando sin poder destrabarse.")
 
+    # Vía A del adelanto. Default False = Vía B intacta (el adelanto es un recibo interno y el
+    # comprobante ÚNICO se emite al final por el total). Con él encendido cada adelanto EMITE su
+    # propio comprobante (factura si RUC / boleta si DNI) y el final lo referencia y descuenta
+    # (anticipo 04 ante SUNAT). Es una decisión FISCAL del dueño del RUC —cambia qué se le entrega al
+    # cliente por su prepago—, por eso vive por compañía y no se colapsa con la política de gates.
+    l10n_pe_ne_adelanto_facturado = fields.Boolean(
+        string="Facturar los adelantos (Vía A)", default=False,
+        help="Si se activa, cada adelanto emite su propio comprobante (factura o boleta) y el "
+             "comprobante final lo descuenta. Apagado: el adelanto es un recibo interno y el "
+             "comprobante único va al final por el total.")
+
     def l10n_pe_ne_gate(self, key, magnitud=None):
         """Modo EFECTIVO del gate para esta magnitud: 'off' | 'aviso' | 'bloquea'. modo='off' o
         magnitud bajo el umbral -> 'off'. modo y umbral son dos ejes; con umbral=0 y modo activo la
@@ -123,6 +134,7 @@ class ResCompanyGates(models.Model):
                 "aviso": self._l10n_pe_ne_politica_frase(key, modo, umbral),
             }
         out["exigirSegregacion"] = self.l10n_pe_ne_exigir_segregacion
+        out["adelantoFacturado"] = self.l10n_pe_ne_adelanto_facturado
         return out
 
     @api.model
@@ -149,4 +161,15 @@ class ResCompanyGates(models.Model):
             raise AccessError(_("Solo el dueño o un supervisor cambia las políticas de control."))
         company = self.env.user.company_id.sudo()
         company.write({"l10n_pe_ne_exigir_segregacion": bool(activo)})
+        return company.l10n_pe_ne_politicas_dict()
+
+    @api.model
+    def l10n_pe_ne_set_adelanto_facturado(self, activo):
+        # Elegir la vía del adelanto (facturarlo o no) es la misma autoridad que cualquier política de
+        # control: dueño/supervisor del RUC, scope duro por compañía. Espeja set_exigir_segregacion.
+        if not (self.env.user.has_group("l10n_pe_ne_roles.group_l10n_pe_ne_supervisor")
+                or self.env.user.has_group("base.group_system")):
+            raise AccessError(_("Solo el dueño o un supervisor cambia las políticas de control."))
+        company = self.env.user.company_id.sudo()
+        company.write({"l10n_pe_ne_adelanto_facturado": bool(activo)})
         return company.l10n_pe_ne_politicas_dict()

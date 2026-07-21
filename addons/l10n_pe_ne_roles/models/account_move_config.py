@@ -35,8 +35,17 @@ class AccountMove(models.Model):
         orden = self.env["l10n_pe_ne.orden.trabajo"].sudo().search(
             [("factura_final_id", "=", self.id)], limit=1)
         if orden and orden.adelanto_monto:
-            linea = "Adelanto a cuenta: S/ %.2f%s" % (
-                orden.adelanto_monto,
-                (" (%s)" % orden.medio_adelanto) if orden.medio_adelanto else "")
+            if orden.anticipo_factura_id:
+                # Vía A: el adelanto tiene su PROPIO comprobante (el cliente ya lo recibió). El ticket
+                # lo nombra —no dice "a cuenta", que sugiere recibo interno— para que la trazabilidad
+                # entre ambos documentos quede impresa.
+                linea = "Anticipo facturado: %s — S/ %.2f%s" % (
+                    orden.anticipo_factura_id.name or orden.anticipo_factura_id.id,
+                    orden.adelanto_monto,
+                    (" (%s)" % orden.medio_adelanto) if orden.medio_adelanto else "")
+            else:
+                linea = "Adelanto a cuenta: S/ %.2f%s" % (
+                    orden.adelanto_monto,
+                    (" (%s)" % orden.medio_adelanto) if orden.medio_adelanto else "")
             txt = (txt + "\n" + linea) if txt else linea
         return txt

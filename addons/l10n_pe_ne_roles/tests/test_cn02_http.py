@@ -123,6 +123,50 @@ class TestCn02Http(EnvioSincronoMixin, HttpCase):
         self.assertEqual(esperados.get("Yape"), 50.0)
         self.assertEqual(esperados.get("Efectivo"), 68.0)
 
+    # ── camino feliz Vía A (anticipo facturado, activado por HTTP) ──────────────
+    def test_camino_feliz_via_a(self):
+        # el dueño/supervisor activa la Vía A por su endpoint de políticas
+        sc, pol = self._post("/politicas/adelanto-facturado", self.supervisor, {"activo": True})
+        self.assertEqual(sc, 200, pol)
+        self.assertTrue(pol["adelantoFacturado"])
+        self._abrir_caja(self.cajero)
+        sc, orden = self._crear_orden(self.recepcion)
+        self.assertEqual(sc, 200, orden)
+        oid = orden["id"]
+        # el cajero cobra el adelanto -> EMITE el comprobante del anticipo (la respuesta lo trae)
+        with patch(_EMIT, return_value=_OK):
+            sc, r = self._post("/ordenes/%s/adelanto" % oid, self.cajero, {"monto": 50, "medio": "Yape"})
+        self.assertEqual(sc, 200, r)
+        self.assertEqual(r["estado"], "encolada")
+        self.assertEqual(r["adelanto"], 50.0)
+        self.assertTrue(r["anticipoFacturaId"])
+        anticipo_numero = r["anticipoNumero"]
+        self.assertTrue(anticipo_numero)
+        # el operario toma y termina
+        sc, r = self._post("/ordenes/%s/tomar" % oid, self.operario)
+        self.assertEqual(sc, 200, r)
+        sc, r = self._post("/ordenes/%s/terminar" % oid, self.operario)
+        self.assertEqual(sc, 200, r)
+        # el cliente vuelve, el cajero cobra el saldo y entrega: el final referencia el anticipo
+        with patch(_EMIT, return_value=_OK):
+            sc, r = self._post("/ordenes/%s/cobrar-saldo" % oid, self.cajero, {"medio": "Efectivo"})
+        self.assertEqual(sc, 200, r)
+        self.assertEqual(r["estado"], "entregada")
+        self.assertEqual(r["saldoCobrado"], 68.0)
+        # otra orden con el adelanto ya facturado: anularla se BLOQUEA (hay que emitir la NC primero),
+        # y el mensaje nombra el comprobante del anticipo.
+        sc, orden2 = self._crear_orden(self.recepcion)
+        oid2 = orden2["id"]
+        with patch(_EMIT, return_value=_OK):
+            sc, r2 = self._post("/ordenes/%s/adelanto" % oid2, self.cajero,
+                                {"monto": 50, "medio": "Efectivo"})
+        self.assertEqual(sc, 200, r2)
+        numero2 = r2["anticipoNumero"]
+        sc, err = self._post("/ordenes/%s/anular" % oid2, self.supervisor, {"motivo": "cliente desistió"})
+        self.assertEqual(sc, 400, err)
+        self.assertIn("nota de crédito", err["message"])
+        self.assertIn(numero2, err["message"])
+
     # ── escala libre: 1 usuario con todos los roles ─────────────────────────────
     def test_escala_libre_un_usuario(self):
         self._abrir_caja(self.modal)

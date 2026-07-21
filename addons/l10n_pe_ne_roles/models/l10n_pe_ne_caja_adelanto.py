@@ -29,10 +29,21 @@ class L10nPeNeCajaSesionAdelanto(models.Model):
     def _l10n_pe_ne_por_medio_arqueo(self, agr):
         """Suma los adelantos de la sesión al por-medio del arqueo (cada uno por SU medio). Así el
         prepago físico del cliente cuadra el esperado aunque venga por Yape/Tarjeta, sin inflar
-        Efectivo como lo haría un ingreso genérico."""
+        Efectivo como lo haría un ingreso genérico.
+
+        Vía A (anticipo facturado): los adelantos cuya orden ya emitió su comprobante
+        (orden_trabajo_id.anticipo_factura_id seteado) se SALTAN aquí — esa plata ya entra al arqueo
+        por los MEDIOS del comprobante emitido (es una venta de la sesión, la cuenta el seam base);
+        sumarla también aquí sería doble conteo. Corolario: si la emisión del anticipo quedó en
+        'error', esa plata NO aparece en el arqueo hasta re-emitir — mismo contrato que cualquier venta
+        con error (no se cuenta lo que SUNAT aún no aceptó)."""
         por_medio = super()._l10n_pe_ne_por_medio_arqueo(agr)
         for mv in self.movimiento_ids:
             if mv.tipo == "adelanto":
+                # Vía A: el comprobante del anticipo ya aporta esta plata por sus medios (venta de la
+                # sesión). Contar además el movimiento de caja duplicaría el ingreso.
+                if mv.orden_trabajo_id.anticipo_factura_id:
+                    continue
                 medio = (mv.medio or "Efectivo").strip() or "Efectivo"
                 por_medio[medio] = round(por_medio.get(medio, 0.0) + (mv.monto or 0.0), 2)
         return por_medio

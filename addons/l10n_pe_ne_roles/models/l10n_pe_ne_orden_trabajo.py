@@ -8,12 +8,18 @@ la orden nace SIN dueño (user_id NULL = en cola); un usuario con rol taller la 
 que lleva todos los sombreros la cola colapsa a una bandeja única; con N usuarios cada rol ve solo
 su tramo. Jamás se compara identidad de usuarios (escala libre): solo has_group.
 
-Decisión del usuario (2026-07-18, P4): el ADELANTO se trata como RECIBO INTERNO / a cuenta (Vía B).
-No se emite comprobante de anticipo (0104): el adelanto se registra como un movimiento de caja
-estructurado ('adelanto', con su medio) que cuadra el arqueo por su medio; al recoger se emite UN
-comprobante por el TOTAL cuyos 'medios' registran solo el SALDO (lo que entra físicamente en esa
-sesión) — así el adelanto no se cuenta dos veces entre sesiones de caja distintas. El enganche para
-la Vía A (0104) queda previsto (factura_final_id + un futuro adelanto_move_id) sin construirse aún.
+Dos vías del ADELANTO, elegidas por RUC con el switch l10n_pe_ne_adelanto_facturado (default OFF):
+
+  Vía B (default) — RECIBO INTERNO / a cuenta. No se emite comprobante de anticipo: el adelanto se
+  registra como un movimiento de caja estructurado ('adelanto', con su medio) que cuadra el arqueo
+  por su medio; al recoger se emite UN comprobante por el TOTAL cuyos 'medios' registran solo el
+  SALDO — así el adelanto no se cuenta dos veces entre sesiones de caja distintas.
+
+  Vía A (switch ON) — ANTICIPO FACTURADO ante SUNAT. Cada adelanto EMITE su comprobante gravado
+  (factura si RUC / boleta si DNI) vía anticipo_factura_id; el comprobante final lo referencia y lo
+  descuenta (descuento global 04 + relacionados + sumTotalAnticipos, que el biller ya sabe armar). En
+  esta vía la plata entra al arqueo por los MEDIOS del comprobante del anticipo (venta de la sesión),
+  no por el movimiento de caja — que se salta en el seam para no contar doble.
 
 REGLA DURA: 'entregada' lo escribe SOLO l10n_pe_ne_cobrar_saldo tras emitir el comprobante final;
 ninguna arista de _transiciones la escribe (sería una entrega sin cobro). 'entregada'/'anulada' son
@@ -65,6 +71,11 @@ class L10nPeNeOrdenTrabajo(models.Model):
     # dejaría una 'entregada' sin factura a nivel SQL, esquivando la constraint).
     factura_final_id = fields.Many2one("account.move", string="Comprobante final", readonly=True,
                                        ondelete="restrict")
+    # Vía A: el comprobante del ANTICIPO (factura/boleta) que emite el adelanto. restrict como la
+    # factura final — un comprobante fiscal emitido no se borra por debajo dejando la orden colgada;
+    # además el final lo referencia (anticipo 04), así que su vida está atada a la orden.
+    anticipo_factura_id = fields.Many2one("account.move", string="Comprobante del anticipo",
+                                          readonly=True, ondelete="restrict", copy=False)
     fecha_entrega = fields.Datetime(string="Fecha de entrega", readonly=True)
 
     amount_untaxed = fields.Monetary(string="Valor venta", compute="_compute_amounts", store=True,
@@ -144,7 +155,8 @@ class L10nPeNeOrdenTrabajo(models.Model):
         # RPC directo. Sin esto, un operativo podía reescribir adelanto_monto/factura_final_id de
         # una orden ya entregada, divergiendo el registro del comprobante emitido.
         return super()._campos_flujo() + (
-            "adelanto_monto", "medio_adelanto", "adelanto_movimiento_id", "factura_final_id")
+            "adelanto_monto", "medio_adelanto", "adelanto_movimiento_id", "factura_final_id",
+            "anticipo_factura_id")
 
     # Transiciones con nombre (validan los 3 ejes vía _avanzar).
     def l10n_pe_ne_tomar(self):
@@ -160,6 +172,16 @@ class L10nPeNeOrdenTrabajo(models.Model):
     def l10n_pe_ne_anular(self, motivo=None):
         # Nota: anular una orden con adelanto pagado NO devuelve el dinero automáticamente; el
         # reembolso es un retiro de caja manual (v1). Por eso 'encolada'→anulada exige supervisor.
+        self.ensure_one()
+        # Vía A: si el adelanto ya se facturó, anular la orden dejaría vivo un comprobante de anticipo
+        # sin regularizar ante SUNAT. La reversión es un acto fiscal explícito (nota de crédito del
+        # anticipo), no un efecto colateral de anular: se exige revertirlo ANTES.
+        if self.anticipo_factura_id and \
+                self.anticipo_factura_id.l10n_pe_biller_state not in ("anulado", "rechazado"):
+            raise UserError(_(
+                "El adelanto ya se facturó en el comprobante %s: emite primero su nota de crédito "
+                "y luego anula la orden.")
+                % (self.anticipo_factura_id.name or self.anticipo_factura_id.id))
         self._avanzar("anulada", motivo=motivo)
         return self._l10n_pe_ne_orden_dict()
 
@@ -181,8 +203,10 @@ class L10nPeNeOrdenTrabajo(models.Model):
         if monto <= 0:
             raise UserError(_("El adelanto debe ser mayor a 0."))
         if monto >= self.amount_total:
-            # A17: en Vía B el pago 100% adelantado NO tiene flujo (habría que emitir al recibirlo,
-            # que es exactamente la Vía A / anticipo 0104, aún no construida). Mensaje honesto.
+            # A17: el adelanto es PARCIAL por definición en AMBAS vías. Un pago 100% adelantado no es
+            # un anticipo: se emite el comprobante ÚNICO por el total de una vez (el trabajo queda
+            # pendiente de entrega). En Vía A un "anticipo" que iguala el total no tendría saldo que
+            # regularizar; en Vía B dejaría el comprobante final con medios=0. Mensaje honesto.
             raise UserError(_(
                 "El adelanto (S/ %(a).2f) no puede cubrir o superar el total (S/ %(t).2f): es un "
                 "pago PARCIAL a cuenta. Si el cliente paga todo por adelantado, emite el "
@@ -193,13 +217,44 @@ class L10nPeNeOrdenTrabajo(models.Model):
         mov = self.env["l10n_pe_ne.caja.sesion"]._l10n_pe_ne_registrar_adelanto(
             monto, medio, self.partner_id, _("Adelanto %s") % self.name)
         mov.orden_trabajo_id = self.id
+        # Vía A (anticipo facturado ante SUNAT): si el RUC lo activó, el adelanto EMITE su propio
+        # comprobante gravado (factura/boleta) que el comprobante final referenciará y descontará. Va
+        # ANTES del write de estado: si SUNAT rechaza, quick_emit lanza y toda la transacción (incluido
+        # el movimiento de caja) revierte — no queda un adelanto a medias. Si está apagado, cero cambios.
+        anticipo_move_id = False
+        anticipo_numero = ""
+        if self.company_id.l10n_pe_ne_adelanto_facturado:
+            res_ant = self.env["account.move"].l10n_pe_ne_quick_emit(
+                self._l10n_pe_ne_payload_anticipo(monto, medio))
+            anticipo_move_id = res_ant.get("id") if isinstance(res_ant, dict) else False
+            anticipo_numero = (res_ant or {}).get("numero") or ""
+            if anticipo_move_id:
+                move = self.env["account.move"].browse(anticipo_move_id)
+                anticipo_numero = anticipo_numero or move.name or str(anticipo_move_id)
+                # Ajuste de céntimos (espejo del A14 de cobrar_saldo): el motor de impuestos redondea
+                # por línea; si el total emitido difiere del monto pedido, la referencia fiscal del
+                # final debe calzar con el doc REALMENTE emitido — se reescriben los medios del
+                # anticipo con el real y se usa el real como adelanto.
+                real = round(move.amount_total or 0.0, 2)
+                if real > 0 and abs(real - monto) > 0.005:
+                    move.sudo().l10n_pe_ne_medios_pago = [{"medio": medio, "monto": real}]
+                    monto = real
         # Encolar (borrador→encolada) NO es una arista del mixin: se hace aquí, atado al adelanto.
-        # Flag _FLUJO_OK: escritura de estado AUTORIZADA (no es un write RPC crudo).
-        self.with_context(l10n_pe_ne_flujo_ok=True).write({
-            "adelanto_monto": monto, "medio_adelanto": medio,
-            "adelanto_movimiento_id": mov.id, "estado": "encolada"})
-        self.message_post(body=_("Adelanto de S/ %(m).2f (%(me)s) cobrado por %(u)s. En cola.",
-                                 m=monto, me=medio, u=self.env.user.name))
+        # Flag _FLUJO_OK: escritura de estado AUTORIZADA (no es un write RPC crudo). anticipo_factura_id
+        # se guarda en el MISMO write que adelanto_monto/estado: la referencia y el importe fiscal viajan
+        # juntos y quedan bajo el blindaje de _campos_flujo.
+        vals = {"adelanto_monto": monto, "medio_adelanto": medio,
+                "adelanto_movimiento_id": mov.id, "estado": "encolada"}
+        if anticipo_move_id:
+            vals["anticipo_factura_id"] = anticipo_move_id
+        self.with_context(l10n_pe_ne_flujo_ok=True).write(vals)
+        if anticipo_move_id:
+            self.message_post(body=_(
+                "Adelanto de S/ %(m).2f (%(me)s) facturado por %(u)s en el comprobante %(c)s. En cola.",
+                m=monto, me=medio, u=self.env.user.name, c=anticipo_numero))
+        else:
+            self.message_post(body=_("Adelanto de S/ %(m).2f (%(me)s) cobrado por %(u)s. En cola.",
+                                     m=monto, me=medio, u=self.env.user.name))
         return self._l10n_pe_ne_orden_dict()
 
     # ───────────────────────────────────────────── fold: cobrar saldo y entregar
@@ -227,11 +282,31 @@ class L10nPeNeOrdenTrabajo(models.Model):
             raise UserError(_(
                 "El saldo por cobrar (S/ %(s).2f) es inválido frente al total (S/ %(t).2f); revisa "
                 "las líneas y el adelanto.", s=self.saldo, t=self.amount_total))
+        # Vía A: el final debe referenciar un anticipo VIGENTE. Si el comprobante del anticipo quedó en
+        # error/rechazado/anulado, la referencia 04 apuntaría a un doc que SUNAT no reconoce (la factura
+        # final sería rechazada). Se bloquea con mensaje claro: primero resolver el anticipo.
+        if self.anticipo_factura_id and \
+                self.anticipo_factura_id.l10n_pe_biller_state in ("error", "rechazado", "anulado"):
+            raise UserError(_(
+                "El comprobante del anticipo %(n)s está en «%(e)s»; resuélvelo antes de cobrar el "
+                "saldo (el final debe referenciar un anticipo vigente).",
+                n=self.anticipo_factura_id.name or self.anticipo_factura_id.id,
+                e=self.anticipo_factura_id.l10n_pe_biller_state))
         medio = (payload.get("medio") or self.medio_adelanto or "Efectivo").strip() or "Efectivo"
         medios = [{"medio": medio,
                    "monto": self.saldo}]
-        res = self.env["account.move"].l10n_pe_ne_quick_emit(
-            self._l10n_pe_ne_payload_emision(medios))
+        payload_emision = self._l10n_pe_ne_payload_emision(medios)
+        # Vía A: el final descuenta el anticipo ya facturado. El biller mapea 'anticipo' → descuento
+        # global 04 + relacionados + sumTotalAnticipos (ver test_anticipo). 'doc' es el número fiscal
+        # del anticipo (serie-correlativo a 8 dígitos, ej. F001-00000100); 'tipo' 02 si fue factura, 03
+        # si boleta.
+        if self.anticipo_factura_id:
+            payload_emision["anticipo"] = {
+                "total": self.adelanto_monto,
+                "doc": self._l10n_pe_ne_anticipo_doc_ref(),
+                "tipo": "02" if self._l10n_pe_ne_anticipo_es_factura() else "03",
+            }
+        res = self.env["account.move"].l10n_pe_ne_quick_emit(payload_emision)
         move_id = res.get("id") if isinstance(res, dict) else False
         # A14: el motor de impuestos redondea por línea; si el total del comprobante difiere en
         # céntimos del total de la orden, el arqueo debe contar el dinero REAL: se reescribe el
@@ -257,14 +332,25 @@ class L10nPeNeOrdenTrabajo(models.Model):
             "total": self.amount_total,
         }
 
+    def _l10n_pe_ne_cliente_emision(self):
+        """tipoDoc del comprobante + bloque 'cliente' de quick_emit, resueltos del partner de la orden.
+        Compartido por el anticipo (Vía A) y el comprobante final: ambos van al MISMO cliente y con el
+        MISMO criterio factura/boleta (A13: cat. 06 real; fallback a la heurística por longitud del vat).
+        clienteId ancla el comprobante al mismo partner de la orden."""
+        self.ensure_one()
+        p = self.partner_id
+        vat_code = p.l10n_latam_identification_type_id.l10n_pe_vat_code or ""
+        tipo_doc = "01" if (vat_code == "6" or (p.vat and len(p.vat) == 11)) else "03"
+        cliente = {"clienteId": p.id,
+                   "tipoDoc": vat_code or ("6" if tipo_doc == "01" else "1"),
+                   "numDoc": p.vat or "", "razonSocial": p.name or ""}
+        return tipo_doc, cliente
+
     def _l10n_pe_ne_payload_emision(self, medios=None):
         """Payload de quick_emit desde las líneas de la orden. La línea guarda precio CON IGV; quick_
         emit espera precioUnitario SIN IGV → se convierte (afecto: /(1+IGV); no gravado: tal cual)."""
         self.ensure_one()
-        p = self.partner_id
-        # A13: tipoDoc por el TIPO de identificación real (cat. 06); fallback a la heurística.
-        vat_code = p.l10n_latam_identification_type_id.l10n_pe_vat_code or ""
-        tipo_doc = "01" if (vat_code == "6" or (p.vat and len(p.vat) == 11)) else "03"
+        tipo_doc, cliente = self._l10n_pe_ne_cliente_emision()
         lineas = []
         for l in self.linea_ids:
             base = round(l.precio_unitario / (1 + IGV_RATE), 6) if l.afecto_igv else l.precio_unitario
@@ -279,14 +365,52 @@ class L10nPeNeOrdenTrabajo(models.Model):
             })
         return {
             "tipoDoc": tipo_doc,
-            # A13: clienteId ancla el comprobante al MISMO partner de la orden.
-            "cliente": {"clienteId": p.id,
-                        "tipoDoc": vat_code or ("6" if tipo_doc == "01" else "1"),
-                        "numDoc": p.vat or "", "razonSocial": p.name or ""},
+            "cliente": cliente,
             "lineas": lineas,
             "formaPago": {"tipo": "Contado",
                           "medios": medios or [{"medio": "Efectivo", "monto": self.saldo}]},
         }
+
+    def _l10n_pe_ne_payload_anticipo(self, monto, medio):
+        """Payload de quick_emit para el comprobante del ANTICIPO (Vía A). Una sola línea gravada
+        ('Anticipo a cuenta — OT-xxxxx', taxCode 1000): el anticipo se factura GRAVADO, así el final
+        puede aplicar el descuento global 04 sobre la base gravada. La línea espera precioUnitario SIN
+        IGV → monto/(1+IGV). Mismo cliente/tipoDoc que el final (así factura↔factura, boleta↔boleta)."""
+        self.ensure_one()
+        tipo_doc, cliente = self._l10n_pe_ne_cliente_emision()
+        base = round(monto / (1 + IGV_RATE), 6)
+        return {
+            "tipoDoc": tipo_doc,
+            "cliente": cliente,
+            "lineas": [{
+                "descripcion": _("Anticipo a cuenta — %s") % self.name,
+                "cantidad": 1,
+                "precioUnitario": base,
+                "taxCode": "1000",
+            }],
+            "formaPago": {"tipo": "Contado", "medios": [{"medio": medio, "monto": monto}]},
+        }
+
+    def _l10n_pe_ne_anticipo_doc_ref(self):
+        """Número fiscal del comprobante de anticipo en el formato que el biller espera en
+        l10n_pe_ne_anticipo_doc (serie-correlativo a 8 dígitos, ej. F001-00000100). Se toma de
+        _l10n_pe_serie_correlativo del move (resuelve el correlativo del folio cuando no es manual);
+        se prefiere lo REALMENTE emitido (serie/corr congelados al enviar) si ya existe."""
+        self.ensure_one()
+        move = self.anticipo_factura_id
+        serie, corr = move._l10n_pe_serie_correlativo()
+        serie = move.l10n_pe_ne_serie_emit or serie
+        corr = move.l10n_pe_ne_corr_emit or corr
+        return "%s-%s" % (serie, str(corr).zfill(8))
+
+    def _l10n_pe_ne_anticipo_es_factura(self):
+        """True si el anticipo se emitió como FACTURA (tipoDoc 01 / serie que empieza con F). Define el
+        'tipo' del relacionado en el final (02 factura, 03 boleta, cat. 12)."""
+        self.ensure_one()
+        move = self.anticipo_factura_id
+        serie, _corr = move._l10n_pe_serie_correlativo()
+        serie = move.l10n_pe_ne_serie_emit or serie
+        return (move.l10n_pe_ne_tipo_doc or "").strip() == "01" or (serie or "")[:1].upper() == "F"
 
     # ───────────────────────────────────────────── acciones (para la SPA)
     def _acciones(self):
@@ -392,6 +516,10 @@ class L10nPeNeOrdenTrabajo(models.Model):
             "saldo": self.saldo,
             "facturaId": self.factura_final_id.id or None,
             "facturaNumero": self.factura_final_id.name or "",
+            # Vía A: el comprobante del anticipo (vacío en Vía B). La SPA solo lo pinta.
+            "anticipoFacturaId": self.anticipo_factura_id.id or None,
+            "anticipoNumero": self.anticipo_factura_id.name or "",
+            "anticipoEstado": self.anticipo_factura_id.l10n_pe_biller_state or "",
             "lineas": [{
                 "descripcion": l.descripcion or (l.product_id.display_name or ""),
                 "cantidad": l.cantidad,

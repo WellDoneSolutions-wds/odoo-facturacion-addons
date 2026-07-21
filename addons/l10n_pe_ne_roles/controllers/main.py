@@ -84,6 +84,15 @@ class L10nPeNeEquipoApi(L10nPeNeApi):
         return self._run(lambda: request.env["res.company"].with_user(uid)
                          .l10n_pe_ne_set_exigir_segregacion(b.get("activo")))
 
+    @http.route("/ne/api/politicas/adelanto-facturado", **_POST)
+    def set_adelanto_facturado(self, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        b = self._body() or {}
+        return self._run(lambda: request.env["res.company"].with_user(uid)
+                         .l10n_pe_ne_set_adelanto_facturado(b.get("activo")))
+
     # ── CN-01: cotización como flujo (transiciones, colas, fold, despacho) ─────
     def _cot(self, uid, rec_id):
         return self._cotizacion(uid).browse(int(rec_id))

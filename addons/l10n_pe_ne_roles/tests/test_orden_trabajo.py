@@ -1,5 +1,15 @@
+from unittest.mock import patch
+
 from odoo.exceptions import AccessError, UserError, ValidationError
 from odoo.tests import TransactionCase, tagged
+
+from odoo.addons.l10n_pe_ne_biller.tests.common import EnvioSincronoMixin
+
+# Doble del POST al facturador: mismo contrato que el HTTP de CN-02 (text = XML firmado, sin CDR en
+# headers). Con el camino SÍNCRONO fijado por EnvioSincronoMixin, la emisión mockeada deja el
+# comprobante en 'enviado' — así podemos ejercer la Vía A (que EMITE) dentro de un TransactionCase.
+_EMIT = "odoo.addons.l10n_pe_ne_biller.models.account_move_biller.requests.post"
+_OK = type("R", (), {"status_code": 200, "text": '<?xml version="1.0"?><Invoice/>', "headers": {}})()
 
 
 @tagged("post_install", "-at_install")
@@ -293,3 +303,178 @@ class TestOrdenTrabajo(TransactionCase):
         cajero = self._user("caj8_ot", ["l10n_pe_ne_roles.group_l10n_pe_ne_caja"])
         vis_caja = set(self.Orden.with_user(cajero).search([]).mapped("estado"))
         self.assertNotIn("en_proceso", vis_caja)
+
+
+@tagged("post_install", "-at_install")
+class TestOrdenTrabajoViaA(EnvioSincronoMixin, TransactionCase):
+    """CN-02 · Vía A (anticipo FACTURADO ante SUNAT). Con company.l10n_pe_ne_adelanto_facturado ON,
+    cada adelanto EMITE su propio comprobante gravado; el final lo referencia y lo descuenta (anticipo
+    04 + relacionados + sumTotalAnticipos), y el arqueo NO re-cuenta ese adelanto por su medio (esa
+    plata ya entra por los medios del comprobante). La emisión al facturador se dobla con _EMIT (mismo
+    contrato que el HttpCase); EnvioSincronoMixin fija el camino síncrono para que el mock aterrice.
+
+    Clase aparte de TestOrdenTrabajo (no la subclasea) para no re-correr la batería de Vía B y para
+    traer el mixin de envío solo donde se EMITE."""
+
+    def setUp(self):
+        super().setUp()
+        self.company = self.env.company
+        self.company.l10n_pe_ne_adelanto_facturado = True   # Vía A encendida para toda la clase
+        self.Orden = self.env["l10n_pe_ne.orden.trabajo"]
+        self.Sesion = self.env["l10n_pe_ne.caja.sesion"]
+        ruc_type = self.env["l10n_latam.identification.type"].search(
+            [("l10n_pe_vat_code", "=", "6")], limit=1)
+        self.cliente = self.env["res.partner"].create({
+            "name": "TALLER VIA A SAC", "vat": "20100070970",
+            "l10n_latam_identification_type_id": ruc_type.id})
+        self.producto = self.env["product.product"].create(
+            {"name": "SERVICIO VIA A", "default_code": "SVCA"})
+
+    # ── fixtures (mismos que TestOrdenTrabajo; replicados para no acoplar la batería) ──
+    def _orden(self, precio=118.0, afecto=True):
+        return self.Orden.create({
+            "partner_id": self.cliente.id,
+            "linea_ids": [(0, 0, {"product_id": self.producto.id, "descripcion": "SERVICIO VIA A",
+                                  "cantidad": 1.0, "precio_unitario": precio, "afecto_igv": afecto})],
+        })
+
+    def _user(self, login, grupos):
+        return self.env["res.users"].create({
+            "name": login, "login": login,
+            "company_id": self.company.id, "company_ids": [(6, 0, [self.company.id])],
+            "group_ids": [(4, self.env.ref("base.group_user").id)]
+                         + [(4, self.env.ref(g).id) for g in grupos],
+        })
+
+    def _cajero(self, login):
+        return self._user(login, ["l10n_pe_ne_roles.group_l10n_pe_ne_caja"])
+
+    def _abrir_caja(self):
+        self.Sesion.search([("estado", "=", "abierta")]).write({"estado": "cerrada"})
+        return self.Sesion.l10n_pe_ne_abrir_caja({"saldoInicial": 0})
+
+    def _adelanto_emitido(self, cajero, precio=118.0, monto=50.0, medio="Yape"):
+        """Orden con su adelanto ya cobrado + FACTURADO (anticipo emitido con el mock)."""
+        orden = self._orden(precio=precio)
+        with patch(_EMIT, return_value=_OK):
+            orden.with_user(cajero).l10n_pe_ne_registrar_adelanto(monto, medio)
+        return orden
+
+    # ── 1) registrar_adelanto EMITE el anticipo y encola ────────────────────────
+    def test_via_a_registrar_adelanto_emite(self):
+        self._abrir_caja()
+        cajero = self._cajero("caj_va1")
+        orden = self._adelanto_emitido(cajero)
+        # la orden quedó encolada y el adelanto registrado
+        self.assertEqual(orden.estado, "encolada")
+        self.assertEqual(orden.adelanto_monto, 50.0)
+        self.assertEqual(orden.saldo, 68.0)
+        # Vía A: se EMITIÓ el comprobante del anticipo (no es Vía B)
+        ant = orden.anticipo_factura_id
+        self.assertTrue(ant, "Vía A: el adelanto emite su propio comprobante")
+        self.assertEqual(ant.l10n_pe_biller_state, "enviado")   # el mock lo deja enviado
+        self.assertEqual(ant.move_type, "out_invoice")
+        # el movimiento de caja sigue ligado a la orden (aunque el arqueo lo salte, la traza queda)
+        mov = orden.adelanto_movimiento_id
+        self.assertTrue(mov)
+        self.assertEqual(mov.tipo, "adelanto")
+        self.assertEqual(mov.orden_trabajo_id, orden)
+
+    # ── 2) arqueo: el seam NO re-cuenta el adelanto facturado ────────────────────
+    def test_via_a_arqueo_sin_doble_conteo(self):
+        self._abrir_caja()
+        cajero = self._cajero("caj_va2")
+        self._adelanto_emitido(cajero, medio="Yape")
+        sesion = self.Sesion.search([("estado", "=", "abierta")], limit=1)
+        # Se pasa un por-medio base con OTRO medio ya presente: el seam debe devolverlo TAL CUAL,
+        # sin sumar el adelanto (esa plata ya entra por los medios del comprobante del anticipo).
+        base = {"porMedio": {"Efectivo": 68.0}}
+        por_medio = sesion._l10n_pe_ne_por_medio_arqueo(base)
+        self.assertEqual(por_medio, {"Efectivo": 68.0})
+        self.assertNotIn("Yape", por_medio)   # el adelanto facturado NO infla el arqueo por su medio
+
+    # ── 3) cobrar_saldo: el final referencia y descuenta el anticipo ─────────────
+    def test_via_a_cobrar_saldo_referencia_anticipo(self):
+        self._abrir_caja()
+        cajero = self._cajero("caj_va3")
+        orden = self._adelanto_emitido(cajero)
+        ant = orden.anticipo_factura_id
+        orden.write({"estado": "terminada"})   # su: saltar el tramo del taller, probamos el cobro
+        with patch(_EMIT, return_value=_OK):
+            orden.with_user(cajero).l10n_pe_ne_cobrar_saldo({"medio": "Efectivo"})
+        self.assertEqual(orden.estado, "entregada")
+        final = orden.factura_final_id
+        self.assertTrue(final)
+        # el final trae el anticipo con su total y su doc en formato SERIE-00000000, derivado del
+        # comprobante del anticipo REALMENTE emitido.
+        self.assertEqual(final.l10n_pe_ne_anticipo_total, orden.adelanto_monto)
+        doc_esperado = "%s-%s" % (ant.l10n_pe_ne_serie_emit, (ant.l10n_pe_ne_corr_emit or "").zfill(8))
+        self.assertEqual(final.l10n_pe_ne_anticipo_doc, doc_esperado)
+        self.assertRegex(final.l10n_pe_ne_anticipo_doc, r"^F\d{3}-\d{8}$")   # factura → serie F
+        self.assertEqual(final.l10n_pe_ne_anticipo_tipo, "02")              # RUC → factura (cat. 12)
+        # contrato del biller (test_anticipo): el XML descuenta el anticipo y lo informa.
+        req = final._l10n_pe_build_invoice_request()
+        self.assertEqual(req["cabecera"]["sumTotalAnticipos"], "50.00")
+        vg = [v for v in req["variablesGlobales"] if v["codTipoVariableGlobal"] == "04"]
+        self.assertEqual(len(vg), 1)                       # descuento global por anticipo presente
+        rel = req["relacionados"][0]
+        self.assertEqual(rel["numDocRelacionado"], doc_esperado)
+        self.assertEqual(rel["tipDocRelacionado"], "02")
+        self.assertEqual(rel["mtoDocRelacionado"], "50.00")
+
+    # ── 4) guarda: no se cobra el saldo con el anticipo en 'error' ───────────────
+    def test_via_a_cobrar_saldo_bloquea_anticipo_en_error(self):
+        self._abrir_caja()
+        cajero = self._cajero("caj_va4")
+        orden = self._adelanto_emitido(cajero)
+        orden.write({"estado": "terminada"})
+        # el comprobante del anticipo quedó en error: el final NO puede referenciar un doc que SUNAT
+        # no reconoce. Se fuerza el estado con sudo (simula un rechazo del facturador).
+        orden.anticipo_factura_id.sudo().l10n_pe_biller_state = "error"
+        with self.assertRaisesRegex(UserError, "anticipo"):
+            orden.with_user(cajero).l10n_pe_ne_cobrar_saldo({"medio": "Efectivo"})
+
+    # ── 5) anular: bloqueada con anticipo vivo; permitida si el anticipo ya se anuló ──
+    def test_via_a_anular_bloqueada_con_anticipo_vivo(self):
+        self._abrir_caja()
+        cajero = self._cajero("caj_va5")
+        orden = self._adelanto_emitido(cajero)
+        ant = orden.anticipo_factura_id
+        sup = self._user("sup_va5", ["l10n_pe_ne_roles.group_l10n_pe_ne_supervisor"])
+        # anticipo 'enviado' (vivo): anular la orden lo dejaría sin regularizar → UserError con el número
+        with self.assertRaises(UserError) as cm:
+            orden.with_user(sup).l10n_pe_ne_anular("cliente desistió")
+        self.assertIn(ant.name, str(cm.exception))
+        self.assertEqual(orden.estado, "encolada")   # no avanzó
+        # con el anticipo ya ANULADO (su), la anulación de la orden sí procede
+        ant.sudo().l10n_pe_biller_state = "anulado"
+        orden.with_user(sup).l10n_pe_ne_anular("cliente desistió")
+        self.assertEqual(orden.estado, "anulada")
+
+    # ── 6) Vía B intacta con el switch APAGADO ──────────────────────────────────
+    def test_via_b_intacta_con_switch_apagado(self):
+        self.company.l10n_pe_ne_adelanto_facturado = False   # apagar: recibo interno, sin emisión
+        self._abrir_caja()
+        cajero = self._cajero("caj_vb6")
+        orden = self._orden(precio=118.0)
+        # sin patch: Vía B NO llama al facturador
+        orden.with_user(cajero).l10n_pe_ne_registrar_adelanto(50.0, "Yape")
+        self.assertEqual(orden.estado, "encolada")
+        self.assertFalse(orden.anticipo_factura_id, "Vía B: no se emite comprobante de anticipo")
+        # y el seam del arqueo SÍ suma el adelanto por su medio (el comportamiento base de CN-02)
+        sesion = self.Sesion.search([("estado", "=", "abierta")], limit=1)
+        por_medio = sesion._l10n_pe_ne_por_medio_arqueo({"porMedio": {}})
+        self.assertEqual(por_medio.get("Yape"), 50.0)
+
+    # ── 7) política set_adelanto_facturado: supervisor OK, cajero AccessError ─────
+    def test_set_adelanto_facturado_gateado_por_supervisor(self):
+        self.company.l10n_pe_ne_adelanto_facturado = False
+        Company = self.env["res.company"]
+        sup = self._user("sup_va7", ["l10n_pe_ne_roles.group_l10n_pe_ne_supervisor"])
+        pol = Company.with_user(sup).l10n_pe_ne_set_adelanto_facturado(True)
+        self.assertTrue(pol["adelantoFacturado"])                    # el dict de políticas lo refleja
+        self.assertTrue(self.company.l10n_pe_ne_adelanto_facturado)  # y quedó persistido
+        # un cajero NO cambia políticas de control
+        cajero = self._cajero("caj_va7")
+        with self.assertRaises(AccessError):
+            Company.with_user(cajero).l10n_pe_ne_set_adelanto_facturado(False)

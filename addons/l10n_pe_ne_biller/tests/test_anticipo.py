@@ -47,7 +47,7 @@ class TestBillerAnticipo(TransactionCase):
         self.assertEqual(len(vg), 1)
         self.assertEqual(vg[0]['mtoVariableGlobal'], '100.00')
         self.assertEqual(vg[0]['mtoBaseImpVariableGlobal'], '500.00')
-        self.assertEqual(vg[0]['porVariableGlobal'], '0.20')
+        self.assertEqual(vg[0]['porVariableGlobal'], '0.20000')  # 5 decimales (SUNAT 3307)
         self.assertEqual(vg[0]['tipVariableGlobal'], 'false')
 
         # 2) Tributo IGV de cabecera sobre la base reducida (500 − 100 = 400 → IGV 72).
@@ -160,7 +160,9 @@ class TestBillerAnticipo(TransactionCase):
     def test_anticipos_pendientes_lista_saldo(self):
         """La lista de pendientes trae el anticipo del cliente con su doc, tipo (cat. 12) y saldo."""
         self._anticipo_A()
-        rows = self.env['account.move'].l10n_pe_ne_anticipos_pendientes(ruc='20100070970')
+        # Filtra por el partner del test (no por RUC compartido) para aislarse de otros anticipos
+        # del mismo RUC que pudieran existir en la DB.
+        rows = self.env['account.move'].l10n_pe_ne_anticipos_pendientes(partner_id=self.partner.id)
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]['doc'], 'F001-00000100')
         self.assertEqual(rows[0]['tipo'], '02')            # factura → cat. 12 = 02
@@ -173,7 +175,7 @@ class TestBillerAnticipo(TransactionCase):
                    l10n_pe_ne_anticipo_origen_id=A.id)
         self.assertAlmostEqual(A.l10n_pe_ne_anticipo_aplicado, 200.0, 2)
         self.assertAlmostEqual(A.l10n_pe_ne_anticipo_saldo, 390.0, 2)
-        rows = self.env['account.move'].l10n_pe_ne_anticipos_pendientes(ruc='20100070970')
+        rows = self.env['account.move'].l10n_pe_ne_anticipos_pendientes(partner_id=self.partner.id)
         self.assertAlmostEqual(rows[0]['saldo'], 390.0, 2)
 
     def test_saldo_agotado_sale_de_pendientes(self):
@@ -183,7 +185,7 @@ class TestBillerAnticipo(TransactionCase):
                    l10n_pe_ne_anticipo_origen_id=A.id)
         self.assertAlmostEqual(A.l10n_pe_ne_anticipo_saldo, 0.0, 2)
         self.assertEqual(self.env['account.move'].l10n_pe_ne_anticipos_pendientes(
-            ruc='20100070970'), [])
+            partner_id=self.partner.id), [])
 
     def test_regularizar_excede_saldo_rechaza(self):
         """Aplicar más de lo que le queda al anticipo se rechaza (evita doble consumo)."""
@@ -203,3 +205,15 @@ class TestBillerAnticipo(TransactionCase):
         payload = B._l10n_pe_build_invoice_request()
         self.assertEqual(len([v for v in payload['variablesGlobales']
                               if v['codTipoVariableGlobal'] == '04']), 1)
+
+    def test_anticipo_parcial_factor_reconstruye_monto(self):
+        """SUNAT 3307: el factor del descuento 04 debe reconstruir el monto (|base·por − monto| ≤ 1)
+        aun con un anticipo parcial cuyo valor NO es fracción redonda de la base (254.24 sobre 1000)."""
+        move = self._move(anticipo_total=300.0, invoice_line_ids=[(0, 0, {
+            'product_id': self.product.id, 'quantity': 1.0, 'price_unit': 1000.0,
+            'tax_ids': [(6, 0, self.igv.ids)]})])
+        vg = [v for v in move._l10n_pe_build_invoice_request()['variablesGlobales']
+              if v['codTipoVariableGlobal'] == '04'][0]
+        base, por, monto = (float(vg['mtoBaseImpVariableGlobal']),
+                            float(vg['porVariableGlobal']), float(vg['mtoVariableGlobal']))
+        self.assertLessEqual(abs(base * por - monto), 1.0)

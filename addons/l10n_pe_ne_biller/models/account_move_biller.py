@@ -556,7 +556,11 @@ class AccountMove(models.Model):
                 {
                     "tipVariableGlobal": "false",
                     "codTipoVariableGlobal": "04",
-                    "porVariableGlobal": "%.2f" % (valor / base if base else 0.0),
+                    # Factor con 5 decimales: SUNAT valida mtoVariableGlobal ≈ base × por (tolerancia
+                    # ~±1, error 3307). Con solo 2 decimales, un anticipo parcial cuyo valor no es
+                    # fracción redonda de la base (p.ej. 254.24 sobre 1000 → 0.25) descuadra y se
+                    # rechaza; 5 decimales reconstruyen el monto dentro de la tolerancia.
+                    "porVariableGlobal": "%.5f" % (valor / base if base else 0.0),
                     "monMontoVariableGlobal": moneda,
                     "mtoVariableGlobal": fmt(valor),
                     "monBaseImponibleVariableGlobal": moneda,

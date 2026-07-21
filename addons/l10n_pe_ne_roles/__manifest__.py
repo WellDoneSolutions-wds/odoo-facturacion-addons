@@ -1,6 +1,6 @@
 {
     'name': 'NE Express — Roles y flujos de trabajo',
-    'version': '19.0.1.6.0',
+    'version': '19.0.1.7.0',
     'post_init_hook': 'post_init_hook',
     'category': 'Accounting/Localizations/EDI',
     'summary': 'Roles por rol funcional y mixin de flujo (estado + cola + auditoría) para los '

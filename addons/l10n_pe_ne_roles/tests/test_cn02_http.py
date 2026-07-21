@@ -206,6 +206,32 @@ class TestCn02Http(EnvioSincronoMixin, HttpCase):
         sc, cola = self._get("/ordenes/cola", self.operario)
         self.assertIn(oid, [i["id"] for i in cola["items"]])
 
+    # ── PUENTE cotización → orden de taller (e2e por rol REAL) ──────────────────
+    def test_puente_cotizacion_a_orden(self):
+        # recepción cotiza y ACEPTA; POST /ordenes {cotizacionId} abre la orden con las líneas
+        # copiadas; repetir sobre la misma cotización → 400 (una cotización abre UNA orden).
+        sc, cot = self._post("/cotizaciones", self.recepcion, {
+            "clienteId": self.cliente.id,
+            "items": [{"productId": self.servicio.id, "descripcion": "Mantenimiento mayor",
+                       "cantidad": 2, "precio": 59.0, "afectoIgv": True}]})
+        self.assertEqual(sc, 200, cot)
+        cid = cot["id"]
+        sc, r = self._post("/cotizaciones/%s/aceptar" % cid, self.recepcion)
+        self.assertEqual(sc, 200, r)
+        self.assertEqual(r["estado"], "aceptada")
+        # SOLO cotizacionId (sin items) → la orden NACE de la cotización
+        sc, orden = self._post("/ordenes", self.recepcion, {"cotizacionId": cid})
+        self.assertEqual(sc, 200, orden)
+        self.assertEqual(orden["cotizacionId"], cid)
+        self.assertEqual(len(orden["lineas"]), 1)
+        self.assertEqual(orden["lineas"][0]["cantidad"], 2.0)
+        self.assertEqual(orden["lineas"][0]["precio"], 59.0)
+        self.assertEqual(orden["total"], 118.0)   # 2 × 59 (precio CON IGV)
+        # repetir sobre la misma cotización → 400 nombrando la orden ya abierta
+        sc, err = self._post("/ordenes", self.recepcion, {"cotizacionId": cid})
+        self.assertEqual(sc, 400, err)
+        self.assertIn(orden["name"], err["message"])
+
     # ── reglas de negocio del adelanto ──────────────────────────────────────────
     def test_adelanto_debe_ser_parcial(self):
         self._abrir_caja(self.cajero)

@@ -304,6 +304,134 @@ class TestOrdenTrabajo(TransactionCase):
         vis_caja = set(self.Orden.with_user(cajero).search([]).mapped("estado"))
         self.assertNotIn("en_proceso", vis_caja)
 
+    # ── PUENTE cotización → orden de taller ─────────────────────────────────────
+    def _cotizacion(self, estado="aceptada", partner=None, lineas=None):
+        """Cotización de ORIGEN para el puente. Su cliente es OTRO (distinto al de la orden) por
+        defecto —así se puede verificar que la orden hereda el partner de la cotización— y trae dos
+        líneas (una gravada, una no) para cubrir la copia de afecto_igv. Se fija el estado por write
+        de sistema (su): es un fixture, no ejerce el eje grupo del flujo (eso lo prueba CN-01)."""
+        partner = partner or self.env["res.partner"].create({"name": "CLIENTE COTIZA SAC"})
+        if lineas is None:
+            lineas = [
+                (0, 0, {"product_id": self.producto.id, "descripcion": "Cambio de aceite",
+                        "cantidad": 2.0, "precio_unitario": 59.0, "afecto_igv": True}),
+                (0, 0, {"descripcion": "Mano de obra exonerada", "cantidad": 1.0,
+                        "precio_unitario": 40.0, "afecto_igv": False}),
+            ]
+        cot = self.env["l10n_pe_ne.cotizacion"].create(
+            {"partner_id": partner.id, "line_ids": lineas})
+        if estado:
+            cot.write({"estado": estado})
+        return cot
+
+    def test_puente_copia_lineas_partner_y_total(self):
+        # aceptada + SIN items → la orden NACE de la cotización: copia las líneas (mismo número,
+        # descripción, cantidad, precio CON IGV y afecto_igv), hereda el partner y calza el total.
+        cot = self._cotizacion(estado="aceptada")
+        r = self.Orden.l10n_pe_ne_crear_orden({"cotizacionId": cot.id})
+        orden = self.Orden.browse(r["id"])
+        self.assertEqual(orden.cotizacion_id, cot)
+        self.assertEqual(orden.partner_id, cot.partner_id)
+        self.assertNotEqual(orden.partner_id, self.cliente, "el partner sale de la cotización")
+        self.assertEqual(len(orden.linea_ids), len(cot.line_ids))
+        por_desc = {l.descripcion: l for l in orden.linea_ids}
+        for cl in cot.line_ids:
+            ol = por_desc[cl.descripcion]
+            self.assertEqual(ol.cantidad, cl.cantidad)
+            self.assertEqual(ol.precio_unitario, cl.precio_unitario)   # mismo precio CON IGV
+            self.assertEqual(ol.afecto_igv, cl.afecto_igv)
+        self.assertEqual(orden.amount_total, cot.amount_total)
+
+    def test_puente_exige_cotizacion_aceptada(self):
+        # borrador y convertida NO abren orden: sin acuerdo cerrado / ya vendida por mostrador
+        # (doble venta). El mensaje nombra el estado real por honestidad.
+        cot_borr = self._cotizacion(estado="borrador")
+        with self.assertRaisesRegex(UserError, "ACEPTADA"):
+            self.Orden.l10n_pe_ne_crear_orden({"cotizacionId": cot_borr.id})
+        cot_conv = self._cotizacion(estado="convertida")
+        with self.assertRaisesRegex(UserError, "ACEPTADA"):
+            self.Orden.l10n_pe_ne_crear_orden({"cotizacionId": cot_conv.id})
+
+    def test_puente_una_orden_por_cotizacion(self):
+        # una cotización aceptada abre UNA orden; el segundo intento nombra la primera. Tras ANULAR
+        # la primera (ya no la referencia una orden viva), el puente vuelve a abrir.
+        cot = self._cotizacion(estado="aceptada")
+        r1 = self.Orden.l10n_pe_ne_crear_orden({"cotizacionId": cot.id})
+        orden1 = self.Orden.browse(r1["id"])
+        with self.assertRaises(UserError) as cm:
+            self.Orden.l10n_pe_ne_crear_orden({"cotizacionId": cot.id})
+        self.assertIn(orden1.name, str(cm.exception))
+        cajero = self._user("caj_puente_ot", ["l10n_pe_ne_roles.group_l10n_pe_ne_caja"])
+        orden1.with_user(cajero).l10n_pe_ne_anular("cliente desistió")
+        r2 = self.Orden.l10n_pe_ne_crear_orden({"cotizacionId": cot.id})
+        orden2 = self.Orden.browse(r2["id"])
+        self.assertNotEqual(orden2.id, orden1.id)
+        self.assertEqual(orden2.cotizacion_id, cot)
+
+    def test_puente_items_explicitos_mandan(self):
+        # con items en el payload, los ítems GANAN (nº de líneas = las pasadas); la cotización queda
+        # solo como referencia trazable y el partner sale del clienteId, no de la cotización.
+        cot = self._cotizacion(estado="aceptada")   # trae 2 líneas
+        r = self.Orden.l10n_pe_ne_crear_orden({
+            "clienteId": self.cliente.id, "cotizacionId": cot.id,
+            "items": [{"descripcion": "Diagnóstico express", "cantidad": 1, "precio": 30.0}]})
+        orden = self.Orden.browse(r["id"])
+        self.assertEqual(len(orden.linea_ids), 1, "mandan los items, no las 2 líneas de la cotización")
+        self.assertEqual(orden.linea_ids.descripcion, "Diagnóstico express")
+        self.assertEqual(orden.cotizacion_id, cot, "la referencia trazable queda")
+        self.assertEqual(orden.partner_id, self.cliente)
+
+    def test_cotizacion_expone_orden_creada(self):
+        # el dict de la cotización expone la orden de taller que abrió (para que la SPA navegue y no
+        # vuelva a ofrecer "crear orden"). Vacío mientras no exista.
+        cot = self._cotizacion(estado="aceptada")
+        d0 = cot._l10n_pe_ne_cotizacion_dict()
+        self.assertIsNone(d0["ordenTrabajoId"])
+        self.assertEqual(d0["ordenTrabajoName"], "")
+        r = self.Orden.l10n_pe_ne_crear_orden({"cotizacionId": cot.id})
+        orden = self.Orden.browse(r["id"])
+        d1 = cot._l10n_pe_ne_cotizacion_dict()
+        self.assertEqual(d1["ordenTrabajoId"], orden.id)
+        self.assertEqual(d1["ordenTrabajoName"], orden.name)
+
+    # ── FIFO de las colas ───────────────────────────────────────────────────────
+    def test_cola_ordenes_fifo_por_fecha_encolada(self):
+        # FIFO por LLEGADA a la cola (fecha_encolada), no por id: X se creó ANTES que Y (id menor)
+        # pero Y se adelantó primero → Y debe salir primero. Datetime.now() trunca a segundos y dos
+        # adelantos del test caerían en el mismo segundo; se fijan fechas distintas para probar el
+        # ORDER BY, no el reloj (el estampado real lo cubre test_fecha_encolada_se_estampa).
+        self._abrir_caja()
+        cajero = self._user("caj_fifo_ot", ["l10n_pe_ne_roles.group_l10n_pe_ne_caja"])
+        x = self._orden(precio=118.0)
+        y = self._orden(precio=118.0)
+        self.assertLess(x.id, y.id, "X se creó antes (id menor)")
+        y.with_user(cajero).l10n_pe_ne_registrar_adelanto(50.0, "Efectivo")   # Y llega primero
+        x.with_user(cajero).l10n_pe_ne_registrar_adelanto(50.0, "Efectivo")
+        y.sudo().write({"fecha_encolada": "2026-07-01 08:00:00"})
+        x.sudo().write({"fecha_encolada": "2026-07-01 09:00:00"})
+        cola = self.Orden.l10n_pe_ne_cola_ordenes()
+        ids = [i["id"] for i in cola["items"] if i["id"] in (x.id, y.id)]
+        self.assertEqual(ids, [y.id, x.id], "fecha_encolada manda, no el id")
+
+    def test_fecha_encolada_se_estampa(self):
+        # la fecha de encolado se estampa al ADELANTAR (no al crear el borrador) y sale en el dict.
+        self._abrir_caja()
+        orden = self._orden(precio=118.0)
+        self.assertFalse(orden.fecha_encolada, "borrador: aún sin turno de cola")
+        self.assertEqual(orden._l10n_pe_ne_orden_dict()["fechaEncolada"], "")
+        cajero = self._user("caj_enc_ot", ["l10n_pe_ne_roles.group_l10n_pe_ne_caja"])
+        orden.with_user(cajero).l10n_pe_ne_registrar_adelanto(50.0, "Efectivo")
+        self.assertTrue(orden.fecha_encolada, "el adelanto estampa la llegada a la cola")
+        self.assertTrue(orden._l10n_pe_ne_orden_dict()["fechaEncolada"])
+
+    def test_cola_adelanto_fifo_por_id(self):
+        # cola de cobro del adelanto: FIFO por registro (id asc) — la que entró antes sale primero.
+        a = self._orden()   # borrador
+        b = self._orden()   # borrador
+        cola = self.Orden.l10n_pe_ne_cola_adelanto()
+        ids = [i["id"] for i in cola["items"] if i["id"] in (a.id, b.id)]
+        self.assertEqual(ids, [a.id, b.id])
+
 
 @tagged("post_install", "-at_install")
 class TestOrdenTrabajoViaA(EnvioSincronoMixin, TransactionCase):

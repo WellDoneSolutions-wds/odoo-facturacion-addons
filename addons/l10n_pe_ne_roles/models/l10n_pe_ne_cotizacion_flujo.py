@@ -312,6 +312,11 @@ class L10nPeNeCotizacionFlujo(models.Model):
     # ───────────────────────────────────────────── serialización
     def _l10n_pe_ne_cotizacion_dict(self):
         d = super()._l10n_pe_ne_cotizacion_dict()
+        # PUENTE cotización→taller: si esta cotización ya abrió una orden de taller (no anulada), la
+        # SPA lo ve — para navegar a la orden y para no ofrecer "crear orden" de nuevo. Si el usuario
+        # no puede leer órdenes, la ir.rule filtra el search a vacío (None/""), sin error.
+        orden = self.env["l10n_pe_ne.orden.trabajo"].search(
+            [("cotizacion_id", "=", self.id), ("estado", "!=", "anulada")], limit=1)
         d.update({
             "estadoDespacho": self.estado_despacho,
             "despachador": self.despachador_id.name or "",
@@ -320,6 +325,8 @@ class L10nPeNeCotizacionFlujo(models.Model):
             # A18/A13: el tipo de documento REAL del cliente (cat. 06) — la SPA no adivina por
             # longitud (un CE no es un DNI) al precargar Emitir.
             "clienteTipoDoc": self.partner_id.l10n_latam_identification_type_id.l10n_pe_vat_code or "",
+            "ordenTrabajoId": orden.id or None,
+            "ordenTrabajoName": orden.name or "",
         })
         return d
 

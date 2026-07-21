@@ -58,6 +58,11 @@ class L10nPeNeOrdenTrabajo(models.Model):
              "autónoma (congela sus propias líneas), no depende del ciclo de la cotización.")
     linea_ids = fields.One2many("l10n_pe_ne.orden.trabajo.linea", "orden_id", string="Detalle")
     fecha_pactada = fields.Date(string="Fecha de recojo pactada", tracking=True)
+    # FIFO real: la "llegada a la cola" del taller es el momento del ADELANTO (cuando la orden pasa
+    # a 'encolada'), NO la creación del borrador — un borrador puede quedarse días sin adelanto. Se
+    # estampa en el MISMO write flujo_ok de registrar_adelanto que pone estado=encolada. copy=False:
+    # una orden duplicada re-encola desde cero, no hereda su turno.
+    fecha_encolada = fields.Datetime(string="Encolada el", readonly=True, copy=False)
 
     # Cobro en dos tiempos (Vía B). El adelanto y el saldo son consolidados de la ORDEN (viven aquí,
     # no en la sesión de caja: caen en sesiones distintas que se congelan por separado).
@@ -244,7 +249,9 @@ class L10nPeNeOrdenTrabajo(models.Model):
         # se guarda en el MISMO write que adelanto_monto/estado: la referencia y el importe fiscal viajan
         # juntos y quedan bajo el blindaje de _campos_flujo.
         vals = {"adelanto_monto": monto, "medio_adelanto": medio,
-                "adelanto_movimiento_id": mov.id, "estado": "encolada"}
+                "adelanto_movimiento_id": mov.id, "estado": "encolada",
+                # FIFO por llegada: el turno se toma AHORA (al adelantar y encolar), no al crear.
+                "fecha_encolada": fields.Datetime.now()}
         if anticipo_move_id:
             vals["anticipo_factura_id"] = anticipo_move_id
         self.with_context(l10n_pe_ne_flujo_ok=True).write(vals)
@@ -450,36 +457,77 @@ class L10nPeNeOrdenTrabajo(models.Model):
     @api.model
     def l10n_pe_ne_crear_orden(self, payload):
         """Crea una orden (borrador) desde React: {clienteId|cliente, cotizacionId?, items:[{...}],
-        fechaPactada?}. Las líneas se CONGELAN en la orden (autónoma de la cotización)."""
+        fechaPactada?}. Las líneas se CONGELAN en la orden (autónoma de la cotización).
+
+        PUENTE cotización→taller: si llega cotizacionId y NO ítems explícitos, la orden NACE de la
+        cotización — copia sus líneas y (si falta) su cliente. Con ítems explícitos la SPA manda (los
+        ítems ganan) y la cotización queda solo como referencia trazable."""
         payload = payload or {}
-        partner = self._l10n_pe_ne_resolver_partner(payload)
-        lineas = self._l10n_pe_ne_build_lines(payload.get("items") or payload.get("lineas"))
-        if not lineas:
-            raise UserError(_("La orden necesita al menos un ítem."))
         # A16: la referencia a la cotización de origen se VALIDA (exists + leerla dispara la
         # ir.rule → cross-RUC = AccessError), no se siembra cruda como int.
-        cot_id = False
+        cot = False
         if payload.get("cotizacionId"):
             cot = self.env["l10n_pe_ne.cotizacion"].browse(int(payload["cotizacionId"])).exists()
             if cot:
                 cot.company_id   # noqa: B018 — lectura a propósito: dispara la regla de compañía
-                cot_id = cot.id
+        items = payload.get("items") or payload.get("lineas")
+        if cot and not items:
+            # PUENTE. La orden de taller nace SOLO de una cotización ACEPTADA: hay acuerdo con el
+            # cliente pero aún NO se vendió por mostrador. Ni borrador/enviada (sin acuerdo cerrado),
+            # ni convertida (ya se facturó por mostrador → montar un taller sería doble venta), ni
+            # vencida/rechazada (sin acuerdo vigente).
+            if cot.estado != "aceptada":
+                raise UserError(_(
+                    "La orden de taller nace de una cotización ACEPTADA; la %(n)s está «%(e)s».",
+                    n=cot.name, e=cot.estado))
+            # Anti-duplicado: una cotización aceptada abre UNA orden de taller. Si ya existe una orden
+            # no anulada que la referencia, se devuelve su nombre (no se abre una segunda en paralelo).
+            previa = self.search(
+                [("cotizacion_id", "=", cot.id), ("estado", "!=", "anulada")], limit=1)
+            if previa:
+                raise UserError(_("Esta cotización ya tiene la orden %s.") % previa.name)
+            lineas = self._l10n_pe_ne_lineas_desde_cotizacion(cot)
+        else:
+            lineas = self._l10n_pe_ne_build_lines(items)
+        if not lineas:
+            raise UserError(_("La orden necesita al menos un ítem."))
+        partner = self._l10n_pe_ne_resolver_partner(payload, cot)
         orden = self.create({
             "company_id": self.env.company.id,
             "partner_id": partner.id,
-            "cotizacion_id": cot_id,
+            "cotizacion_id": cot.id if cot else False,
             "fecha_pactada": payload.get("fechaPactada") or False,
             "linea_ids": lineas,
         })
         return orden._l10n_pe_ne_orden_dict()
 
-    def _l10n_pe_ne_resolver_partner(self, payload):
+    def _l10n_pe_ne_lineas_desde_cotizacion(self, cot):
+        """PUENTE: copia las líneas de la cotización ACEPTADA a la orden. AMBOS modelos guardan el
+        precio CON IGV (misma convención) → mapeo directo, sin conversión. Las líneas se CONGELAN en
+        la orden (autónoma: no sigue el ciclo de la cotización tras nacer)."""
+        vals = []
+        for l in cot.line_ids:
+            vals.append((0, 0, {
+                "product_id": l.product_id.id or False,
+                "descripcion": l.descripcion or (l.product_id.display_name or ""),
+                "cantidad": l.cantidad,
+                "precio_unitario": l.precio_unitario,
+                "afecto_igv": l.afecto_igv,
+                "descuento": l.descuento,
+            }))
+        return vals
+
+    def _l10n_pe_ne_resolver_partner(self, payload, cot=False):
         if payload.get("clienteId"):
             partner = self.env["res.partner"].browse(int(payload["clienteId"])).exists()
             if partner:
                 return partner
         if payload.get("cliente"):
             return self.env["account.move"]._l10n_pe_ne_quick_partner(payload["cliente"])
+        # PUENTE: sin cliente en el payload pero con cotización válida, el partner de la cotización es
+        # el default natural — la orden va al MISMO cliente que aceptó la cotización.
+        if cot and cot.partner_id:
+            return cot.partner_id
         raise UserError(_("Indica el cliente de la orden."))
 
     def _l10n_pe_ne_build_lines(self, items):
@@ -517,6 +565,8 @@ class L10nPeNeOrdenTrabajo(models.Model):
             "enCola": not self.user_id,
             "cotizacionId": self.cotizacion_id.id or None,
             "fechaPactada": self.fecha_pactada and str(self.fecha_pactada) or "",
+            # FIFO: momento en que la orden llegó a la cola (al adelantar). "" mientras es borrador.
+            "fechaEncolada": self.fecha_encolada and str(self.fecha_encolada) or "",
             "total": self.amount_total,
             "adelanto": self.adelanto_monto or 0.0,
             "medioAdelanto": self.medio_adelanto or "",
@@ -541,27 +591,34 @@ class L10nPeNeOrdenTrabajo(models.Model):
     # ───────────────────────────────────────────── colas (server-side)
     @api.model
     def l10n_pe_ne_cola_ordenes(self, offset=0, limit=10):
-        """Cola del taller: órdenes encoladas (por tomar) y las que ya tomó (en proceso)."""
+        """Cola del taller: órdenes encoladas (por tomar) y las que ya tomó (en proceso). FIFO por
+        llegada A LA COLA: se atiende primero la que se adelantó antes (fecha_encolada), NO la más
+        nueva. Las órdenes viejas SIN fecha_encolada (creadas antes de este cambio) caen al final —
+        Postgres pone los NULLs al último en ASC — tolerable en bases pre-cambio."""
         return self._l10n_pe_ne_cola_dict(
-            [("estado", "in", ("encolada", "en_proceso"))], offset, limit)
+            [("estado", "in", ("encolada", "en_proceso"))], offset, limit,
+            order="fecha_encolada asc, id asc")
 
     @api.model
     def l10n_pe_ne_cola_adelanto(self, offset=0, limit=10):
         """Cola de cobro del ADELANTO (cajero): órdenes en borrador que recepción creó y esperan el
         adelanto que las encola al taller. Sin esta bandeja, un cajero SEGREGADO no tenía cómo
         encontrarlas — hallazgo del e2e con roles puros (con el usuario modal no se veía: el que
-        creaba también cobraba en el mismo modal)."""
-        return self._l10n_pe_ne_cola_dict([("estado", "=", "borrador")], offset, limit)
+        creaba también cobraba en el mismo modal). FIFO por registro (id asc): se cobra primero la
+        que entró antes al sistema."""
+        return self._l10n_pe_ne_cola_dict([("estado", "=", "borrador")], offset, limit,
+                                          order="id asc")
 
     @api.model
     def l10n_pe_ne_cola_saldo(self, offset=0, limit=10):
-        """Cola de cobro del cajero: órdenes terminadas con saldo por cobrar."""
+        """Cola de cobro del cajero: órdenes terminadas con saldo por cobrar. FIFO por registro."""
         return self._l10n_pe_ne_cola_dict(
-            [("estado", "=", "terminada"), ("factura_final_id", "=", False)], offset, limit)
+            [("estado", "=", "terminada"), ("factura_final_id", "=", False)], offset, limit,
+            order="id asc")
 
     @api.model
-    def _l10n_pe_ne_cola_dict(self, dominio, offset, limit):
-        r = self._cola(dominio, offset=offset, limit=limit)
+    def _l10n_pe_ne_cola_dict(self, dominio, offset, limit, order=None):
+        r = self._cola(dominio, offset=offset, limit=limit, order=order)
         return {
             "items": [o._l10n_pe_ne_orden_dict() for o in r["items"]],
             "total": r["total"], "offset": r["offset"], "limit": r["limit"],

@@ -165,6 +165,10 @@ class L10nPeNeApi(http.Controller):
         u = self._user(uid)
         return request.env["l10n_pe_ne.establecimiento"].with_user(uid).with_company(u.company_id)
 
+    def _proyecto(self, uid):
+        u = self._user(uid)
+        return request.env["l10n_pe_ne.proyecto"].with_user(uid).with_company(u.company_id)
+
     def _caja(self, uid):
         u = self._user(uid)
         return request.env["l10n_pe_ne.caja.sesion"].with_user(uid).with_company(u.company_id)
@@ -682,6 +686,24 @@ class L10nPeNeApi(http.Controller):
             if not rec:
                 return self._err("Comprobante no encontrado", 404)
             return self._json(rec.l10n_pe_ne_comprobante_detalle())
+        except Exception as e:  # noqa: BLE001
+            return self._fail(e)
+
+    @http.route("/ne/api/anticipos", **_GET)
+    def list_anticipos(self, **kw):
+        """Anticipos (doc. A) pendientes de regularizar del cliente indicado (ruc/partnerId),
+        para el autocompletado de la regularización en la venta final."""
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        try:
+            return self._json(
+                self._move(uid).l10n_pe_ne_anticipos_pendientes(
+                    ruc=kw.get("ruc") or None,
+                    partner_id=kw.get("partnerId") or None,
+                    moneda=kw.get("moneda") or None,
+                )
+            )
         except Exception as e:  # noqa: BLE001
             return self._fail(e)
 
@@ -1379,6 +1401,24 @@ class L10nPeNeApi(http.Controller):
             lambda: self._estab(uid).l10n_pe_ne_upsert(self._body())._l10n_pe_ne_dict()
         )
 
+    # ------------------------------------------------ proyectos (avance de obra)
+    @http.route("/ne/api/proyectos", **_GET)
+    def list_proyectos(self, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        try:
+            return self._json(self._proyecto(uid).l10n_pe_ne_list())
+        except Exception as e:  # noqa: BLE001
+            return self._fail(e)
+
+    @http.route("/ne/api/proyectos", **_POST)
+    def upsert_proyecto(self, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(lambda: self._proyecto(uid).l10n_pe_ne_upsert(self._body()))
+
     @http.route("/ne/api/establecimientos/<int:rec_id>", **_DEL)
     def delete_establecimiento(self, rec_id, **kw):
         uid = self._identify()
@@ -1463,12 +1503,12 @@ class L10nPeNeApi(http.Controller):
         return self._run(lambda: self._lote(uid).l10n_pe_ne_crear_lote(self._body()))
 
     @http.route("/ne/api/lotes/plantilla", **_GET)
-    def lote_plantilla(self, **kw):
+    def lote_plantilla(self, tipo=None, **kw):
         uid = self._identify()
         if not uid:
             return self._unauth()
         try:
-            return self._json(self._lote(uid).l10n_pe_ne_plantilla())
+            return self._json(self._lote(uid).l10n_pe_ne_plantilla(tipo or "comprobante"))
         except Exception as e:  # noqa: BLE001
             return self._fail(e)
 

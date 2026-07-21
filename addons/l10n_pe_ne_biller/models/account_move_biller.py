@@ -26,14 +26,13 @@ _logger = logging.getLogger(__name__)
 # Guarda (módulo_boto3, cliente) para invalidarse solo si boto3 fue parcheado.
 _BOTO_CLIENTS = {}
 
-# Descuento global que NO afecta la base imponible del IGV (variable global del facturador).
-# ⚠️ PENDIENTE DE CONFIRMAR CONTRA BETA: el código interno del facturador NO coincide 1:1 con el
-# Catálogo 53 tal como se lee (el descuento por ítem que SÍ afecta la base usa "00", el anticipo
-# global usa "04", la percepción "51"). Este es el candidato del Catálogo 53 (02 = descuento global
-# no afecta base imponible IGV/IVAP); antes de mergear/producción hay que emitir una prueba contra
-# beta (nubefact/SUNAT) y verificar CDR code 0 + que el IGV salga sobre la base completa. Ver el
-# spike del plan. Al confirmarlo, actualizar solo esta constante.
-DESC_GLOBAL_NO_AFECTA_COD = "02"
+# Descuento global que NO afecta la base imponible del IGV (AllowanceChargeReasonCode, cat. 53).
+# CONFIRMADO contra el validador SUNAT (ValidaExprRegFactura-2.0.1.xsl) y beta (spike 2026-07-21):
+# el código "03" es el que el validador cuenta en `descuentosGlobalesNOAfectaBI` (línea 335) y NO
+# resta de la base del IGV; el "02" cae en `MontoDescuentoAfectoBI` (SÍ afecta la base) → daba
+# error 3291 (esperaba el IGV sobre la base ya descontada). Con "03" el IGV queda sobre el precio
+# lleno y baja solo el MtoImpVenta.
+DESC_GLOBAL_NO_AFECTA_COD = "03"
 
 # Catálogo SUNAT de descripciones de motivo para Nota de Débito (08).
 ND_MOTIVO_DESC = {

@@ -938,6 +938,42 @@ class AccountMove(models.Model):
                 )
                 % {"serie": serie, "doc": docname, "prefix": prefix}
             )
+        # QA-074: la serie debe estar HABILITADA para el emisor. Una serie inventada (p.ej. F099
+        # tecleada a mano) la acepta la beta de SUNAT pero en producción se rechaza; se corta aquí.
+        habilitadas = self._l10n_pe_ne_series_habilitadas()
+        if (serie or "").upper() not in habilitadas:
+            raise UserError(
+                _(
+                    "La serie '%(serie)s' no está habilitada para %(ruc)s. Configúrala en un "
+                    "diario de venta (campo Serie) o usa una serie registrada: %(lista)s."
+                )
+                % {
+                    "serie": serie,
+                    "ruc": self.company_id.vat or self.company_id.display_name or "",
+                    "lista": ", ".join(sorted(habilitadas)),
+                }
+            )
+
+    def _l10n_pe_ne_series_habilitadas(self):
+        """Series válidas del emisor (QA-074): las configuradas en sus diarios de venta
+        (l10n_pe_ne_serie) con su variante de familia (F↔B), más los defaults que genera el
+        sistema (F001/B001 y las notas FC01/FD01/BC01/BD01). No se usa el histórico de series
+        ya emitidas a propósito: una serie inventada usada por error no debe volverse 'válida'."""
+        self.ensure_one()
+        validas = {"F001", "B001", "FC01", "FD01", "BC01", "BD01"}
+        journals = self.env["account.journal"].sudo().search(
+            [
+                ("company_id", "=", self.company_id.id),
+                ("type", "=", "sale"),
+                ("l10n_pe_ne_serie", "!=", False),
+            ]
+        )
+        for j in journals:
+            base = (j.l10n_pe_ne_serie or "").upper().strip()
+            if len(base) >= 2 and base[0] in ("F", "B"):
+                validas.add("F" + base[1:])
+                validas.add("B" + base[1:])
+        return validas
 
     def _l10n_pe_product_lines(self):
         return self.invoice_line_ids.filtered(
@@ -1315,16 +1351,86 @@ class AccountMove(models.Model):
         return cabecera
 
     def _l10n_pe_serie_correlativo(self):
-        """Serie y correlativo del comprobante. La serie viene del campo del move (por defecto la del
-        diario). El correlativo: el manual si se fijó; si no, el folio (parte numérica final) del
-        número del asiento, que Odoo auto-incrementa por diario; si no hay, '1'."""
+        """Serie y correlativo del comprobante. Una vez emitido, la identidad fiscal es
+        inmutable: se devuelve la serie/correlativo CONGELADOS (l10n_pe_ne_serie/corr_emit),
+        que ahora salen de una secuencia POR SERIE (ver _l10n_pe_ne_assign_numero). Para un
+        move aún no emitido (previsualización) se cae al comportamiento anterior: el manual si
+        se fijó; si no, el folio (parte numérica final) del número del asiento; si no hay, '1'."""
         self.ensure_one()
+        # Retrocompatible: en los comprobantes históricos corr_emit == folio, así que esto
+        # devuelve el mismo valor de antes; solo las emisiones nuevas usan la secuencia por serie.
+        if self.l10n_pe_ne_serie_emit and self.l10n_pe_ne_corr_emit:
+            try:
+                return self.l10n_pe_ne_serie_emit, str(int(self.l10n_pe_ne_corr_emit))
+            except (TypeError, ValueError):
+                return self.l10n_pe_ne_serie_emit, self.l10n_pe_ne_corr_emit
         name = (self.name or "").replace(" ", "")
         matches = list(re.finditer(r"\d+", name))
         folio = matches[-1].group() if matches else None
         serie = self.l10n_pe_serie or self.journal_id.l10n_pe_ne_serie or "F001"
         correlativo = self.l10n_pe_correlativo or folio or "1"
         return serie, correlativo
+
+    def _l10n_pe_ne_next_correlativo(self, company, serie):
+        """Correlativo por (compañía, serie): SUNAT exige numeración correlativa POR SERIE y por
+        RUC. Con un contador global (el folio del diario) la serie F001 se saltaba números cuando
+        una boleta B001 o una nota FC01 tomaban el correlativo intermedio (hueco por serie → riesgo
+        de observación en el RVIE). Crea una ir.sequence 'no_gap' al primer uso, sembrada tras el
+        correlativo más alto ya emitido en esa serie (migración transparente desde el folio global).
+        Mismo patrón, ya probado, que las Guías de Remisión (l10n_pe_ne_guia_remision)."""
+        code = "l10n_pe.ne.cpe.%s" % serie
+        # Lock consultivo: serializa el primer uso de una (serie, compañía) para no crear la
+        # secuencia dos veces en concurrencia; después la unicidad la garantiza 'no_gap' (que
+        # bloquea la fila de ir_sequence en cada next_by_id → dos cajas no obtienen el mismo nº).
+        self.env.cr.execute(
+            "SELECT pg_advisory_xact_lock(hashtext(%s))",
+            ("%s/%s" % (code, company.id),),
+        )
+        Seq = self.env["ir.sequence"].sudo()
+        seq = Seq.search(
+            [("code", "=", code), ("company_id", "=", company.id)], limit=1
+        )
+        if not seq:
+            ultimo = 0
+            for m in self.sudo().search(
+                [
+                    ("company_id", "=", company.id),
+                    ("l10n_pe_ne_serie_emit", "=", serie),
+                    ("l10n_pe_ne_corr_emit", "!=", False),
+                ]
+            ):
+                try:
+                    ultimo = max(ultimo, int(m.l10n_pe_ne_corr_emit or 0))
+                except (TypeError, ValueError):
+                    pass
+            seq = Seq.create(
+                {
+                    "name": "CPE %s (%s)" % (serie, company.display_name),
+                    "code": code,
+                    "company_id": company.id,
+                    "padding": 1,
+                    "number_increment": 1,
+                    "implementation": "no_gap",
+                    "number_next": ultimo + 1,
+                }
+            )
+        return str(seq.next_by_id())
+
+    def _l10n_pe_ne_assign_numero(self):
+        """Fija (una sola vez) la serie+correlativo FISCAL antes de construir el payload/firmar.
+        Idempotente: si ya está asignado no hace nada. Respeta un correlativo manual si se fijó;
+        si no, lo toma de la secuencia POR SERIE. A partir de aquí _l10n_pe_serie_correlativo()
+        devuelve estos valores congelados en todo el flujo (payload, XML, QR, PDF, baja)."""
+        self.ensure_one()
+        if self.l10n_pe_ne_corr_emit:
+            return
+        serie = self.l10n_pe_serie or self.journal_id.l10n_pe_ne_serie or "F001"
+        if self.l10n_pe_correlativo:
+            corr = str(self.l10n_pe_correlativo).strip()
+        else:
+            corr = self._l10n_pe_ne_next_correlativo(self.company_id, serie)
+        self.l10n_pe_ne_serie_emit = serie
+        self.l10n_pe_ne_corr_emit = corr.zfill(8)
 
     def _l10n_pe_id_block(self, with_document_type=True):
         serie, correlativo = self._l10n_pe_serie_correlativo()
@@ -2170,6 +2276,14 @@ class AccountMove(models.Model):
                     "El cliente %s está exceptuado del régimen de percepciones; no corresponde "
                     "aplicarle percepción. Desactivá la percepción para emitir este comprobante."
                 ) % (move.partner_id.display_name or ""))
+            # Valida la serie (familia correcta + habilitada, QA-074) ANTES de asignar el
+            # correlativo, para no consumir un número si la serie se rechaza.
+            move._l10n_pe_check_serie()
+            # Fija la serie+correlativo fiscal ANTES de construir el payload/firmar, desde la
+            # secuencia POR SERIE (no el folio del diario). A partir de aquí el número es estable
+            # e igual en payload, XML firmado, QR, PDF y una eventual baja. Va DESPUÉS del guard
+            # para no consumir un correlativo en un comprobante que se bloquea.
+            move._l10n_pe_ne_assign_numero()
             if use_async:
                 move._l10n_pe_enqueue_emission(icp)
                 continue

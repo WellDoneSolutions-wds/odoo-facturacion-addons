@@ -4544,11 +4544,11 @@ class AccountMove(models.Model):
         import base64
         import xlsxwriter
 
-        headers = ["CÓDIGO", "CÓDIGO DE BARRAS", "NOMBRE", "UNIDAD", "PRECIO VENTA", "COSTO", "AFECTACIÓN", "BOLSA"]
+        headers = ["CÓDIGO", "CÓDIGO DE BARRAS", "NOMBRE", "UNIDAD", "PRECIO VENTA", "COSTO", "AFECTACIÓN", "BOLSA", "DETRACCIÓN"]
         ejemplos = [
-            ["PROD0001", "7751234000018", "CEMENTO SOL 42.5 KG", "UNIDAD", 33.90, 28.00, "GRAVADO", "NO"],
-            ["PROD0002", "7751234000025", "FIERRO CORRUGADO 1/2 PULG", "KILOGRAMO", 4.50, 3.20, "GRAVADO", "NO"],
-            ["PROD0004", "", "BOLSA PLÁSTICA", "UNIDAD", 0.50, 0.10, "GRAVADO", "SI"],
+            ["PROD0001", "7751234000018", "CEMENTO SOL 42.5 KG", "UNIDAD", 33.90, 28.00, "GRAVADO", "NO", ""],
+            ["PROD0002", "7751234000025", "FIERRO CORRUGADO 1/2 PULG", "KILOGRAMO", 4.50, 3.20, "GRAVADO", "NO", ""],
+            ["PROD0004", "", "BOLSA PLÁSTICA", "UNIDAD", 0.50, 0.10, "GRAVADO", "SI", ""],
         ]
         buf = io.BytesIO()
         wb = xlsxwriter.Workbook(buf, {"in_memory": True})
@@ -4559,7 +4559,9 @@ class AccountMove(models.Model):
         txtfmt = wb.add_format({"num_format": "@"})
         for c, h in enumerate(headers):
             ws.write(0, c, h, head)
-            ws.set_column(c, c, max(16, len(h) + 4), txtfmt if c == 1 else None)
+            # DETRACCIÓN también va como TEXTO: sus códigos (027, 019, 022...) empiezan con
+            # cero y Excel se lo comería si la celda quedara en formato numérico.
+            ws.set_column(c, c, max(16, len(h) + 4), txtfmt if c in (1, 8) else None)
         for r, row in enumerate(ejemplos, 1):
             ws.write_row(r, 0, row)
         # Comentarios de ayuda al pasar el mouse por la cabecera (el triangulito rojo).
@@ -4578,6 +4580,9 @@ class AccountMove(models.Model):
         ws.write_comment(0, 7, (
             "SI / NO. Márcalo SI solo si el producto es una BOLSA PLÁSTICA: "
             "cobra el ICBPER (monto fijo por unidad) al venderlo. Vacío = NO."), note)
+        ws.write_comment(0, 8, (
+            "Opcional. Código cat. 54 de SUNAT si el producto está sujeto a detracción "
+            "(ej. 027 transporte de carga). Vacío = no sujeto."), note)
         # Desplegable (select) para UNIDAD, con ayuda al hacer clic en la celda.
         ws.data_validation(1, 3, 1000, 3, {
             "validate": "list", "source": [
@@ -4619,7 +4624,8 @@ class AccountMove(models.Model):
             "     • EXPORTACION / GRATUITO = casos especiales.  Si la dejas vacía se asume GRAVADO.",
             "6. 'COSTO' es opcional (precio de compra, referencial). No afecta la facturación.",
             "7. 'BOLSA' = SI solo para bolsas plásticas (cobran ICBPER por unidad al venderlas). Para el resto: NO o vacío.",
-            "8. Sube el archivo, revisa el resumen (nuevos / actualizados / errores) y recién ahí confirma.",
+            "8. 'DETRACCIÓN' es opcional: código cat. 54 de SUNAT (3 dígitos, ej. 027 transporte de carga) si el producto está sujeto a detracción. Vacío = no sujeto.",
+            "9. Sube el archivo, revisa el resumen (nuevos / actualizados / errores) y recién ahí confirma.",
         ]):
             wi.write(r, 0, line)
         wb.close()
@@ -4773,6 +4779,10 @@ class AccountMove(models.Model):
                 avisos.append({"fila": n, "msg": "Unidad '%s' no reconocida, se usó UNIDAD (NIU)" % txt(cell(row, "unidad"))})
             afe_raw = norm(cell(row, "afectacion"))
             tax_code = AFECT_IMPORT.get(afe_raw, "1000") if afe_raw else "1000"
+            detra_raw = txt(cell(row, "detraccion"))
+            if detra_raw and not re.fullmatch(r"\d{3}", detra_raw):
+                errores.append({"fila": n, "msg": "DETRACCIÓN debe ser el código de 3 dígitos del catálogo 54 (ej. 027) o vacío"})
+                continue
             barcode = txt(cell(row, "codigo de barras"))
             bolsa = norm(cell(row, "bolsa")) in ("si", "s")  # ICBPER: SI/NO (vacío = NO)
 
@@ -4789,7 +4799,8 @@ class AccountMove(models.Model):
                 else:
                     creados += 1
                 continue
-            vals = {"name": nombre, "l10n_pe_ne_unit_code": unidad}
+            vals = {"name": nombre, "l10n_pe_ne_unit_code": unidad,
+                    "l10n_pe_ne_detraccion_cod": detra_raw or False}
             if precio is not None:
                 vals["list_price"] = precio
             if costo is not None:

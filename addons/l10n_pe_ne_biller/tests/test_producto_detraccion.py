@@ -36,3 +36,37 @@ class TestProductoDetraccion(TransactionCase):
         self.assertEqual(d2['detraCod'], '019')
         d3 = self.Move.l10n_pe_ne_update_producto({'id': d['id'], 'detraCod': ''})
         self.assertEqual(d3['detraCod'], '')
+
+    # -- import masivo (columna DETRACCIÓN de la plantilla) -------------------------------
+    def test_import_con_columna_detraccion(self):
+        import io, base64, xlsxwriter
+        buf = io.BytesIO()
+        wb = xlsxwriter.Workbook(buf, {"in_memory": True})
+        ws = wb.add_worksheet("Productos")
+        ws.write_row(0, 0, ["CÓDIGO", "NOMBRE", "UNIDAD", "PRECIO VENTA", "AFECTACIÓN", "DETRACCIÓN"])
+        ws.write_row(1, 0, ["DTR001", "TRANSPORTE DE CARGA LIMA-AQP", "UNIDAD", 800, "GRAVADO", "027"])
+        ws.write_row(2, 0, ["DTR002", "CLAVOS 2 PULG", "UNIDAD", 5, "GRAVADO", ""])
+        wb.close()
+        res = self.Move.l10n_pe_ne_importar_productos({
+            "contentB64": base64.b64encode(buf.getvalue()).decode(),
+            "commit": True,
+        })
+        self.assertFalse(res.get("errores"), res)
+        p1 = self.env['product.product'].search([('default_code', '=', 'DTR001')], limit=1)
+        self.assertEqual(p1.l10n_pe_ne_detraccion_cod, '027')
+        p2 = self.env['product.product'].search([('default_code', '=', 'DTR002')], limit=1)
+        self.assertFalse(p2.l10n_pe_ne_detraccion_cod)
+
+    def test_import_detraccion_invalida_da_error_de_fila(self):
+        import io, base64, xlsxwriter
+        buf = io.BytesIO()
+        wb = xlsxwriter.Workbook(buf, {"in_memory": True})
+        ws = wb.add_worksheet("Productos")
+        ws.write_row(0, 0, ["CÓDIGO", "NOMBRE", "UNIDAD", "PRECIO VENTA", "AFECTACIÓN", "DETRACCIÓN"])
+        ws.write_row(1, 0, ["DTR003", "SERVICIO X", "UNIDAD", 100, "GRAVADO", "27"])  # 2 dígitos
+        wb.close()
+        res = self.Move.l10n_pe_ne_importar_productos({
+            "contentB64": base64.b64encode(buf.getvalue()).decode(),
+            "commit": True,
+        })
+        self.assertTrue(res.get("errores"))

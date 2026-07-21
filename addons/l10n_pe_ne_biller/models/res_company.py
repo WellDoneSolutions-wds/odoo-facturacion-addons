@@ -197,6 +197,13 @@ class ResCompany(models.Model):
         string='API key del facturador', groups='base.group_system', copy=False,
         help="API key de autenticación de este emisor ante el microservicio (header X-Api-Key). "
              "Debe coincidir con la registrada en el servidor para el RUC de la compañía.")
+    # D-4 (integridad): un retiro de caja por encima de este monto exige voucher/n° de depósito
+    # y fecha (contraparte documental). Un retiro solo resta del efectivo esperado; sin respaldo,
+    # sacar plata y registrar 'retiro' deja el arqueo cuadrado. Default S/300 (caja chica pasa;
+    # el retiro significativo pide respaldo). Configurable por RUC.
+    l10n_pe_ne_retiro_umbral = fields.Monetary(
+        string='Umbral de retiro con voucher', currency_field='currency_id', default=300.0,
+        help="Retiros de caja por encima de este monto exigen número de voucher/depósito y fecha.")
 
     @api.model
     def l10n_pe_ne_provision_tenant(self, vals):
@@ -286,7 +293,10 @@ class ResCompany(models.Model):
         Company = self.env['res.company'].sudo()
         out = []
         for c in Company.search([], order='name', limit=limit, offset=offset or 0):
-            emisores = Users.search([('company_id', '=', c.id), ('group_ids', 'in', grp.id)])
+            # all_group_ids (no group_ids): incluye a quien tiene emisor por IMPLICACIÓN de un
+            # rol (cajero/vendedor/… implican emisor). Con group_ids (solo explícitos) un usuario
+            # con solo un rol quedaría invisible en el panel de emisores (V6 del pentest).
+            emisores = Users.search([('company_id', '=', c.id), ('all_group_ids', 'in', grp.id)])
             out.append({
                 'companyId': c.id,
                 'company': c.name,

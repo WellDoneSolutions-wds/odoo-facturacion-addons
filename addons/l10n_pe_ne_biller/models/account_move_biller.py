@@ -15,7 +15,7 @@ except ImportError:  # pragma: no cover
     boto3 = None
 
 from odoo import _, api, fields, models
-from odoo.exceptions import UserError
+from odoo.exceptions import AccessError, UserError
 from odoo.tools import float_round
 
 from ..tools.amount_to_words import leyenda_monto
@@ -2501,6 +2501,15 @@ class AccountMove(models.Model):
         """Anula un comprobante ya emitido a SUNAT: boletas por Resumen Diario (RC, tipEstado 3),
         facturas/NC/ND por Comunicación de Baja (RA). payload: {id | serie+correlativo, motivo}.
         Lo consume el BFF por /json/2."""
+        # H-5: el modelo es la autoridad, no solo el controller. /ne/api/anular ya devuelve
+        # 403 sin este grupo, pero el gate tiene que vivir también aquí para que ninguna vía
+        # (backend, tests, un futuro endpoint) pueda saltárselo. Ver
+        # docs/procesos-negocio/decision-alta-usuarios.md y hallazgos.md (H6).
+        # NOTA (hueco conocido): el botón "Comunicar Baja" del backend llama directo a
+        # action_l10n_pe_send_baja y no pasa por aquí; cerrarlo (groups= en la vista o gate
+        # en el modelo) queda para un cambio validado con la suite de tests.
+        if not self.env.user.has_group('l10n_pe_ne_biller.group_l10n_pe_ne_anulacion'):
+            raise AccessError(_("No tienes permiso para anular comprobantes."))
         payload = payload or {}
         move = self._l10n_pe_ne_quick_origin(payload.get("comprobante") or payload)
         move.l10n_pe_ne_baja_motivo = (
@@ -2555,7 +2564,14 @@ class AccountMove(models.Model):
             return ""
         P = self.env["res.partner"].sudo()
         data = None
-        for fetch in (P._l10n_pe_query_external_db, P._l10n_pe_query_sunat):
+        # getattr: si el addon l10n_pe_partner_lookup NO está instalado, _l10n_pe_query_external_db
+        # no existe en res.partner; se omite en vez de reventar con AttributeError (degradación con
+        # gracia — este método NUNCA bloquea la emisión). Acceder al atributo directo en la tupla
+        # lanzaba ANTES del try. (Hallazgo del run real en Odoo 19.)
+        for fetch in (getattr(P, "_l10n_pe_query_external_db", None),
+                      getattr(P, "_l10n_pe_query_sunat", None)):
+            if not fetch:
+                continue
             try:
                 data = fetch(num)
             except Exception:  # noqa: BLE001 — fuente no configurada / red: seguimos

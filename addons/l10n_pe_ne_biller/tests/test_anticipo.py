@@ -118,3 +118,88 @@ class TestBillerAnticipo(TransactionCase):
         move.action_post()
         with self.assertRaises(UserError):   # anticipo no soportado en operación no gravada
             move._l10n_pe_build_invoice_request()
+
+    # --- doc. A: comprobante emitido POR un pago anticipado (Fase 1) ---
+
+    def test_es_anticipo_marca_descripcion_y_es_venta_interna(self):
+        """La factura de anticipo es una venta interna normal (0101) cuyo detalle antepone
+        'PAGO ANTICIPADO'; no lleva relacionados ni descuento 04 (no regulariza nada)."""
+        move = self._move(l10n_pe_ne_es_anticipo=True)
+        payload = move._l10n_pe_build_invoice_request()
+        self.assertEqual(payload['cabecera']['tipOperacion'], '0101')
+        self.assertTrue(payload['detalle'][0]['desItem'].startswith('PAGO ANTICIPADO'))
+        self.assertNotIn('relacionados', payload)
+        self.assertEqual([v for v in payload['variablesGlobales']
+                          if v['codTipoVariableGlobal'] == '04'], [])
+        # El importe total del anticipo debe ser > 0 (SUNAT 2502).
+        self.assertGreater(float(payload['cabecera']['sumImpVenta']), 0.0)
+
+    def test_es_anticipo_no_duplica_prefijo(self):
+        move = self._move(l10n_pe_ne_es_anticipo=True)
+        move.invoice_line_ids[0].name = 'PAGO ANTICIPADO - Servicio X'
+        payload = move._l10n_pe_build_invoice_request()
+        self.assertEqual(payload['detalle'][0]['desItem'], 'PAGO ANTICIPADO - Servicio X')
+
+    def test_es_anticipo_con_regularizacion_rechaza(self):
+        """Un comprobante no puede ser a la vez anticipo (A) y regularizar otro (B)."""
+        move = self._move(anticipo_total=118.0, l10n_pe_ne_es_anticipo=True)
+        with self.assertRaises(UserError):
+            move._l10n_pe_build_invoice_request()
+
+    # --- doc. B enlazado: saldo del anticipo y autocompletado (Fase 2) ---
+
+    def _anticipo_A(self, corr='00000100', tipo_doc='01'):
+        """Crea un anticipo (doc. A) 'aceptado' por SUNAT (biller_state enviado), listo para
+        aparecer en la lista de pendientes y ser regularizado. Total del anticipo = 590 (500 + IGV)."""
+        A = self._move(l10n_pe_ne_es_anticipo=True, l10n_pe_correlativo=corr)
+        A.write({
+            'l10n_pe_ne_serie_emit': 'F001', 'l10n_pe_ne_corr_emit': corr,
+            'l10n_pe_ne_tipo_doc': tipo_doc, 'l10n_pe_biller_state': 'enviado'})
+        return A
+
+    def test_anticipos_pendientes_lista_saldo(self):
+        """La lista de pendientes trae el anticipo del cliente con su doc, tipo (cat. 12) y saldo."""
+        self._anticipo_A()
+        rows = self.env['account.move'].l10n_pe_ne_anticipos_pendientes(ruc='20100070970')
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]['doc'], 'F001-00000100')
+        self.assertEqual(rows[0]['tipo'], '02')            # factura → cat. 12 = 02
+        self.assertAlmostEqual(rows[0]['saldo'], 590.0, 2)
+
+    def test_saldo_baja_al_regularizar_y_sigue_pendiente(self):
+        """Regularizar parte del anticipo baja su saldo; con saldo restante sigue en pendientes."""
+        A = self._anticipo_A()
+        self._move(anticipo_total=200.0, l10n_pe_correlativo='10',
+                   l10n_pe_ne_anticipo_origen_id=A.id)
+        self.assertAlmostEqual(A.l10n_pe_ne_anticipo_aplicado, 200.0, 2)
+        self.assertAlmostEqual(A.l10n_pe_ne_anticipo_saldo, 390.0, 2)
+        rows = self.env['account.move'].l10n_pe_ne_anticipos_pendientes(ruc='20100070970')
+        self.assertAlmostEqual(rows[0]['saldo'], 390.0, 2)
+
+    def test_saldo_agotado_sale_de_pendientes(self):
+        """Consumido por completo, el anticipo desaparece de la lista de pendientes."""
+        A = self._anticipo_A()
+        self._move(anticipo_total=590.0, l10n_pe_correlativo='10',
+                   l10n_pe_ne_anticipo_origen_id=A.id)
+        self.assertAlmostEqual(A.l10n_pe_ne_anticipo_saldo, 0.0, 2)
+        self.assertEqual(self.env['account.move'].l10n_pe_ne_anticipos_pendientes(
+            ruc='20100070970'), [])
+
+    def test_regularizar_excede_saldo_rechaza(self):
+        """Aplicar más de lo que le queda al anticipo se rechaza (evita doble consumo)."""
+        A = self._anticipo_A()
+        self._move(anticipo_total=400.0, l10n_pe_correlativo='10',
+                   l10n_pe_ne_anticipo_origen_id=A.id)   # saldo → 190
+        B2 = self._move(anticipo_total=300.0, l10n_pe_correlativo='11',
+                        l10n_pe_ne_anticipo_origen_id=A.id)
+        with self.assertRaises(UserError):               # 300 > 190 disponible
+            B2._l10n_pe_build_invoice_request()
+
+    def test_regularizar_enlazado_ok(self):
+        """Aplicar dentro del saldo enlazado construye el XML sin error (descuento 04 + relacionado)."""
+        A = self._anticipo_A()
+        B = self._move(anticipo_total=118.0, l10n_pe_correlativo='10',
+                       l10n_pe_ne_anticipo_origen_id=A.id)
+        payload = B._l10n_pe_build_invoice_request()
+        self.assertEqual(len([v for v in payload['variablesGlobales']
+                              if v['codTipoVariableGlobal'] == '04']), 1)

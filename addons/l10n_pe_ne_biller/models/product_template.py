@@ -33,3 +33,11 @@ class ProductTemplate(models.Model):
         string="Cód. producto SUNAT (cat.25)",
         help="Código de producto SUNAT (UNSPSC, catálogo 25). Aparece en la guía como "
              "bien normalizado.")
+
+    l10n_pe_ne_detraccion_cod = fields.Char(
+        string="Sujeto a detracción (cat. 54)",
+        help="Código del bien/servicio en el catálogo 54 de SUNAT (SPOT). Vacío = no "
+             "sujeto. Solo el código: la TASA la sugiere la app al emitir (cambia por "
+             "resolución) y queda editable. Emitir lo usa para detectar operaciones "
+             "mixtas — la RS 183-2004 (art. 19) exige comprobantes separados.",
+    )

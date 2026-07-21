@@ -1351,7 +1351,11 @@ class AccountMove(models.Model):
                     "codBienPropiedad": "-",
                     "tipVariable": "false",
                     "codTipoVariable": "00",
-                    "porVariable": "%.2f" % (line.discount / 100.0),
+                    # Factor con 5 decimales: SUNAT valida mtoVariable ≈ base × porVariable (error 3290,
+                    # "cargo/descuento por ítem difiere"). Con 2 decimales, un descuento en monto fijo
+                    # (p.ej. S/50 sobre 470 → 10.6383% → 0.11) descuadra y se rechaza; 5 decimales
+                    # reconstruyen el monto dentro de la tolerancia.
+                    "porVariable": "%.5f" % (line.discount / 100.0),
                     "monMontoVariable": moneda,
                     "mtoVariable": fmt(disc),
                     "monBaseImponibleVariable": moneda,
@@ -5434,11 +5438,13 @@ class AccountMove(models.Model):
         el ticket 80mm (dentro del bloque POS `adicionalTxt`) y el A4 (param `MEDIOS_PAGO`)."""
         self.ensure_one()
         medios = self.l10n_pe_ne_medios_pago or []
-        return ", ".join(
-            "%s S/ %.2f" % (m.get("medio") or "", float(m.get("monto") or 0))
-            for m in medios
-            if float(m.get("monto") or 0) > 0
-        )
+
+        def _txt(m):
+            base = "%s S/ %.2f" % (m.get("medio") or "", float(m.get("monto") or 0))
+            op = str(m.get("numOp") or "").strip()
+            return "%s (Op. %s)" % (base, op) if op else base
+
+        return ", ".join(_txt(m) for m in medios if float(m.get("monto") or 0) > 0)
 
     def _l10n_pe_ne_ticket_adicional(self):
         """Bloque de pago del ticket 80mm (se manda como `adicionalTxt`): medios de pago del

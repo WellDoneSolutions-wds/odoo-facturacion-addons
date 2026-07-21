@@ -26,6 +26,14 @@ _logger = logging.getLogger(__name__)
 # Guarda (módulo_boto3, cliente) para invalidarse solo si boto3 fue parcheado.
 _BOTO_CLIENTS = {}
 
+# Descuento global que NO afecta la base imponible del IGV (AllowanceChargeReasonCode, cat. 53).
+# CONFIRMADO contra el validador SUNAT (ValidaExprRegFactura-2.0.1.xsl) y beta (spike 2026-07-21):
+# el código "03" es el que el validador cuenta en `descuentosGlobalesNOAfectaBI` (línea 335) y NO
+# resta de la base del IGV; el "02" cae en `MontoDescuentoAfectoBI` (SÍ afecta la base) → daba
+# error 3291 (esperaba el IGV sobre la base ya descontada). Con "03" el IGV queda sobre el precio
+# lleno y baja solo el MtoImpVenta.
+DESC_GLOBAL_NO_AFECTA_COD = "03"
+
 # Catálogo SUNAT de descripciones de motivo para Nota de Débito (08).
 ND_MOTIVO_DESC = {
     "01": "Intereses por mora",
@@ -301,6 +309,14 @@ class AccountMove(models.Model):
         help="Importe del anticipo aún disponible para regularizar = total − aplicado. Solo "
         "aplica a comprobantes marcados como pago anticipado (doc. A).",
     )
+    l10n_pe_ne_desc_no_afecta = fields.Monetary(
+        string="Descuento que no afecta el IGV",
+        copy=False,
+        help="Descuento (S/, CON IGV incluido en el sentido de que baja el total a pagar) que NO "
+        "afecta la base imponible del IGV (cat. 53 'no afecta'): la gravada y el IGV se calculan "
+        "sobre el precio lleno; este importe solo reduce el total (MtoImpVenta). Agrega el "
+        "descuento por ítem 'no afecta' y el descuento global 'no afecta' del comprobante.",
+    )
 
     @api.depends("l10n_pe_ne_es_anticipo", "amount_total")
     def _compute_l10n_pe_ne_anticipo_saldo(self):
@@ -362,12 +378,14 @@ class AccountMove(models.Model):
         return out
 
     def _l10n_pe_importe_cobrar(self):
-        """Importe neto a cobrar = total − anticipo aplicado − bienes gratuitos (lo que el cliente paga)."""
+        """Importe neto a cobrar = total − anticipo aplicado − descuento que no afecta el IGV −
+        bienes gratuitos (lo que el cliente paga)."""
         self.ensure_one()
         ant = self._l10n_pe_anticipo()
         return round(
             self.amount_total
             - (ant[2] if ant else 0.0)
+            - self._l10n_pe_desc_no_afecta()
             - self._l10n_pe_gratuito_base(),
             2,
         )
@@ -417,6 +435,20 @@ class AccountMove(models.Model):
         _cod, tasa, _motivo = self._l10n_pe_anticipo_gravado()
         valor = round(total / (1.0 + (tasa or 0.0) / 100.0), 2)
         return valor, round(total - valor, 2), round(total, 2)
+
+    def _l10n_pe_desc_no_afecta(self):
+        """Monto del descuento global que NO afecta la base del IGV, topeado para no dejar el total
+        negativo. Es un ajuste SOLO de emisión (como el anticipo): no agrega una línea a Odoo, así
+        que la gravada/IGV quedan sobre el precio lleno; solo baja el MtoImpVenta (total a pagar).
+        Devuelve 0.0 si no aplica (notas, o sin descuento)."""
+        self.ensure_one()
+        monto = self.l10n_pe_ne_desc_no_afecta or 0.0
+        if monto <= 0 or self.move_type not in ("out_invoice",) or self.debit_origin_id:
+            return 0.0
+        # Tope: no puede superar el total menos lo ya deducido por anticipo (dejaría MtoImpVenta < 0).
+        ant = self._l10n_pe_anticipo()
+        tope = round((self.amount_total or 0.0) - (ant[2] if ant else 0.0), 2)
+        return round(min(monto, max(0.0, tope)), 2)
 
     def _l10n_pe_check_anticipo(self):
         """Valida que el anticipo sea representable (descuento global código 04) antes de emitir el XML.
@@ -584,6 +616,24 @@ class AccountMove(models.Model):
                     "porVariableGlobal": "%.5f" % (valor / base if base else 0.0),
                     "monMontoVariableGlobal": moneda,
                     "mtoVariableGlobal": fmt(valor),
+                    "monBaseImponibleVariableGlobal": moneda,
+                    "mtoBaseImpVariableGlobal": fmt(base),
+                }
+            )
+        # Descuento global que NO afecta la base del IGV (código del facturador en
+        # DESC_GLOBAL_NO_AFECTA_COD, pendiente de confirmar contra beta). La base es el precio de
+        # venta con IGV (amount_total): el descuento NO reduce gravada/IGV, solo el MtoImpVenta.
+        desc_na = self._l10n_pe_desc_no_afecta()
+        if desc_na > 0:
+            base = self.amount_total or 0.0
+            out.append(
+                {
+                    "tipVariableGlobal": "false",
+                    "codTipoVariableGlobal": DESC_GLOBAL_NO_AFECTA_COD,
+                    # 5 decimales: misma tolerancia SUNAT que el anticipo (mtoVariable ≈ base × por).
+                    "porVariableGlobal": "%.5f" % (desc_na / base if base else 0.0),
+                    "monMontoVariableGlobal": moneda,
+                    "mtoVariableGlobal": fmt(desc_na),
                     "monBaseImponibleVariableGlobal": moneda,
                     "mtoBaseImpVariableGlobal": fmt(base),
                 }
@@ -1218,6 +1268,10 @@ class AccountMove(models.Model):
         # incluye: la regla 4301 suma únicamente los tributos 1000/1016/7152/9999/2000 (no el 9996),
         # y la referencia SUNAT aceptada consigna sumTotTributos = IGV real, sin el 18% gratuito.
         grat_base = self._l10n_pe_gratuito_base()
+        # Descuento global que NO afecta la base del IGV: baja el importe a cobrar (MtoImpVenta) y va
+        # como AllowanceCharge global (sumDescTotal), SIN tocar la base gravada ni el IGV. Mismo estilo
+        # de ajuste solo-de-emisión que el anticipo (no agrega línea a Odoo).
+        desc_no_afecta = self._l10n_pe_desc_no_afecta()
         cabecera = {
             "tipOperacion": self._l10n_pe_tipo_operacion(),
             "fecEmision": self.invoice_date.strftime("%Y-%m-%d")
@@ -1244,8 +1298,10 @@ class AccountMove(models.Model):
             # TaxInclusive − anticipo, ambos con el ICBPER). Excluirlo de aquí pero incluirlo en
             # sumImpVenta desbalancea el comprobante → SUNAT Client.3280.
             "sumPrecioVenta": fmt(self.amount_total - grat_base),
-            "sumImpVenta": fmt(self.amount_total - anticipo_total - grat_base),
-            "sumDescTotal": "0.00",
+            "sumImpVenta": fmt(
+                self.amount_total - anticipo_total - grat_base - desc_no_afecta
+            ),
+            "sumDescTotal": fmt(desc_no_afecta),
             "sumOtrosCargos": "0.00",
             "sumTotalAnticipos": fmt(anticipo_total),
             "ublVersionId": "2.1",
@@ -5208,6 +5264,16 @@ class AccountMove(models.Model):
             move.l10n_pe_ne_percepcion_rate = float(p.get("tasa") or 2)
         if payload.get("esAnticipo"):
             move.l10n_pe_ne_es_anticipo = True
+        # Descuento que NO afecta la base del IGV: el por ítem (descNoAfecta de cada línea) + el global
+        # (descuentoGlobalNoAfecta) se agregan en un solo importe. NO reduce gravada/IGV: el emisor lo
+        # aplica como AllowanceCharge global que solo baja el total (ver _l10n_pe_desc_no_afecta).
+        desc_no_afecta = round(
+            sum(float(ln.get("descNoAfecta") or 0) for ln in (payload.get("lineas") or []))
+            + float(payload.get("descuentoGlobalNoAfecta") or 0),
+            2,
+        )
+        if desc_no_afecta > 0:
+            move.l10n_pe_ne_desc_no_afecta = desc_no_afecta
         a = payload.get("anticipo")
         if a:
             move.l10n_pe_ne_anticipo_total = float(a.get("total") or 0)

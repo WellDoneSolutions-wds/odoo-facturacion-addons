@@ -496,6 +496,27 @@ class AccountMove(models.Model):
                 )
             )
 
+    def _l10n_pe_check_lineas_impuesto(self):
+        """Ninguna línea con importe llega al XML sin su tax cat-05: `_l10n_pe_tax_info`
+        la clasificaría con el default 'gravado (1000)' a tasa 0 y SUNAT rechaza con 3111
+        (TaxableAmount>0 + TaxAmount=0.00), un mensaje críptico que además llega recién
+        del validador. Se corta aquí, con el dato que el usuario sí puede arreglar.
+        Las líneas de importe 0 (p.ej. NC de corrección de texto) no tienen base imponible
+        —no hay 3111 posible— y pasan."""
+        self.ensure_one()
+        for line in self._l10n_pe_product_lines():
+            if not line.price_subtotal:
+                continue
+            if not any(t.l10n_pe_edi_tax_code in TAX_CODE_MAP for t in line.tax_ids):
+                raise UserError(
+                    _(
+                        "La línea «%s» no tiene impuesto SUNAT asignado (IGV, exonerado, "
+                        "inafecto…). Asigna la afectación IGV en el producto o en la línea "
+                        "y vuelve a emitir."
+                    )
+                    % (line.name or line.product_id.display_name or "?")
+                )
+
     def _l10n_pe_relacionados(self):
         """Documentos relacionados de la factura: guía de remisión (indDocRelacionado 1,
         DespatchDocumentReference) y/o comprobante de anticipo (indDocRelacionado 2)."""
@@ -1297,6 +1318,7 @@ class AccountMove(models.Model):
         )
         _logger.info("---------------------------------------- Invoice request ------------------------------------------------")
         self.ensure_one()
+        self._l10n_pe_check_lineas_impuesto()
         self._l10n_pe_check_anticipo()
         # Boleta > S/700 exige el documento de identidad del cliente (SUNAT la rechaza sin él en prod).
         _logger.info("Product lines: %s", len(self._l10n_pe_product_lines()))
@@ -1367,6 +1389,7 @@ class AccountMove(models.Model):
     def _l10n_pe_build_note_request(self):
         """Nota de Crédito (07) / Débito (08) — referencia al documento afectado."""
         self.ensure_one()
+        self._l10n_pe_check_lineas_impuesto()
         dt = self._l10n_pe_document_type()
         origin = self.reversed_entry_id if dt == "07" else self.debit_origin_id
         cabecera = self._l10n_pe_cabecera()
@@ -2198,6 +2221,21 @@ class AccountMove(models.Model):
         lines = []
         for ln in payload.get("lineas") or []:
             tax = self._l10n_pe_ne_tax_by_code(ln.get("taxCode"))
+            # Sin tax resuelta la línea saldría en el XML como 'gravada con IGV 0.00'
+            # (rechazo SUNAT 3111): mejor cortar aquí con el dato accionable.
+            if not tax:
+                raise UserError(
+                    _(
+                        "No hay un impuesto de venta con código SUNAT %(code)s configurado "
+                        "para la compañía (línea «%(linea)s»). Configura el IGV en "
+                        "Contabilidad → Impuestos (o ejecuta el setup de la compañía) y "
+                        "vuelve a emitir."
+                    )
+                    % {
+                        "code": ln.get("taxCode") or "1000",
+                        "linea": (ln.get("descripcion") or "").strip() or "ITEM",
+                    }
+                )
             taxes = tax
             if ln.get("icbper"):
                 # Bolsa plástica: el ICBPER (monto fijo por unidad) se SUMA al IGV de la línea.
@@ -2611,16 +2649,46 @@ class AccountMove(models.Model):
             found.street2 = urb
         return found
 
+    # Afectaciones de tasa 0% (cat-05) que se auto-crean si el plan no las trae. El IGV (1000)
+    # y el IVAP (1016) NO están aquí a propósito: su tasa es una decisión contable y crearlos
+    # con una tasa adivinada emitiría montos fiscales incorrectos — si faltan, la emisión corta
+    # con un error accionable (ver quick_emit).
+    _L10N_PE_NE_TAXES_CERO = {
+        "9997": "Exonerado",
+        "9998": "Inafecto",
+        "9995": "Exportación",
+        "9996": "Gratuito",
+    }
+
     def _l10n_pe_ne_tax_by_code(self, code):
-        """account.tax de venta por código cat-05 (l10n_pe_edi_tax_code); default 1000 (IGV gravado)."""
+        """account.tax de venta por código cat-05 (l10n_pe_edi_tax_code); default 1000 (IGV gravado).
+
+        Las taxes 0% (exonerado/inafecto/exportación/gratuito) se crean si faltan, como
+        ICBPER/ISC: una BD recién configurada suele traer solo el IGV, y sin esto la línea
+        quedaba SIN impuesto → `_l10n_pe_tax_info` la clasificaba con su default 'gravado
+        (1000)' a tasa 0 → XML con TaxableAmount>0 y TaxAmount=0.00 → rechazo SUNAT 3111."""
+        code = code or "1000"
         tax = self.env["account.tax"].search(
             [
                 ("company_id", "=", self.env.company.id),
                 ("type_tax_use", "=", "sale"),
-                ("l10n_pe_edi_tax_code", "=", code or "1000"),
+                ("l10n_pe_edi_tax_code", "=", code),
             ],
             limit=1,
         )
+        if not tax and code in self._L10N_PE_NE_TAXES_CERO:
+            label = self._L10N_PE_NE_TAXES_CERO[code]
+            tax = self.env["account.tax"].sudo().create(
+                {
+                    "name": "%s (0%%)" % label,
+                    "amount_type": "percent",
+                    "amount": 0.0,
+                    "type_tax_use": "sale",
+                    "l10n_pe_edi_tax_code": code,
+                    "company_id": self.env.company.id,
+                    "description": label,
+                }
+            )
         return self._l10n_pe_ne_normalize_tax_excluded(tax)
 
     @api.model

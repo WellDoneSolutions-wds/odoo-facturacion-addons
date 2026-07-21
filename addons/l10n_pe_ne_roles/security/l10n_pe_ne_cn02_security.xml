@@ -12,8 +12,11 @@
       dominio de la regla del actor (Odoo lanza AccessError si tras el write ya no lo "ve"). Por eso
       la regla de cada rol cubre el estado ORIGEN y el DESTINO de SUS transiciones:
         · taller: toma (encolada→en_proceso) y termina (en_proceso→terminada) → ve {encolada, en_proceso, terminada}
-        · caja:   adelanto (borrador→encolada), cobro de saldo (terminada→entregada), anular (borrador→anulada)
-                  → ve todo salvo 'en_proceso' (trabajo del taller en curso)
+        · caja:   adelanto (borrador→encolada), cobro de saldo (terminada→entregada), anular (borrador→anulada),
+                  y la RESERVA completa —el 1er abono (borrador→reservada), los siguientes y el cobro del saldo
+                  al recoger (reservada→entregada)— que vive ENTERA en la caja (sin taller). Por eso 'reservada'
+                  entra a su dominio: sin ese estado, el write del 1er abono sacaría la reserva de la bandeja del
+                  cajero y Odoo lanzaría AccessError. → ve todo salvo 'en_proceso' (trabajo del taller en curso).
       La segregación FINA de acciones no vive aquí sino en has_group de cada transición; estas reglas
       son la bandeja de cada rol. Las colas server-side (l10n_pe_ne_cola_*) filtran con precisión.
     -->
@@ -43,7 +46,7 @@
       <field name="name">Orden: el cajero ve las de adelanto y cobro de saldo</field>
       <field name="model_id" ref="model_l10n_pe_ne_orden_trabajo"/>
       <field name="groups" eval="[(4, ref('group_l10n_pe_ne_caja'))]"/>
-      <field name="domain_force">[('estado', 'in', ['borrador', 'encolada', 'terminada', 'entregada', 'anulada'])]</field>
+      <field name="domain_force">[('estado', 'in', ['borrador', 'encolada', 'reservada', 'terminada', 'entregada', 'anulada'])]</field>
     </record>
     <record id="rule_orden_supervisor" model="ir.rule">
       <field name="name">Orden: el supervisor ve todas</field>
@@ -75,7 +78,7 @@
       <field name="name">Línea de orden: el cajero ve las de adelanto y cobro</field>
       <field name="model_id" ref="model_l10n_pe_ne_orden_trabajo_linea"/>
       <field name="groups" eval="[(4, ref('group_l10n_pe_ne_caja'))]"/>
-      <field name="domain_force">[('orden_id.estado', 'in', ['borrador', 'encolada', 'terminada', 'entregada', 'anulada'])]</field>
+      <field name="domain_force">[('orden_id.estado', 'in', ['borrador', 'encolada', 'reservada', 'terminada', 'entregada', 'anulada'])]</field>
     </record>
     <record id="rule_orden_linea_supervisor" model="ir.rule">
       <field name="name">Línea de orden: el supervisor ve todas</field>

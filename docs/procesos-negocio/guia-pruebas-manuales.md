@@ -95,6 +95,29 @@ a la vez y ver el handoff real entre sesiones.
    ✔ *Verifica*: cobra exactamente el saldo (S/136), emite el comprobante final por el TOTAL, y
    la orden queda **entregada**. En el ticket sale "Adelanto a cuenta: S/100".
 
+### E2b · RESERVA (apartado) — producto terminado, el cliente paga de a pocos
+
+*No todo pasa por el taller: esto es un producto YA listo que el cliente aparta. Si una venta
+mezcla taller y terminados, se separan en dos órdenes (decisión de negocio).*
+
+1. **`vendedor1`** → **Órdenes de taller** → *Nueva orden* → elige el tipo **Reserva** ("producto
+   terminado, el cliente aparta pagando a cuenta") → ítem (ej. "Batería", S/118) → crear.
+   *También puedes entrar por cotización: en la aceptada, botón "Crear reserva".*
+2. **`cajero1`** → bandeja **Por cobrar adelanto** → la fila dice **Reserva** y el botón "Cobrar
+   abono" → primer abono (ej. S/30, Yape).
+   ✔ *Verifica*: la reserva pasa a **reservada** y aparece en la pestaña **Reservas** — NUNCA en
+   la Cola de taller (los operarios ni la ven ni pueden tomarla).
+3. Pestaña **Reservas** → **Abonar** → segundo abono (ej. S/50, Efectivo).
+   ✔ *Verifica*: abonado S/80, saldo S/38, y el historial muestra los dos abonos con su medio.
+   Cada abono entra al arqueo por SU medio (recibo interno — aunque la Vía A esté encendida:
+   el comprobante final referencia UN solo anticipo, por eso los abonos no facturan).
+   ✔ *Negativo*: intenta abonar S/38 (completaría el total) → rebota — el último pago es el
+   SALDO al recoger, que es lo que emite el comprobante.
+4. Cuando el cliente vuelve con el resto: **Cobrar saldo y entregar** (S/38).
+   ✔ *Verifica*: comprobante final por el TOTAL con "Adelanto a cuenta: S/80", estado
+   **entregada** — sin operario ni taller de por medio.
+5. ✔ *Negativo*: una reserva con abonos solo se **anula** con supervisor (y no se borra).
+
 ### E3 · La cola es FIFO — por orden de llegada (del adelanto)
 
 1. `vendedor1`: crea la orden **X** y después la orden **Y** (dos borradores).
@@ -190,12 +213,12 @@ corre solo. Desde `ne-express/apps/web-bff`:
 ```bash
 node e2e/stack/mock-facturador.cjs &        # el mock (si no corre ya)
 node e2e/api-roles.js                       # 47 checks: handoffs, 403s, carreras, arqueo
-node e2e/api-integridad.js                  # 41 checks: caja, gastos, equipo, Vía A, puente+FIFO
+node e2e/api-integridad.js                  # 52 checks: caja, gastos, equipo, Vía A, puente+FIFO, reservas
 npx playwright test -c e2e/playwright.config.ts   # 5 specs de navegador multi-sesión
 ```
 
 Backend (desde `ne-express/apps/web-bff/e2e/stack`, ver README §3): la suite del addon corre
-**106/106** en el Odoo real.
+**121/121** en el Odoo real.
 
 ## 5 · Dejar el entorno limpio entre pruebas
 

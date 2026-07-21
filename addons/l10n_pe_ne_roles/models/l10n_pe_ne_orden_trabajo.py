@@ -43,10 +43,22 @@ class L10nPeNeOrdenTrabajo(models.Model):
     _order = "id desc"
 
     # El mixin NO declara estado (cada modelo trae el suyo). Lo declara aquí con tracking.
+    # 'reservada' es el estado propio de las RESERVAS (tipo=reserva): la escribe el primer abono
+    # (no es arista del taller). Ver _transiciones: las aristas dependen de self.tipo.
     estado = fields.Selection(
         [("borrador", "Borrador"), ("encolada", "En cola"), ("en_proceso", "En proceso"),
-         ("terminada", "Terminada"), ("entregada", "Entregada"), ("anulada", "Anulada")],
+         ("reservada", "Reservada"), ("terminada", "Terminada"), ("entregada", "Entregada"),
+         ("anulada", "Anulada")],
         string="Estado", default="borrador", required=True, index=True, tracking=True)
+    # DOS caminos sobre el MISMO modelo, elegidos al crear e INMUTABLES después (va en _campos_flujo):
+    #   · taller  — el trabajo pasa por la cola del taller (adelanto único → toma → termina → saldo).
+    #   · reserva — apartado/layaway de un producto YA TERMINADO: el cliente lo aparta con N abonos a
+    #     cuenta y lo recoge al completar. SIN cola de taller ni operario (no hay trabajo que hacer).
+    # La reserva hereda gratis del taller el adelanto (aquí, la suma de abonos), el arqueo por medio, el
+    # saldo en dos tiempos y el blindaje del dinero; solo cambian sus transiciones y el registro N-abonos.
+    tipo = fields.Selection(
+        [("taller", "Taller"), ("reserva", "Reserva")], string="Tipo",
+        default="taller", required=True, index=True)
     # user_id lo aporta el mixin SIN default (NULL = en cola): la orden nace sin dueño y el taller
     # la toma. (La cotización de CN-01 sí le pone default; aquí NO, a propósito.)
 
@@ -128,13 +140,17 @@ class L10nPeNeOrdenTrabajo(models.Model):
     # ───────────────────────────────────────────── flujo
     @api.model
     def _transiciones(self):
-        # SIN arista →entregada (regla dura: la escribe el fold de cobro tras emitir). borrador→encolada
-        # NO es arista: la hace registrar_adelanto (encolar sin adelanto no tiene sentido; una arista
-        # suelta pintaría una acción "Encolar" que se lo saltaría). 'anulada' es rama de excepción
-        # (motivo, NUNCA cadena). Cada estado no-terminal tiene ≥1 salida (invariante escala libre):
-        # terminada sale por 'anulada' (cliente que no recoge) además del fold de cobro.
-        return {
-            **super()._transiciones(),
+        # Las aristas dependen del TIPO (self.tipo): una reserva no tiene cola de taller y una orden
+        # de taller no pasa por 'reservada'. _transiciones se consulta SIEMPRE sobre el REGISTRO en el
+        # flujo (_check_transicion/_ruta/_acciones hacen ensure_one), así que self.tipo está resuelto.
+        # A NIVEL DE MODELO (self vacío: el test-invariante escala-libre y cualquier consulta sin
+        # registro) se devuelve la UNIÓN de ambos tipos — así cada estado no-terminal de la selection
+        # conserva ≥1 salida y el invariante no se rompe por un estado sin aristas en su tipo.
+        base = super()._transiciones()
+        # TALLER — las de hoy, sin cambios. SIN arista →entregada (regla dura: la escribe el fold de
+        # cobro tras emitir). borrador→encolada NO es arista: la hace registrar_adelanto. 'anulada' es
+        # rama de excepción (motivo, NUNCA cadena). Cada estado no-terminal tiene ≥1 salida.
+        taller = {
             ("encolada", "en_proceso"): {"grupo": _G_TALLER, "toma": True, "cadena": True,
                                          "label": "Tomar orden"},
             ("en_proceso", "terminada"): {"grupo": _G_TALLER, "cadena": True,
@@ -148,6 +164,23 @@ class L10nPeNeOrdenTrabajo(models.Model):
             ("terminada", "anulada"): {"grupo": _G_SUPERVISOR, "motivo": True,
                                        "label": "Anular (no recogido)"},
         }
+        # RESERVA — sin taller ni operario. borrador→reservada NO es arista: la escribe el PRIMER abono
+        # (registrar_abono, flujo_ok), como encolada en el taller. 'entregada' la escribe SOLO
+        # cobrar_saldo (regla dura intacta). Solo quedan las anulaciones: la plata (abonos) ya entró,
+        # así que anular una reserva CON abonos exige supervisor (reembolso manual v1, igual que el
+        # taller). Consecuencia natural: tomar/terminar rebotan sobre una reserva ("esa transición no
+        # existe") porque esas aristas no están en su tipo.
+        reserva = {
+            ("borrador", "anulada"): {"grupo": _G_CAJA, "motivo": True, "label": "Anular"},
+            ("reservada", "anulada"): {"grupo": _G_SUPERVISOR, "motivo": True,
+                                       "label": "Anular (reserva con abonos)"},
+        }
+        if self and self.tipo == "reserva":
+            return {**base, **reserva}
+        if self and self.tipo == "taller":
+            return {**base, **taller}
+        # self vacío (modelo): unión — cada estado no-terminal conserva su salida.
+        return {**base, **taller, **reserva}
 
     @api.model
     def _estados_terminales(self):
@@ -159,9 +192,12 @@ class L10nPeNeOrdenTrabajo(models.Model):
         # final) lo escriben SOLO registrar_adelanto/cobrar_saldo (con _FLUJO_OK), nunca un write
         # RPC directo. Sin esto, un operativo podía reescribir adelanto_monto/factura_final_id de
         # una orden ya entregada, divergiendo el registro del comprobante emitido.
+        # 'tipo' entra al blindaje para volverlo INMUTABLE tras crear: solo lo siembra
+        # l10n_pe_ne_crear_orden (con flujo_ok); un write RPC no puede convertir una reserva ya
+        # cobrada en orden de taller (divergiría cola, aristas y registro del dinero).
         return super()._campos_flujo() + (
-            "adelanto_monto", "medio_adelanto", "adelanto_movimiento_id", "factura_final_id",
-            "anticipo_factura_id")
+            "tipo", "adelanto_monto", "medio_adelanto", "adelanto_movimiento_id",
+            "factura_final_id", "anticipo_factura_id")
 
     # Transiciones con nombre (validan los 3 ejes vía _avanzar).
     def l10n_pe_ne_tomar(self):
@@ -264,6 +300,67 @@ class L10nPeNeOrdenTrabajo(models.Model):
                                      m=monto, me=medio, u=self.env.user.name))
         return self._l10n_pe_ne_orden_dict()
 
+    # ───────────────────────────────────────────── abonos (Vía B · reserva/apartado)
+    def l10n_pe_ne_registrar_abono(self, monto, medio=None):
+        """Un ABONO de una RESERVA: el cliente que apartó un producto YA TERMINADO paga a cuenta (N
+        veces). El PRIMER abono encola la reserva (borrador→reservada) y estampa su llegada
+        (fecha_encolada); los siguientes solo suman. NO hay cola de taller ni operario: el producto ya
+        existe, solo se guarda hasta completar el pago y recoger. Eje 2: grupo caja.
+
+        RECIBO INTERNO SIEMPRE (Vía B), aunque l10n_pe_ne_adelanto_facturado esté ON: a diferencia del
+        adelanto ÚNICO del taller, este método NO emite comprobante de anticipo. El biller referencia UN
+        solo doc de anticipo por comprobante final (descuento global 04 + relacionados), y una reserva
+        lleva N abonos — facturar cada uno dejaría N anticipos que el final no sabe descontar juntos.
+        Multi-anticipo facturado es evolución futura; por eso el abono es siempre un movimiento de caja
+        'adelanto' que cuadra el arqueo por su medio, y al recoger cobrar_saldo emite UN comprobante por
+        el total con medios=saldo (el adelanto acumulado no se re-cuenta)."""
+        self.ensure_one()
+        if not self.env.user.has_group(_G_CAJA):
+            raise AccessError(_("No tienes permiso para cobrar el abono."))
+        # A2: serializa la fila — dos abonos concurrentes (doble clic) no se duplican ni pisan la suma.
+        self._l10n_pe_ne_lock()
+        if self.tipo != "reserva":
+            raise UserError(_(
+                "Los abonos son de las reservas; una orden de taller usa el adelanto único."))
+        if self.estado not in ("borrador", "reservada"):
+            raise UserError(_(
+                "Solo se abona sobre una reserva en borrador o reservada (está «%s»).")
+                % self._estado_label(self.estado))
+        monto = round(float(monto or 0.0), 2)
+        if monto <= 0:
+            raise UserError(_("El abono debe ser mayor a 0."))
+        # ESTRICTO: (abonos previos + este) < total. El ÚLTIMO pago es el SALDO al recoger y lo emite
+        # cobrar_saldo (que dispara el comprobante), NO un abono: un abono jamás completa el total (si
+        # lo hiciera, el comprobante final saldría con medios=0). Mensaje honesto que redirige al cobro.
+        nuevo_total = round((self.adelanto_monto or 0.0) + monto, 2)
+        if nuevo_total >= self.amount_total:
+            raise UserError(_(
+                "El abono (S/ %(a).2f) completaría o superaría el total (S/ %(t).2f): el último pago "
+                "es el SALDO al recoger. Usa «Cobrar saldo y entregar» para cerrar la reserva.",
+                a=monto, t=self.amount_total))
+        medio = (medio or "Efectivo").strip() or "Efectivo"
+        # MISMA pieza que el taller: el biller crea el movimiento estructurado 'adelanto' sobre la
+        # sesión abierta; entra al arqueo POR SU MEDIO vía el seam _l10n_pe_ne_por_medio_arqueo. Se
+        # enlaza la orden para que unlink lo vea (una reserva con plata no se borra). RECIBO INTERNO:
+        # no se emite comprobante (ver docstring).
+        mov = self.env["l10n_pe_ne.caja.sesion"]._l10n_pe_ne_registrar_adelanto(
+            monto, medio, self.partner_id, _("Abono %s") % self.name)
+        mov.orden_trabajo_id = self.id
+        # UN solo write flujo_ok: la suma acumulada, el medio del ÚLTIMO abono (default de cobrar_saldo),
+        # el paso a 'reservada' si venía de borrador, y la marca de llegada del primer abono.
+        vals = {"adelanto_monto": nuevo_total, "medio_adelanto": medio}
+        if self.estado == "borrador":
+            vals["estado"] = "reservada"
+        # fecha_encolada = llegada del PRIMER abono (FIFO de la bandeja de reservas). No se reescribe
+        # en abonos posteriores: el turno de la reserva se toma al apartar, no al último pago.
+        if not self.fecha_encolada:
+            vals["fecha_encolada"] = fields.Datetime.now()
+        self.with_context(l10n_pe_ne_flujo_ok=True).write(vals)
+        self.message_post(body=_(
+            "Abono de S/ %(m).2f (%(me)s) cobrado por %(u)s. Reserva a cuenta (S/ %(t).2f de S/ %(g).2f).",
+            m=monto, me=medio, u=self.env.user.name, t=nuevo_total, g=self.amount_total))
+        return self._l10n_pe_ne_orden_dict()
+
     # ───────────────────────────────────────────── fold: cobrar saldo y entregar
     def l10n_pe_ne_cobrar_saldo(self, payload=None):
         """FOLD de CN-02: el cliente vuelve, paga el SALDO y recoge. Emite el comprobante final por
@@ -275,7 +372,15 @@ class L10nPeNeOrdenTrabajo(models.Model):
             raise AccessError(_("No tienes permiso para cobrar."))
         # A2: serializa la fila — dos cobros concurrentes (doble clic) no emiten dos comprobantes.
         self._l10n_pe_ne_lock()
-        if self.estado != "terminada":
+        # El estado desde el que se cobra el saldo depende del tipo: el taller cobra al TERMINAR el
+        # trabajo; la reserva cobra al recoger, estando ya RESERVADA (con sus abonos). En ambos casos
+        # 'entregada' la escribe SOLO este fold (regla dura), no una arista.
+        estado_cobrable = "reservada" if self.tipo == "reserva" else "terminada"
+        if self.estado != estado_cobrable:
+            if self.tipo == "reserva":
+                raise UserError(_(
+                    "Solo se cobra el saldo de una RESERVA reservada (con abonos, lista para "
+                    "recoger); está «%s».") % self._estado_label(self.estado))
             raise UserError(_("Solo se cobra el saldo de una orden TERMINADA (trabajo listo)."))
         if self.factura_final_id:
             raise UserError(_("Esta orden ya se cobró en el comprobante %s.")
@@ -433,12 +538,21 @@ class L10nPeNeOrdenTrabajo(models.Model):
         roles le aparece toda la ruta; al operario solo tomar/terminar; al cajero cobrar."""
         self.ensure_one()
         out = super()._acciones()
-        if self.estado == "borrador" and not self.adelanto_movimiento_id \
-                and self.env.user.has_group(_G_CAJA):
+        es_caja = self.env.user.has_group(_G_CAJA)
+        if self.tipo == "reserva":
+            # Reserva: abonar a cuenta (N veces, mientras siga en borrador/reservada) y, ya reservada,
+            # cobrar el saldo al recoger. Ni adelanto único ni cola de taller (el producto ya existe).
+            if es_caja and self.estado in ("borrador", "reservada"):
+                out.append({"key": "registrar-abono", "label": "Registrar abono",
+                            "pasos": ["reservada"], "requiereMotivo": False})
+            if es_caja and self.estado == "reservada" and not self.factura_final_id:
+                out.append({"key": "cobrar-saldo", "label": "Cobrar saldo y entregar",
+                            "pasos": ["entregada"], "requiereMotivo": False})
+            return out
+        if self.estado == "borrador" and not self.adelanto_movimiento_id and es_caja:
             out.append({"key": "registrar-adelanto", "label": "Cobrar adelanto",
                         "pasos": ["encolada"], "requiereMotivo": False})
-        if self.estado == "terminada" and not self.factura_final_id \
-                and self.env.user.has_group(_G_CAJA):
+        if self.estado == "terminada" and not self.factura_final_id and es_caja:
             out.append({"key": "cobrar-saldo", "label": "Cobrar saldo y entregar",
                         "pasos": ["entregada"], "requiereMotivo": False})
         return out
@@ -446,11 +560,16 @@ class L10nPeNeOrdenTrabajo(models.Model):
     def unlink(self):
         # Integridad: no se borra una orden con dinero de por medio (adelanto cobrado o comprobante
         # emitido). El origen de un cobro no se destruye — se anula.
+        # OJO reservas: sus ABONOS no setean adelanto_movimiento_id (ese m2o es del adelanto ÚNICO del
+        # taller); su plata vive como N movimientos de caja 'adelanto' ligados por orden_trabajo_id. Se
+        # mira TAMBIÉN si existe alguno para que una reserva con abonos tampoco se pueda borrar.
+        Mov = self.env["l10n_pe_ne.caja.movimiento"]
         for o in self:
-            if o.factura_final_id or o.adelanto_movimiento_id:
+            tiene_abonos = bool(o.id) and Mov.search_count([("orden_trabajo_id", "=", o.id)]) > 0
+            if o.factura_final_id or o.adelanto_movimiento_id or tiene_abonos:
                 raise UserError(_(
-                    "No se puede borrar la orden %s: tiene dinero cobrado (adelanto o comprobante). "
-                    "Anúlala en su lugar.") % o.name)
+                    "No se puede borrar la orden %s: tiene dinero cobrado (adelanto, abonos o "
+                    "comprobante). Anúlala en su lugar.") % o.name)
         return super().unlink()
 
     # ───────────────────────────────────────────── creación + serialización
@@ -463,6 +582,12 @@ class L10nPeNeOrdenTrabajo(models.Model):
         cotización — copia sus líneas y (si falta) su cliente. Con ítems explícitos la SPA manda (los
         ítems ganan) y la cotización queda solo como referencia trazable."""
         payload = payload or {}
+        # tipo elegido al crear (taller por defecto). Se VALIDA a los dos únicos valores: se siembra en
+        # el mismo create (con flujo_ok, porque va en _campos_flujo) y queda inmutable. El PUENTE desde
+        # cotización también lo respeta (reservar un producto ya cotizado es legítimo).
+        tipo = (payload.get("tipo") or "taller")
+        if tipo not in ("taller", "reserva"):
+            raise UserError(_("Tipo de orden inválido: usa «taller» o «reserva»."))
         # A16: la referencia a la cotización de origen se VALIDA (exists + leerla dispara la
         # ir.rule → cross-RUC = AccessError), no se siembra cruda como int.
         cot = False
@@ -492,9 +617,11 @@ class L10nPeNeOrdenTrabajo(models.Model):
         if not lineas:
             raise UserError(_("La orden necesita al menos un ítem."))
         partner = self._l10n_pe_ne_resolver_partner(payload, cot)
-        orden = self.create({
+        # flujo_ok: 'tipo' está blindado (_campos_flujo) — sembrarlo al crear es su ÚNICA escritura.
+        orden = self.with_context(l10n_pe_ne_flujo_ok=True).create({
             "company_id": self.env.company.id,
             "partner_id": partner.id,
+            "tipo": tipo,
             "cotizacion_id": cot.id if cot else False,
             "fecha_pactada": payload.get("fechaPactada") or False,
             "linea_ids": lineas,
@@ -553,11 +680,24 @@ class L10nPeNeOrdenTrabajo(models.Model):
 
     def _l10n_pe_ne_orden_dict(self):
         self.ensure_one()
+        # Historial de abonos de la reserva (movimientos de caja 'adelanto' ligados, orden cronológico).
+        # Para una reserva la SPA pinta la línea de tiempo; para el taller el adelanto es único (1 mov).
+        abonos = []
+        if self.id:
+            movs = self.env["l10n_pe_ne.caja.movimiento"].search(
+                [("orden_trabajo_id", "=", self.id), ("tipo", "=", "adelanto")],
+                order="fecha asc, id asc")
+            abonos = [{"fecha": m.fecha and str(m.fecha) or "", "monto": m.monto or 0.0,
+                       "medio": m.medio or ""} for m in movs]
         return {
             "id": self.id,
             "name": self.name,
             "estado": self.estado,
             "estadoLabel": self._estado_label(self.estado),
+            # tipo del camino (taller/reserva) + su etiqueta: la SPA elige la vista sin lógica propia.
+            "tipo": self.tipo,
+            "tipoLabel": dict(
+                self._fields["tipo"]._description_selection(self.env)).get(self.tipo, self.tipo),
             "cliente": self.partner_id.name or "",
             "clienteId": self.partner_id.id,
             "clienteDoc": self.partner_id.vat or "",
@@ -577,6 +717,8 @@ class L10nPeNeOrdenTrabajo(models.Model):
             "anticipoFacturaId": self.anticipo_factura_id.id or None,
             "anticipoNumero": self.anticipo_factura_id.name or "",
             "anticipoEstado": self.anticipo_factura_id.l10n_pe_biller_state or "",
+            # Reserva: historial de abonos a cuenta (para el taller trae su único adelanto).
+            "abonos": abonos,
             "lineas": [{
                 "descripcion": l.descripcion or (l.product_id.display_name or ""),
                 "cantidad": l.cantidad,
@@ -594,9 +736,11 @@ class L10nPeNeOrdenTrabajo(models.Model):
         """Cola del taller: órdenes encoladas (por tomar) y las que ya tomó (en proceso). FIFO por
         llegada A LA COLA: se atiende primero la que se adelantó antes (fecha_encolada), NO la más
         nueva. Las órdenes viejas SIN fecha_encolada (creadas antes de este cambio) caen al final —
-        Postgres pone los NULLs al último en ASC — tolerable en bases pre-cambio."""
+        Postgres pone los NULLs al último en ASC — tolerable en bases pre-cambio. tipo=taller: las
+        reservas nunca están 'encolada'/'en_proceso', pero el filtro es explícito (la cola del taller
+        no lista reservas)."""
         return self._l10n_pe_ne_cola_dict(
-            [("estado", "in", ("encolada", "en_proceso"))], offset, limit,
+            [("tipo", "=", "taller"), ("estado", "in", ("encolada", "en_proceso"))], offset, limit,
             order="fecha_encolada asc, id asc")
 
     @api.model
@@ -605,9 +749,18 @@ class L10nPeNeOrdenTrabajo(models.Model):
         adelanto que las encola al taller. Sin esta bandeja, un cajero SEGREGADO no tenía cómo
         encontrarlas — hallazgo del e2e con roles puros (con el usuario modal no se veía: el que
         creaba también cobraba en el mismo modal). FIFO por registro (id asc): se cobra primero la
-        que entró antes al sistema."""
+        que entró antes al sistema. Lista borradores de AMBOS tipos: el PRIMER abono de una reserva
+        también se cobra aquí (registrar_abono la mueve a 'reservada', igual que el adelanto encola)."""
         return self._l10n_pe_ne_cola_dict([("estado", "=", "borrador")], offset, limit,
                                           order="id asc")
+
+    @api.model
+    def l10n_pe_ne_cola_reservas(self, offset=0, limit=10):
+        """Bandeja de RESERVAS (cajero): reservas ya con abonos (estado 'reservada') para seguir
+        abonando o cobrar el saldo y entregar al recoger. tipo=reserva + estado=reservada (los
+        borradores de reserva aún sin abono viven en cola_adelanto). FIFO por registro (id asc)."""
+        return self._l10n_pe_ne_cola_dict(
+            [("tipo", "=", "reserva"), ("estado", "=", "reservada")], offset, limit, order="id asc")
 
     @api.model
     def l10n_pe_ne_cola_saldo(self, offset=0, limit=10):

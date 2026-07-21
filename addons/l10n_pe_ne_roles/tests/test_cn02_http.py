@@ -248,3 +248,50 @@ class TestCn02Http(EnvioSincronoMixin, HttpCase):
                              {"monto": 50, "medio": "Efectivo"})
         self.assertEqual(sc, 400)
         self.assertIn("caja abierta", err["message"])
+
+    # ── RESERVA (layaway) e2e segregado: recepción aparta, caja abona y recoge ──
+    def _crear_reserva(self, user):
+        return self._post("/ordenes", user, {
+            "clienteId": self.cliente.id, "tipo": "reserva",
+            "items": [{"productId": self.servicio.id, "descripcion": "Licuadora apartada",
+                       "cantidad": 1, "precio": 118.0, "afectoIgv": True}]})
+
+    def test_reserva_camino_feliz(self):
+        # recepción crea la reserva (tipo='reserva'); nace en borrador, sin dueño ni cola de taller.
+        self._abrir_caja(self.cajero)
+        sc, orden = self._crear_reserva(self.recepcion)
+        self.assertEqual(sc, 200, orden)
+        oid = orden["id"]
+        self.assertEqual(orden["tipo"], "reserva")
+        self.assertEqual(orden["estado"], "borrador")
+        # el cajero abona a cuenta 2 veces (el 1er abono encola a 'reservada'); un abono cuadra el
+        # arqueo por su medio, sin emitir comprobante (recibo interno).
+        sc, r = self._post("/ordenes/%s/abono" % oid, self.cajero, {"monto": 30, "medio": "Yape"})
+        self.assertEqual(sc, 200, r)
+        self.assertEqual(r["estado"], "reservada")
+        self.assertEqual(r["adelanto"], 30.0)
+        self.assertEqual(len(r["abonos"]), 1)
+        sc, r = self._post("/ordenes/%s/abono" % oid, self.cajero, {"monto": 50, "medio": "Efectivo"})
+        self.assertEqual(sc, 200, r)
+        self.assertEqual(r["adelanto"], 80.0)
+        self.assertEqual(r["saldo"], 38.0)
+        self.assertEqual(len(r["abonos"]), 2)
+        # el cajero SEGREGADO ve la reserva en su bandeja de reservas (ir.rule incluye 'reservada').
+        sc, cola = self._get("/ordenes/cola-reservas", self.cajero)
+        self.assertEqual(sc, 200, cola)
+        self.assertIn(oid, [i["id"] for i in cola["items"]])
+        # recoge: el cajero cobra el saldo y entrega (emisión doblada) → comprobante final por el total.
+        with patch(_EMIT, return_value=_OK):
+            sc, r = self._post("/ordenes/%s/cobrar-saldo" % oid, self.cajero, {"medio": "Efectivo"})
+        self.assertEqual(sc, 200, r)
+        self.assertEqual(r["estado"], "entregada")
+        self.assertEqual(r["saldoCobrado"], 38.0)
+
+    def test_abono_en_orden_taller_rechazado(self):
+        # el endpoint /abono es de las RESERVAS; sobre una orden de taller (adelanto único) → 400.
+        self._abrir_caja(self.cajero)
+        sc, orden = self._crear_orden(self.recepcion)   # taller por defecto
+        sc, err = self._post("/ordenes/%s/abono" % orden["id"], self.cajero,
+                             {"monto": 30, "medio": "Efectivo"})
+        self.assertEqual(sc, 400, err)
+        self.assertIn("reservas", err["message"])

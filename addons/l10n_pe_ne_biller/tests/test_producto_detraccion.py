@@ -70,3 +70,34 @@ class TestProductoDetraccion(TransactionCase):
             "commit": True,
         })
         self.assertTrue(res.get("errores"))
+
+    def test_reimportar_sin_columna_detraccion_no_borra_codigo(self):
+        """Plantilla vieja (sin columna DETRACCIÓN) reimportada sobre un producto que YA
+        tiene código de detracción: el UPSERT por CÓDIGO no debe borrarlo. La celda vacía y la
+        columna ausente lucen igual (cell() devuelve None en ambos casos) así que sin guardar
+        contra el dict de headers reales (`idx`) no hay forma de distinguir 'el usuario limpió
+        el campo' de 'el usuario ni trajo la columna'."""
+        import io, base64, xlsxwriter
+
+        d = self.Move.l10n_pe_ne_create_producto({
+            'descripcion': 'TRANSPORTE DE CARGA REIMPORT', 'codigo': 'DTR004',
+            'precio': 500.0, 'taxCode': '1000', 'tipo': 'servicio', 'detraCod': '027',
+        })
+        self.assertEqual(d['detraCod'], '027')
+
+        buf = io.BytesIO()
+        wb = xlsxwriter.Workbook(buf, {"in_memory": True})
+        ws = wb.add_worksheet("Productos")
+        # Plantilla vieja: SIN columna DETRACCIÓN (solo actualiza precio).
+        ws.write_row(0, 0, ["CÓDIGO", "NOMBRE", "UNIDAD", "PRECIO VENTA", "AFECTACIÓN"])
+        ws.write_row(1, 0, ["DTR004", "TRANSPORTE DE CARGA REIMPORT", "UNIDAD", 999, "GRAVADO"])
+        wb.close()
+        res = self.Move.l10n_pe_ne_importar_productos({
+            "contentB64": base64.b64encode(buf.getvalue()).decode(),
+            "commit": True,
+        })
+        self.assertFalse(res.get("errores"), res)
+
+        p = self.env['product.product'].browse(d['id'])
+        self.assertEqual(p.l10n_pe_ne_detraccion_cod, '027')
+        self.assertEqual(p.list_price, 999.0)

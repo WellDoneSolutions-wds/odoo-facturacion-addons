@@ -4780,7 +4780,7 @@ class AccountMove(models.Model):
             afe_raw = norm(cell(row, "afectacion"))
             tax_code = AFECT_IMPORT.get(afe_raw, "1000") if afe_raw else "1000"
             detra_raw = txt(cell(row, "detraccion"))
-            if detra_raw and not re.fullmatch(r"\d{3}", detra_raw):
+            if detra_raw and not re.fullmatch(r"[0-9]{3}", detra_raw):
                 errores.append({"fila": n, "msg": "DETRACCIÓN debe ser el código de 3 dígitos del catálogo 54 (ej. 027) o vacío"})
                 continue
             barcode = txt(cell(row, "codigo de barras"))
@@ -4799,8 +4799,13 @@ class AccountMove(models.Model):
                 else:
                     creados += 1
                 continue
-            vals = {"name": nombre, "l10n_pe_ne_unit_code": unidad,
-                    "l10n_pe_ne_detraccion_cod": detra_raw or False}
+            vals = {"name": nombre, "l10n_pe_ne_unit_code": unidad}
+            # Columna DETRACCIÓN AUSENTE (plantilla vieja) vs. celda VACÍA (el usuario limpió el
+            # código) lucen igual por cell() (None en ambos casos): sin este guard contra `idx`
+            # (headers reales del archivo) un re-import sin la columna borraba en silencio los
+            # códigos de detracción ya guardados vía existing.write(vals).
+            if "detraccion" in idx:
+                vals["l10n_pe_ne_detraccion_cod"] = detra_raw or False
             if precio is not None:
                 vals["list_price"] = precio
             if costo is not None:

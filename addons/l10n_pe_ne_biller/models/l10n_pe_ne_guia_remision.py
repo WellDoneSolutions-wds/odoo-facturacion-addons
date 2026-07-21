@@ -533,7 +533,7 @@ class L10nPeNeGuiaRemision(models.Model):
             'docRelacionado': self._l10n_pe_ne_guia_doc_relacionado(),
         }
         _logger.info("--------------------- PAYLOAD GRE ---------------------")
-        _logger.debug('GRE payload: %s', resp)
+        _logger.info('GRE payload: %s', resp)
         _logger.info("--------------------- FIN PAYLOAD GRE ---------------------")
         return resp
 

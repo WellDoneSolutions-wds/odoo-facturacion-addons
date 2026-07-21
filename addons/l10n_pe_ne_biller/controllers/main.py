@@ -707,6 +707,24 @@ class L10nPeNeApi(http.Controller):
         except Exception as e:  # noqa: BLE001
             return self._fail(e)
 
+    @http.route("/ne/api/anticipos", **_GET)
+    def list_anticipos(self, **kw):
+        """Anticipos (doc. A) pendientes de regularizar del cliente indicado (ruc/partnerId),
+        para el autocompletado de la regularización en la venta final."""
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        try:
+            return self._json(
+                self._move(uid).l10n_pe_ne_anticipos_pendientes(
+                    ruc=kw.get("ruc") or None,
+                    partner_id=kw.get("partnerId") or None,
+                    moneda=kw.get("moneda") or None,
+                )
+            )
+        except Exception as e:  # noqa: BLE001
+            return self._fail(e)
+
     @http.route("/ne/api/emitir", **_POST)
     def emitir(self, **kw):
         """Emite un comprobante. Rutea por tipoDoc: 20/40 son otro-CPE

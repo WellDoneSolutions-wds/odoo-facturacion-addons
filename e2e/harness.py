@@ -148,6 +148,8 @@ def _apply_flags(move, flags):
             move.l10n_pe_ne_detraccion_medio_pago = d['medio_pago']
     if f.get('percepcion'):
         move.l10n_pe_ne_percepcion = True
+    if f.get('es_anticipo'):
+        move.l10n_pe_ne_es_anticipo = True   # doc. A: comprobante emitido POR un pago anticipado
     if f.get('anticipo'):
         a = f['anticipo']
         move.l10n_pe_ne_anticipo_total = float(a.get('total', 0))
@@ -260,8 +262,68 @@ def _build_payment(case, kind):
     return pay.l10n_pe_per_state, (pay.l10n_pe_per_message or '')
 
 
+def _run_anticipo_ciclo(case):
+    """Ciclo real de pago por anticipo contra SUNAT beta: (A) emite el comprobante POR el pago
+    anticipado ('PAGO ANTICIPADO', venta interna 0101) y (B) la venta final que lo regulariza,
+    enlazada por origen_id (descuento global 04 + relacionado). Ambos deben salir aceptados
+    (CDR ResponseCode 0), y el saldo del anticipo debe bajar tras aplicarlo."""
+    import re as _re
+    f = case.get('flags', {})
+    partner = _partner(case.get('partner', 'ruc'))
+
+    def _code(msg):
+        m = _re.search(r'ResponseCode (\d+)', msg or '')
+        return m.group(1) if m else ''
+
+    def _acc(state, msg):
+        return state in ('enviado', 'anulado') and (_code(msg) == '0' or 'aceptad' in (msg or '').lower())
+
+    # (A) comprobante de anticipo
+    a = env['account.move'].create({
+        'move_type': 'out_invoice', 'partner_id': partner.id, 'invoice_date': fields_today(),
+        'invoice_line_ids': [_line_vals(l) for l in case['lines']]})
+    a.l10n_pe_serie = f.get('serie', 'F001')
+    a.l10n_pe_correlativo = str(random.randint(40000, 99000))
+    a.l10n_pe_ne_es_anticipo = True
+    a.action_post()
+    req_a = a._l10n_pe_build_invoice_request()
+    des_ok = req_a['detalle'][0]['desItem'].startswith('PAGO ANTICIPADO')
+    op_ok = req_a['cabecera']['tipOperacion'] == '0101'
+    sa, ma = _send_move(a)
+    saldo0 = a.l10n_pe_ne_anticipo_saldo
+
+    # (B) venta final que regulariza el anticipo A (enlazada por origen_id)
+    b = env['account.move'].create({
+        'move_type': 'out_invoice', 'partner_id': partner.id, 'invoice_date': fields_today(),
+        'invoice_line_ids': [_line_vals(l) for l in case.get('final_lines', case['lines'])]})
+    b.l10n_pe_serie = f.get('serie_final', 'F001')
+    b.l10n_pe_correlativo = str(random.randint(40000, 99000))
+    b.l10n_pe_ne_anticipo_origen_id = a.id
+    b.l10n_pe_ne_anticipo_total = float(f.get('aplicar') or a.amount_total)
+    b.l10n_pe_ne_anticipo_doc = '%s-%s' % (a.l10n_pe_ne_serie_emit or a.l10n_pe_serie,
+                                           a.l10n_pe_ne_corr_emit or '')
+    b.l10n_pe_ne_anticipo_tipo = '02'
+    b.action_post()
+    sb, mb = _send_move(b)
+    a.invalidate_recordset(['l10n_pe_ne_anticipo_saldo', 'l10n_pe_ne_anticipo_aplicado'])
+    saldo1 = a.l10n_pe_ne_anticipo_saldo
+
+    acc_a, acc_b = _acc(sa, ma), _acc(sb, mb)
+    return {'id': case['id'], 'doc': 'anticipo_ciclo', 'title': case.get('title', ''),
+            'docA': {'state': sa, 'code': _code(ma), 'accepted': bool(acc_a),
+                     'desItem_pago_anticipado': des_ok, 'tipOperacion_0101': op_ok,
+                     'msg': (ma or '')[:120]},
+            'docB': {'state': sb, 'code': _code(mb), 'accepted': bool(acc_b),
+                     'aplicado': b.l10n_pe_ne_anticipo_total, 'msg': (mb or '')[:120]},
+            'saldo_antes': round(saldo0, 2), 'saldo_despues': round(saldo1, 2),
+            'expected': case.get('expected', 'accepted'),
+            'ok': bool(acc_a and acc_b and des_ok and op_ok and saldo1 < saldo0)}
+
+
 def run_case(case):
     from odoo.exceptions import UserError, ValidationError
+    if case.get('doc') == 'anticipo_ciclo':
+        return _run_anticipo_ciclo(case)
     expected = case.get('expected', 'accepted')
     expect_reject = expected.startswith('rejected')
     doc = case['doc']

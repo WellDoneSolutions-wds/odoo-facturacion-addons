@@ -50,6 +50,26 @@ _TIPO_COMPROBANTE = {"FACTURA": "01", "BOLETA": "03", "01": "01", "03": "03"}
 _ESTADO_MAP = {"enviado": "emitido", "rechazado": "rechazado", "error": "error",
                "en_proceso": "en_proceso"}
 
+# ------------------------------------------------------------------ Lote de GUÍAS
+# Cabeceras de la plantilla/hoja 'Guias' (MVP: GRE remitente 09, motivo 01 Venta,
+# modalidad 02 transporte privado, un destinatario, un vehículo + un conductor, uno o más
+# bienes agrupados por 'guia'). El parseo lee por NOMBRE normalizado, no por posición.
+# 'destinatario' (razón social) va más allá del mínimo pedido porque una guía necesita el
+# nombre del destinatario para SUNAT cuando el partner es nuevo (rznSocialDestinatario).
+_HEADERS_GUIA = ["guia", "destinatario doc", "destinatario", "motivo",
+                 "ubigeo partida", "dir partida", "ubigeo llegada", "dir llegada",
+                 "peso bruto", "placa", "conductor tipo doc", "conductor num doc",
+                 "conductor nombres", "conductor apellidos", "conductor licencia",
+                 "descripcion", "cantidad", "unidad"]
+# tipo doc del conductor humano → código cat.06 que consume el modelo de guía.
+_CONDUCTOR_TIPODOC = {"DNI": "1", "CE": "4", "PASAPORTE": "7",
+                      "1": "1", "4": "4", "7": "7"}
+# estado de la guía (l10n_pe_ne.guia_remision.estado, que devuelven quick_guia/emitir_guia) →
+# estado de fila del lote. 'enviado' = Aceptada por SUNAT; 'en_proceso' = ticket pendiente (lo
+# resuelve el cron de guías _cron_consultar_en_proceso, no un cron nuevo del lote).
+_ESTADO_MAP_GUIA = {"enviado": "emitido", "en_proceso": "en_proceso",
+                    "rechazado": "rechazado", "error": "error"}
+
 
 class L10nPeNeLote(models.Model):
     _name = "l10n_pe_ne.lote"
@@ -59,6 +79,13 @@ class L10nPeNeLote(models.Model):
     name = fields.Char(string="Archivo", required=True)          # filename original
     sha256 = fields.Char(index=True)                             # detección de re-subida
     attachment_id = fields.Many2one("ir.attachment")            # xlsx original (soporte/debug)
+    # Discriminador del lote: emite comprobantes (facturas/boletas) o guías de remisión. Los
+    # lotes existentes quedan 'comprobante' (default) y se comportan EXACTAMENTE igual que hoy;
+    # solo el tipo 'guia' ramifica plantilla/parseo/validación/procesado hacia el modelo de guía.
+    tipo = fields.Selection([
+        ("comprobante", "Comprobantes"),
+        ("guia", "Guías de remisión"),
+    ], default="comprobante", required=True)
     estado = fields.Selection([
         ("con_errores", "Con errores"),   # terminal: solo consulta del reporte
         ("validado", "Validado"),         # listo para procesar
@@ -317,11 +344,183 @@ class L10nPeNeLote(models.Model):
         filas_excel = "%s" % fn if len(bloque) == 1 else "%s-%s" % (fn, bloque[-1]["filaExcel"])
         return {"payload": payload, "total": round(total_est, 2), "filas_excel": filas_excel}
 
+    # ------------------------------------------------------- parseo/validación GUÍAS
+    def _l10n_pe_ne_parse_xlsx_guia(self, data):
+        """Lee la hoja 'Guias' (o la primera) por NOMBRE de cabecera normalizado. Una fila = un
+        bien; la columna 'guia' agrupa varios bienes en una misma guía (filas contiguas). Falta
+        una cabecera obligatoria → UserError global. Espeja _l10n_pe_ne_parse_xlsx."""
+        import openpyxl
+        try:
+            wb = openpyxl.load_workbook(io.BytesIO(data), data_only=True, read_only=True)
+        except Exception:
+            raise UserError(_("No se pudo leer el archivo. Sube un .xlsx válido (no un .xls antiguo)."))
+        ws = wb["Guias"] if "Guias" in wb.sheetnames else wb[wb.sheetnames[0]]
+        rows = list(ws.iter_rows(values_only=True))
+        if not rows:
+            raise UserError(_("El archivo está vacío."))
+        header = [self._l10n_pe_ne_norm(h) for h in rows[0]]
+        idx = {h: i for i, h in enumerate(header) if h}
+        faltan = [h for h in ("destinatario doc", "ubigeo partida", "ubigeo llegada",
+                              "descripcion", "cantidad") if h not in idx]
+        if faltan:
+            raise UserError(_("Faltan columnas obligatorias en la hoja: %s") % ", ".join(faltan))
+
+        def raw(row, name):
+            i = idx.get(name)
+            return row[i] if i is not None and i < len(row) else None
+
+        filas = []
+        for n, row in enumerate(rows[1:], start=2):   # n = fila Excel real (1 = cabecera)
+            if row is None or all(c is None or str(c).strip() == "" for c in row):
+                continue
+            filas.append({
+                "filaExcel": n,
+                "guia": self._l10n_pe_ne_txt(raw(row, "guia")),
+                "dest_doc": self._l10n_pe_ne_txt(raw(row, "destinatario doc")),
+                "dest_nombre": self._l10n_pe_ne_txt(raw(row, "destinatario")),
+                "motivo": self._l10n_pe_ne_txt(raw(row, "motivo")),
+                "ubi_partida": self._l10n_pe_ne_txt(raw(row, "ubigeo partida")),
+                "dir_partida": self._l10n_pe_ne_txt(raw(row, "dir partida")),
+                "ubi_llegada": self._l10n_pe_ne_txt(raw(row, "ubigeo llegada")),
+                "dir_llegada": self._l10n_pe_ne_txt(raw(row, "dir llegada")),
+                "peso_raw": raw(row, "peso bruto"),
+                "placa": self._l10n_pe_ne_txt(raw(row, "placa")).upper(),
+                "cond_tipo": self._l10n_pe_ne_txt(raw(row, "conductor tipo doc")).upper(),
+                "cond_num": self._l10n_pe_ne_txt(raw(row, "conductor num doc")),
+                "cond_nombres": self._l10n_pe_ne_txt(raw(row, "conductor nombres")),
+                "cond_apellidos": self._l10n_pe_ne_txt(raw(row, "conductor apellidos")),
+                "cond_licencia": self._l10n_pe_ne_txt(raw(row, "conductor licencia")),
+                "producto": self._l10n_pe_ne_txt(raw(row, "descripcion")),
+                "cantidad_raw": raw(row, "cantidad"),
+                "unidad": self._l10n_pe_ne_txt(raw(row, "unidad")).upper(),
+            })
+        return filas
+
+    def _l10n_pe_ne_validar_guia(self, filas):
+        """Agrupa por 'guia' (contiguas; vacío = guía propia), valida cada grupo y construye el
+        payload de l10n_pe_ne_quick_guia. Devuelve (guias, errores, advertencias). Mismo contrato
+        y mecanismo de errores que _l10n_pe_ne_validar (todo-o-nada: ≥1 error → sin filas)."""
+        errores, advertencias, guias = [], [], []
+        grupos, vistos, i = [], set(), 0
+        while i < len(filas):
+            v = filas[i]["guia"]
+            if not v:
+                grupos.append((v, [filas[i]])); i += 1; continue
+            j, bloque = i, []
+            while j < len(filas) and filas[j]["guia"] == v:
+                bloque.append(filas[j]); j += 1
+            if v in vistos:
+                for fx in bloque:
+                    errores.append({"filaExcel": fx["filaExcel"], "venta": v,
+                                    "mensaje": _("La guía '%s' aparece en filas no contiguas") % v})
+            vistos.add(v)
+            grupos.append((v, bloque)); i = j
+        for v, bloque in grupos:
+            g = self._l10n_pe_ne_validar_grupo_guia(v, bloque, errores, advertencias)
+            if g:
+                guias.append(g)
+        return guias, errores, advertencias
+
+    def _l10n_pe_ne_validar_grupo_guia(self, guia, bloque, errores, advertencias):
+        """Valida un grupo de bienes de una misma guía y arma el payload de quick_guia (MVP:
+        GRE 09, motivo 01, modalidad 02 privada, un destinatario, un vehículo + un conductor por
+        campos legados, uno o más bienes). Los errores usan la clave 'venta' (agrupador genérico)
+        para que la tabla de errores de la SPA los muestre sin cambios."""
+        local, first, fn = [], bloque[0], bloque[0]["filaExcel"]
+        doc = first["dest_doc"]
+        dest_tipo = "6"
+        if not doc:
+            local.append((fn, _("El documento del destinatario es requerido")))
+        elif len(doc) == 11:
+            if not self._l10n_pe_ne_ruc_valido(doc):
+                local.append((fn, _("RUC del destinatario inválido: el dígito verificador no coincide")))
+        elif len(doc) == 8 and doc.isdigit():
+            dest_tipo = "1"
+        else:
+            local.append((fn, _("El documento del destinatario debe ser RUC (11 dígitos) o DNI (8)")))
+        nombre = first["dest_nombre"]
+        if not nombre and not (doc and self.env["res.partner"].search([("vat", "=", doc)], limit=1)):
+            local.append((fn, _("El nombre/razón social del destinatario es requerido")))
+        # SUNAT 2555 (motivo 01 Venta): el destinatario no puede ser la propia empresa.
+        ruc_emisor = (self.env.company.vat or "").strip()
+        if len(doc) == 11 and doc == ruc_emisor:
+            local.append((fn, _("Para el motivo Venta el destinatario no puede ser tu propia empresa")))
+        # Normaliza el motivo: Excel suele traerlo numérico y sin el cero a la izquierda
+        # (1 / 1.0 → "01"), lo que antes disparaba un rechazo confuso "solo 01 soportado".
+        motivo_raw = first["motivo"]
+        if isinstance(motivo_raw, float) and motivo_raw.is_integer():
+            motivo_raw = int(motivo_raw)
+        motivo = (str(motivo_raw).strip() or "01") if motivo_raw not in (None, "") else "01"
+        if motivo.isdigit():
+            motivo = motivo.zfill(2)
+        if motivo != "01":
+            local.append((fn, _("Solo el motivo 01 (Venta) está soportado en emisión masiva de "
+                                "guías; usa el formulario individual")))
+        for campo, etiqueta in (("ubi_partida", "partida"), ("ubi_llegada", "llegada")):
+            if not re.fullmatch(r"\d{6}", first[campo] or ""):
+                local.append((fn, _("El ubigeo de %s debe tener 6 dígitos") % etiqueta))
+        if not first["dir_partida"]:
+            local.append((fn, _("La dirección de partida es requerida")))
+        if not first["dir_llegada"]:
+            local.append((fn, _("La dirección de llegada es requerida")))
+        peso = self._l10n_pe_ne_num(first["peso_raw"])
+        if peso is None or peso <= 0:
+            local.append((fn, _("El peso bruto debe ser mayor a 0"))); peso = peso or 0.0
+        placa = (first["placa"] or "").strip().upper()
+        if not re.match(r"^(?!0+$)[0-9A-Z]{6,8}$", placa):
+            local.append((fn, _("La placa debe tener de 6 a 8 caracteres alfanuméricos (SUNAT 2567)")))
+        cond_tipo = _CONDUCTOR_TIPODOC.get(first["cond_tipo"], "") if first["cond_tipo"] else "1"
+        if first["cond_tipo"] and not cond_tipo:
+            local.append((fn, _("Tipo de documento del conductor no soportado: %s") % first["cond_tipo"]))
+            cond_tipo = "1"
+        for campo, etiqueta in (("cond_num", _("el documento")), ("cond_nombres", _("los nombres")),
+                                ("cond_apellidos", _("los apellidos")), ("cond_licencia", _("la licencia"))):
+            if not (first[campo] or "").strip():
+                local.append((fn, _("Falta %s del conductor") % etiqueta))
+        items = []
+        for f in bloque:
+            fx = f["filaExcel"]
+            if not f["producto"]:
+                local.append((fx, _("La descripción del bien es requerida")))
+            cant = self._l10n_pe_ne_num(f["cantidad_raw"])
+            if cant is None or cant <= 0:
+                local.append((fx, _("La cantidad debe ser mayor a 0"))); cant = cant or 0.0
+            # Unidad SUNAT (cat.06): normaliza a mayúscula ("niu" → "NIU") con default NIU;
+            # una unidad inválida la rechaza el biller/SUNAT por fila (no corrompe el lote).
+            unidad = (str(f["unidad"]).strip().upper() if f["unidad"] else "NIU") or "NIU"
+            items.append({"descripcion": f["producto"], "cantidad": cant, "unidad": unidad})
+        if local:
+            for fx, msg in local:
+                errores.append({"filaExcel": fx, "venta": guia, "mensaje": msg})
+            return None
+        destinatario = {"numDoc": doc, "tipoDoc": dest_tipo}
+        if nombre:
+            destinatario["razonSocial"] = nombre
+        payload = {
+            "tipoGre": "09", "modalidadTraslado": "02", "motivoTraslado": motivo,
+            "destinatario": destinatario,
+            "ubigeoPartida": first["ubi_partida"], "dirPartida": first["dir_partida"],
+            "ubigeoLlegada": first["ubi_llegada"], "dirLlegada": first["dir_llegada"],
+            "pesoBruto": peso, "uniMedidaPeso": "KGM",
+            "numPlaca": placa, "conductorTipoDoc": cond_tipo,
+            "conductorNumDoc": first["cond_num"], "conductorNombres": first["cond_nombres"],
+            "conductorApellidos": first["cond_apellidos"], "conductorLicencia": first["cond_licencia"],
+            "items": items,
+        }
+        filas_excel = "%s" % fn if len(bloque) == 1 else "%s-%s" % (fn, bloque[-1]["filaExcel"])
+        return {"payload": payload, "total": round(peso, 2),
+                "cliente": nombre or doc, "filas_excel": filas_excel}
+
     @api.model
     def l10n_pe_ne_crear_lote(self, payload):
         """Sube+valida un xlsx (NO emite). Valida extensión/tamaño, sha256 (advertencia de
         re-subida), parsea (openpyxl), agrupa+valida, y crea el lote + filas pendientes con su
-        payload_json. Devuelve el reporte de validación."""
+        payload_json. Devuelve el reporte de validación. `payload['tipo']` ∈ (comprobante, guia)
+        decide qué parser/validador se usa; el esqueleto (dedup/estados/filas) es idéntico."""
+        tipo = payload.get("tipo") or "comprobante"
+        if tipo not in ("comprobante", "guia"):
+            raise UserError(_("Tipo de lote no soportado: %s") % tipo)
+        es_guia = tipo == "guia"
         filename = (payload.get("filename") or "").strip()
         if not filename.lower().endswith(".xlsx"):
             raise UserError(_("Sube un archivo Excel (.xlsx) — descarga la plantilla si tienes dudas."))
@@ -334,41 +533,54 @@ class L10nPeNeLote(models.Model):
             raise UserError(_("El archivo no puede superar %s MB.") % round(max_bytes / 1048576.0, 1))
         sha = hashlib.sha256(data).hexdigest()
         dup = self.search([("sha256", "=", sha), ("company_id", "=", self.env.company.id)], limit=1)
-        filas = self._l10n_pe_ne_parse_xlsx(data)
+        filas = (self._l10n_pe_ne_parse_xlsx_guia(data) if es_guia
+                 else self._l10n_pe_ne_parse_xlsx(data))
         max_filas = self._masivo_param("masivo_max_filas", _MASIVO_DEFAULTS["masivo_max_filas"])
         if len(filas) > max_filas:
             raise UserError(_("El archivo supera el máximo de %s filas") % max_filas)
-        comprobantes, errores, advertencias = self._l10n_pe_ne_validar(filas)
+        comprobantes, errores, advertencias = (self._l10n_pe_ne_validar_guia(filas) if es_guia
+                                               else self._l10n_pe_ne_validar(filas))
         max_comp = self._masivo_param("masivo_max_comprobantes", _MASIVO_DEFAULTS["masivo_max_comprobantes"])
         if len(comprobantes) > max_comp:
-            raise UserError(_("El archivo supera el máximo de %s comprobantes") % max_comp)
+            raise UserError(_("El archivo supera el máximo de %s %s")
+                            % (max_comp, _("guías") if es_guia else _("comprobantes")))
         estado = "con_errores" if errores else "validado"
         att = self.env["ir.attachment"].create({
             "name": filename, "res_model": "l10n_pe_ne.lote", "mimetype":
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "raw": data})
         reporte = {"errores": errores, "advertencias": advertencias, "duplicadoDe": dup.id or None}
         lote = self.create({
-            "name": filename, "sha256": sha, "attachment_id": att.id, "estado": estado,
+            "name": filename, "sha256": sha, "attachment_id": att.id, "estado": estado, "tipo": tipo,
             "total_filas": len(filas), "total_comprobantes": len(comprobantes),
             "reporte_json": json.dumps(reporte)})
         att.res_id = lote.id
         if estado == "validado":
             for i, comp in enumerate(comprobantes, 1):
                 p = comp["payload"]
-                self.env["l10n_pe_ne.lote.fila"].create({
+                vals = {
                     "lote_id": lote.id, "secuencia": i, "filas_excel": comp["filas_excel"],
-                    "payload_json": json.dumps(p), "estado": "pendiente",
-                    "tipo_doc": p["tipoDoc"], "serie": p.get("serie") or "",
-                    "cliente": p["cliente"].get("razonSocial") or "",
-                    "total": comp["total"], "moneda": p.get("moneda") or "PEN"})
-        return dict(reporte, id=lote.id, estado=estado, filename=filename,
+                    "payload_json": json.dumps(p), "estado": "pendiente", "total": comp["total"]}
+                if es_guia:
+                    # La serie (T###) se conoce recién al crear la guía (secuencia por serie);
+                    # se rellena al procesar. Aquí quedan tipo_doc/destinatario para el listado.
+                    vals.update({"tipo_doc": "09", "serie": "", "moneda": "",
+                                 "cliente": comp.get("cliente") or ""})
+                else:
+                    vals.update({"tipo_doc": p["tipoDoc"], "serie": p.get("serie") or "",
+                                 "cliente": p["cliente"].get("razonSocial") or "",
+                                 "moneda": p.get("moneda") or "PEN"})
+                self.env["l10n_pe_ne.lote.fila"].create(vals)
+        return dict(reporte, id=lote.id, estado=estado, filename=filename, tipo=tipo,
                     totalFilas=len(filas), totalComprobantes=len(comprobantes))
 
     @api.model
-    def l10n_pe_ne_plantilla(self):
+    def l10n_pe_ne_plantilla(self, tipo="comprobante"):
         """Plantilla xlsx (mismo estilo visual que l10n_pe_ne_export: cabecera azul #2563eb):
         hoja 'Ventas' con 15 cabeceras + 3-4 ejemplos + listas desplegables (data_validation),
-        y hoja 'Instrucciones'. Devuelve {filename, contentB64}."""
+        y hoja 'Instrucciones'. Devuelve {filename, contentB64}. `tipo='guia'` devuelve la
+        plantilla de guías de remisión."""
+        if tipo == "guia":
+            return self._l10n_pe_ne_plantilla_guia()
         import xlsxwriter
         ejemplos = [
             ["V-001", "FACTURA", "F001", "01/07/2026", "RUC", "20100070970", "FERRETERIA LA UNION SAC", "CEM-01", "CEMENTO SOL 42.5KG", 2, 33.90, 0, "GRAVADO", "NO", "PEN"],
@@ -412,13 +624,64 @@ class L10nPeNeLote(models.Model):
         return {"filename": "plantilla-ventas-chaskifact.xlsx",
                 "contentB64": base64.b64encode(buf.getvalue()).decode("ascii")}
 
+    def _l10n_pe_ne_plantilla_guia(self):
+        """Plantilla xlsx de GUÍAS de remisión (MVP): hoja 'Guias' con las cabeceras de guía +
+        ejemplos + dropdowns, y hoja 'Instrucciones'. Mismo estilo visual que la de ventas."""
+        import xlsxwriter
+        ejemplos = [
+            ["G-001", "20601030013", "COMERCIAL LOS ANDES SAC", "01", "150101", "AV. AREQUIPA 100, LIMA", "150203", "JR. LORETO 450, BARRANCO", 25.5, "ABC123", "DNI", "45678912", "JUAN CARLOS", "PEREZ QUISPE", "Q12345678", "CAJA DE TORNILLOS 1/2", 10, "NIU"],
+            ["G-001", "20601030013", "COMERCIAL LOS ANDES SAC", "01", "150101", "AV. AREQUIPA 100, LIMA", "150203", "JR. LORETO 450, BARRANCO", 25.5, "ABC123", "DNI", "45678912", "JUAN CARLOS", "PEREZ QUISPE", "Q12345678", "CLAVOS 3 PULGADAS X KG", 5, "KGM"],
+            ["G-002", "10456789123", "MARIA ROSA FLORES", "01", "150101", "AV. BRASIL 900, LIMA", "070101", "AV. SAENZ PENA 200, CALLAO", 12.0, "XY4821", "DNI", "70123456", "PEDRO", "GOMEZ RIOS", "P70123456", "MOCHILA ESCOLAR", 3, "NIU"],
+        ]
+        buf = io.BytesIO()
+        wb = xlsxwriter.Workbook(buf, {"in_memory": True})
+        ws = wb.add_worksheet("Guias")
+        head = wb.add_format({"bold": True, "bg_color": "#2563eb", "font_color": "white", "border": 1})
+        for c, h in enumerate(_HEADERS_GUIA):
+            ws.write(0, c, h, head)
+            ws.set_column(c, c, max(12, len(h) + 2))
+        for r, row in enumerate(ejemplos, 1):
+            ws.write_row(r, 0, row)
+        # dropdowns: motivo (solo 01 en el MVP) y tipo de doc del conductor.
+        ws.data_validation(1, 3, 500, 3, {"validate": "list", "source": ["01"]})
+        ws.data_validation(1, 10, 500, 10, {"validate": "list", "source": ["DNI", "CE", "PASAPORTE"]})
+        ws.freeze_panes(1, 0)
+        wi = wb.add_worksheet("Instrucciones")
+        wi.set_column(0, 0, 108)
+        for r, line in enumerate([
+            "CHASKIFACT — Plantilla de emisión masiva de GUÍAS de remisión (remitente)",
+            "",
+            "1. Una fila = un bien. Usa la columna 'guia' para agrupar varios bienes en una misma guía (mismo código en filas contiguas). Los datos de cabecera (destinatario, puntos, peso, vehículo, conductor) se toman de la PRIMERA fila del grupo.",
+            "2. MVP: guía de REMITENTE (tipo 09), motivo 01 (Venta), transporte PRIVADO (un vehículo + un conductor). Para transportista, transporte público, comercio exterior o comprobante relacionado, usa el formulario individual de guías.",
+            "3. 'destinatario doc': RUC (11 dígitos) o DNI (8); no puede ser tu propia empresa. 'destinatario' = razón social o nombre (obligatorio si el destinatario es nuevo).",
+            "4. 'ubigeo partida'/'ubigeo llegada': código de 6 dígitos (catálogo 13 de SUNAT). 'dir partida'/'dir llegada': dirección de cada punto.",
+            "5. 'peso bruto' en kilogramos (mayor a 0). 'placa': 6 a 8 caracteres. Conductor: tipo doc (DNI/CE/PASAPORTE), número, nombres, apellidos y licencia.",
+            "6. 'descripcion'/'cantidad'/'unidad' por cada bien. La serie se asigna automáticamente (T001) y la fecha de emisión es la del envío a SUNAT.",
+            "7. Límite: 500 filas / 200 guías por archivo, hasta 2 MB. Sube el archivo, revisa el reporte de validación y recién ahí emite.",
+        ]):
+            wi.write(r, 0, line)
+        wb.close()
+        return {"filename": "plantilla-guias-chaskifact.xlsx",
+                "contentB64": base64.b64encode(buf.getvalue()).decode("ascii")}
+
     # ------------------------------------------------------------- serializadores
     def _l10n_pe_ne_sync_async(self):
         """Reconcilia las filas 'en_proceso' (encoladas en modo async) con el estado FINAL del
         move, que el cron de biller (_l10n_pe_cron_poll_async) actualiza minutos después. Sin
         esto, una fila encolada se quedaba en 'en_proceso' aunque su comprobante ya estuviera
-        aceptado/rechazado. Idempotente: solo escribe cuando el move ya resolvió."""
+        aceptado/rechazado. Idempotente: solo escribe cuando el move ya resolvió.
+
+        Lote de guías: la guía ya es asíncrona y su cron propio (_cron_consultar_en_proceso)
+        actualiza el estado; aquí solo refrescamos la fila leyendo guia_id.estado (no hay cron
+        del lote ni consulta nueva a SUNAT)."""
         self.ensure_one()
+        if self.tipo == "guia":
+            for f in self.fila_ids.filtered(lambda x: x.estado == "en_proceso" and x.guia_id):
+                nuevo = _ESTADO_MAP_GUIA.get(f.guia_id.estado)
+                if nuevo and nuevo != "en_proceso":
+                    f.write({"estado": nuevo,
+                             "mensaje": f.guia_id.l10n_pe_biller_message or f.mensaje or ""})
+            return
         for f in self.fila_ids.filtered(lambda x: x.estado == "en_proceso" and x.move_id):
             nuevo = _ESTADO_MAP.get(f.move_id.l10n_pe_biller_state)
             if nuevo and nuevo != "en_proceso":
@@ -442,7 +705,7 @@ class L10nPeNeLote(models.Model):
         c = self._l10n_pe_ne_contadores()
         rep = json.loads(self.reporte_json or "{}")
         return {
-            "id": self.id, "filename": self.name,
+            "id": self.id, "filename": self.name, "tipo": self.tipo,
             "fecha": self.create_date.strftime("%Y-%m-%d") if self.create_date else "",
             "estado": self.estado, "totalFilas": self.total_filas,
             "totalComprobantes": self.total_comprobantes,
@@ -461,7 +724,7 @@ class L10nPeNeLote(models.Model):
             l._l10n_pe_ne_sync_async()   # reconcilia async antes de contar
             c = l._l10n_pe_ne_contadores()
             out.append({
-                "id": l.id, "filename": l.name,
+                "id": l.id, "filename": l.name, "tipo": l.tipo,
                 "fecha": l.create_date.strftime("%Y-%m-%d") if l.create_date else "",
                 "estado": l.estado, "totalComprobantes": l.total_comprobantes,
                 "emitidos": c["emitidos"], "enProceso": c["enProceso"],
@@ -548,8 +811,12 @@ class L10nPeNeLote(models.Model):
         """xlsx de resultados (mismo estilo que l10n_pe_ne_export). {filename, count, contentB64}."""
         self.ensure_one()
         import xlsxwriter
-        headers = ["Venta", "Filas Excel", "Tipo", "Serie", "Número", "Cliente", "Total",
-                   "Moneda", "Estado", "Mensaje SUNAT"]
+        if self.tipo == "guia":
+            headers = ["Guía", "Filas Excel", "Tipo", "Serie", "Número", "Destinatario",
+                       "Peso (kg)", "Unidad", "Estado", "Mensaje SUNAT"]
+        else:
+            headers = ["Venta", "Filas Excel", "Tipo", "Serie", "Número", "Cliente", "Total",
+                       "Moneda", "Estado", "Mensaje SUNAT"]
         estados = dict(self.fila_ids._fields["estado"].selection)
         buf = io.BytesIO()
         wb = xlsxwriter.Workbook(buf, {"in_memory": True})
@@ -559,10 +826,14 @@ class L10nPeNeLote(models.Model):
             ws.write(0, c, h, head)
             ws.set_column(c, c, max(12, len(h) + 2))
         filas = self.fila_ids.sorted("secuencia")
+        es_guia = self.tipo == "guia"
         for r, f in enumerate(filas, 1):
+            # En guías la col. 7 es la unidad de peso (KGM) y no hay moneda; en comprobantes es
+            # la moneda (default PEN). El resto de columnas coincide (total = peso bruto en guías).
+            unidad_o_moneda = ("KGM" if es_guia else (f.moneda or "PEN"))
             ws.write_row(r, 0, ["#%s" % f.secuencia, f.filas_excel or "", f.tipo_doc or "",
                                 f.serie or "", f.correlativo or "", f.cliente or "", f.total or 0.0,
-                                f.moneda or "PEN", estados.get(f.estado, f.estado), f.mensaje or ""])
+                                unidad_o_moneda, estados.get(f.estado, f.estado), f.mensaje or ""])
         ws.autofilter(0, 0, max(1, len(filas)), len(headers) - 1)
         ws.freeze_panes(1, 0)
         wb.close()
@@ -592,7 +863,8 @@ class L10nPeNeLoteFila(models.Model):
         ("cancelado", "Cancelado"),
     ], default="pendiente", required=True)
     mensaje = fields.Text()
-    move_id = fields.Many2one("account.move")        # ancla de idempotencia del reintento
+    move_id = fields.Many2one("account.move")        # ancla de idempotencia (lote comprobante)
+    guia_id = fields.Many2one("l10n_pe_ne.guia_remision")  # ancla de idempotencia (lote guía)
     tipo_doc = fields.Char()
     serie = fields.Char()
     correlativo = fields.Char()
@@ -604,8 +876,11 @@ class L10nPeNeLoteFila(models.Model):
     def _l10n_pe_ne_procesar_fila(self):
         """Emite (o reenvía) el comprobante de esta fila. Si ya hay move_id → reenvía el MISMO
         move (idempotente, misma serie-correlativo); si no → quick_emit crea+postea+envía. Mapea
-        el biller_state a estado de fila. Sin lógica de emisión nueva."""
+        el biller_state a estado de fila. Sin lógica de emisión nueva. Lote de guías → delega en
+        _l10n_pe_ne_procesar_fila_guia."""
         self.ensure_one()
+        if self.lote_id.tipo == "guia":
+            return self._l10n_pe_ne_procesar_fila_guia()
         if self.move_id:
             self.move_id.action_l10n_pe_send_to_biller()
             result = self.move_id.l10n_pe_ne_quick_result()
@@ -622,10 +897,35 @@ class L10nPeNeLoteFila(models.Model):
             "cliente": result.get("cliente") or self.cliente,
         })
 
+    def _l10n_pe_ne_procesar_fila_guia(self):
+        """Emite (o reenvía) la guía de esta fila reusando el modelo de guía SIN cambios: si ya
+        hay guia_id → re-emite la MISMA guía (idempotente; ESTADOS_EMITIBLES deja reintentar
+        error/rechazado y una ya 'enviado' se corta arriba); si no → quick_guia crea el borrador
+        y guarda guia_id, luego emitir_guia. Mapea el estado de la guía a estado de fila."""
+        self.ensure_one()
+        Guia = self.env["l10n_pe_ne.guia_remision"].with_company(self.company_id)
+        if self.guia_id:
+            guia = self.guia_id
+        else:
+            d = Guia.l10n_pe_ne_quick_guia(json.loads(self.payload_json))
+            guia = Guia.browse(d["id"])
+            self.guia_id = guia.id
+        result = guia.l10n_pe_ne_emitir_guia()
+        self.write({
+            "estado": _ESTADO_MAP_GUIA.get(result.get("estado"), "error"),
+            "mensaje": result.get("mensaje") or "",
+            "tipo_doc": "09",
+            "serie": guia.serie or self.serie,
+            "correlativo": guia.correlativo or self.correlativo,
+            "cliente": result.get("destinatario") or self.cliente,
+            "total": guia.peso_bruto or self.total,
+        })
+
     def _l10n_pe_ne_fila_dict(self):
         self.ensure_one()
         return {"secuencia": self.secuencia, "filasExcel": self.filas_excel or "",
                 "estado": self.estado, "tipoDoc": self.tipo_doc or "", "serie": self.serie or "",
                 "correlativo": self.correlativo or "", "cliente": self.cliente or "",
                 "total": self.total or 0.0, "moneda": self.moneda or "PEN",
-                "mensaje": self.mensaje or "", "moveId": self.move_id.id or False}
+                "mensaje": self.mensaje or "", "moveId": self.move_id.id or False,
+                "guiaId": self.guia_id.id or False}

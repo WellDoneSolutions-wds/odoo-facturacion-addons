@@ -826,6 +826,79 @@ class TestGuiaComercioExterior(TestGuiaBase):
         g = self.Guia.browse(res["id"])
         self.assertEqual(g.dam_numero, "235-2024-40-999999")
 
+    # ------------------------------------ DSI (Declaración Simplificada, DocumentTypeCode 52)
+    def test_dsi_export_payload_lleva_codtipdocrel_52(self):
+        # DSI de exportación: régimen 48 en el N°, docRelacionado codTipDocRel 52 (no 50).
+        g = self.Guia.create(self._vals_export(dam_tipo="52", dam_numero="235-2024-48-123456"))
+        p = g._l10n_pe_ne_build_gre_payload()
+        dsi = [d for d in p["docRelacionado"] if d["codTipDocRel"] == "52"]
+        self.assertEqual(len(dsi), 1)
+        self.assertEqual(dsi[0]["numDocRel"], "235-2024-48-123456")
+        self.assertFalse([d for d in p["docRelacionado"] if d["codTipDocRel"] == "50"])
+        g._l10n_pe_ne_validar()  # no lanza
+
+    def test_dsi_con_regimen_dam_rechaza(self):
+        # Régimen 40 (DAM export) en una DSI (tipo 52) => formato inválido; el mensaje nombra la DSI.
+        g = self.Guia.create(self._vals_export(dam_tipo="52", dam_numero="235-2024-40-123456"))
+        with self.assertRaisesRegex(UserError, "DSI"):
+            g._l10n_pe_ne_validar()
+
+    def test_dam_con_regimen_dsi_rechaza(self):
+        # Régimen 48 (DSI export) en una DAM (tipo 50) => formato inválido; el mensaje nombra la DAM.
+        g = self.Guia.create(self._vals_export(dam_tipo="50", dam_numero="235-2024-48-123456"))
+        with self.assertRaisesRegex(UserError, "DAM"):
+            g._l10n_pe_ne_validar()
+
+    def test_detalle_expone_dam_tipo(self):
+        g = self.Guia.create(self._vals_export(dam_tipo="52", dam_numero="235-2024-48-123456"))
+        self.assertEqual(g.l10n_pe_ne_guia_detalle()["damTipo"], "52")
+
+    # ------------------------------------------ segundo contenedor (máx 2 por SUNAT 3420)
+    def test_dos_contenedores_payload(self):
+        g = self.Guia.create(self._vals_export(
+            num_contenedor="ABCU1234567", num_precinto="PRECINTO01",
+            num_contenedor2="ABCU7654321", num_precinto2="PRECINTO02"))
+        cab = g._l10n_pe_ne_build_gre_payload()["cabecera"]
+        self.assertEqual(cab["numContenedor2"], "ABCU7654321")
+        self.assertEqual(cab["numPrecinto2"], "PRECINTO02")
+        self.assertEqual(cab["numBultosDatosEnvio"], "-")  # el 1er contenedor ya suprime bultos
+        g._l10n_pe_ne_validar()  # no lanza
+
+    def test_segundo_contenedor_sin_primero_rechaza(self):
+        g = self.Guia.create(self._vals_export(
+            num_contenedor2="ABCU7654321", num_precinto2="PRECINTO02"))
+        with self.assertRaisesRegex(UserError, "primero"):
+            g._l10n_pe_ne_validar()
+
+    def test_segundo_contenedor_sin_precinto_rechaza(self):
+        g = self.Guia.create(self._vals_export(
+            num_contenedor="ABCU1234567", num_precinto="PRECINTO01",
+            num_contenedor2="ABCU7654321"))
+        with self.assertRaisesRegex(UserError, "precinto"):
+            g._l10n_pe_ne_validar()
+
+    def test_contenedores_duplicados_rechaza(self):
+        g = self.Guia.create(self._vals_export(
+            num_contenedor="ABCU1234567", num_precinto="PRECINTO01",
+            num_contenedor2="ABCU1234567", num_precinto2="PRECINTO02"))
+        with self.assertRaisesRegex(UserError, "distintos"):
+            g._l10n_pe_ne_validar()
+
+    def test_precintos_duplicados_rechaza(self):
+        g = self.Guia.create(self._vals_export(
+            num_contenedor="ABCU1234567", num_precinto="PRECINTO01",
+            num_contenedor2="ABCU7654321", num_precinto2="PRECINTO01"))
+        with self.assertRaisesRegex(UserError, "distintos"):
+            g._l10n_pe_ne_validar()
+
+    def test_detalle_expone_segundo_contenedor(self):
+        g = self.Guia.create(self._vals_export(
+            num_contenedor="ABCU1234567", num_precinto="PRECINTO01",
+            num_contenedor2="ABCU7654321", num_precinto2="PRECINTO02"))
+        d = g.l10n_pe_ne_guia_detalle()
+        self.assertEqual(d["numContenedor2"], "ABCU7654321")
+        self.assertEqual(d["numPrecinto2"], "PRECINTO02")
+
 
 class TestGuiaComercioExteriorPuerto(TestGuiaBase):
     """Comercio exterior vía PUERTO/AEROPUERTO — importación (motivo 08) y exportación (09)
@@ -994,3 +1067,50 @@ class TestGuiaCronConsulta(TestGuiaBase):
                           "l10n_pe_ne_consultar_ticket", boom):
             self.env["l10n_pe_ne.guia_remision"]._cron_consultar_en_proceso()
         self.assertEqual(g.consulta_intentos, 5)  # sin cambio: no gastó el intento
+
+
+class TestGuiaEmail(TestGuiaBase):
+    """Email de la guía al cliente al aceptar el CDR (automatización opt-in, espeja el email
+    de comprobante de main). No-op sin correo; el destinatario recibe, el remitente va en copia
+    (tipo 31); un fallo de correo nunca rompe la emisión."""
+
+    def test_email_crea_mail_al_destinatario(self):
+        self.cliente.email = "dest@example.com"
+        g = self.Guia.create(self._vals())
+        g._l10n_pe_ne_email_guia()
+        mail = self.env["mail.mail"].search([("email_to", "=", "dest@example.com")], order="id desc", limit=1)
+        self.assertTrue(mail, "debe crearse el mail al destinatario")
+        self.assertIn(g.name, mail.subject)
+
+    def test_email_sin_correo_es_noop(self):
+        self.cliente.email = False
+        g = self.Guia.create(self._vals())
+        self.assertFalse(g._l10n_pe_ne_email_guia())
+
+    def test_email_tipo31_copia_al_remitente(self):
+        self.cliente.email = "dest@example.com"
+        rem = self.env["res.partner"].create(
+            {"name": "Remite SAC", "vat": "20507639024", "email": "remite@example.com"})
+        g = self.Guia.create(self._vals(tipo_gre="31", remitente_id=rem.id, num_tuc="TUC0000000001"))
+        g._l10n_pe_ne_email_guia()
+        mail = self.env["mail.mail"].search([("email_to", "=", "dest@example.com")], order="id desc", limit=1)
+        self.assertTrue(mail)
+        self.assertIn("remite@example.com", mail.email_cc or "")
+
+    def test_aplicar_cdr_no_manda_si_toggle_off(self):
+        # Sin el toggle, aceptar la guía NO dispara correo (default opt-out).
+        self.cliente.email = "dest@example.com"
+        g = self.Guia.create(self._vals())
+        with patch.object(type(g), "_l10n_pe_ne_store_cdr", lambda self, b: ("0", "ACEPTADA")):
+            g._l10n_pe_ne_aplicar_cdr("x")
+        self.assertEqual(g.estado, "enviado")
+        self.assertFalse(self.env["mail.mail"].search([("email_to", "=", "dest@example.com")]))
+
+    def test_aplicar_cdr_manda_si_toggle_on(self):
+        self.env["ir.config_parameter"].sudo().set_param("l10n_pe_ne_biller.email_guia_on_accept", "1")
+        self.cliente.email = "dest@example.com"
+        g = self.Guia.create(self._vals())
+        with patch.object(type(g), "_l10n_pe_ne_store_cdr", lambda self, b: ("0", "ACEPTADA")):
+            g._l10n_pe_ne_aplicar_cdr("x")
+        self.assertEqual(g.estado, "enviado")
+        self.assertTrue(self.env["mail.mail"].search([("email_to", "=", "dest@example.com")]))

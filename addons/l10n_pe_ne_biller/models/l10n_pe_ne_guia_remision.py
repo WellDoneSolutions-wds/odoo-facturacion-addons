@@ -54,6 +54,21 @@ SUPPORTED_MOTIVOS = ('01', '02', '04', '08', '09', '13', '14', '18')
 # ubigeo debe ser el punto de partida (SUNAT 3364/3365).
 DAM_EXPORTACION_RE = r'^[0-9]{3}-[0-9]{4}-40-[1-9][0-9]{0,5}$'
 DAM_IMPORTACION_RE = r'^[0-9]{3}-[0-9]{4}-10-[1-9][0-9]{0,5}$'
+# DSI (Declaración Simplificada, DocumentTypeCode 52): alternativa a la DAM/DUA para
+# envíos de bajo valor. Viaja como documento relacionado codTipDocRel 52 y su N° codifica
+# el régimen (SUNAT 3441) igual que la DAM, pero con otros códigos: 18 = importación
+# simplificada, 48 = exportación simplificada. Espejan DSI_*_RE de la SPA.
+DSI_IMPORTACION_RE = r'^[0-9]{3}-[0-9]{4}-18-[1-9][0-9]{0,5}$'
+DSI_EXPORTACION_RE = r'^[0-9]{3}-[0-9]{4}-48-[1-9][0-9]{0,5}$'
+# Régimen aduanero por (motivo, tipo de declaración): la DAM (50) codifica 10/40; la DSI
+# (52) codifica 18/48. Cada entrada trae el regex del N° + una etiqueta amigable (nombra el
+# documento y el régimen) + el formato, para armar el mensaje de error (SUNAT 3441).
+DECLARACION_REGIMEN = {
+    ('08', '50'): (DAM_IMPORTACION_RE, 'DAM/DUA de importación (régimen 10)', 'NNN-AAAA-10-NNNNNN'),
+    ('09', '50'): (DAM_EXPORTACION_RE, 'DAM/DUA de exportación (régimen 40)', 'NNN-AAAA-40-NNNNNN'),
+    ('08', '52'): (DSI_IMPORTACION_RE, 'DSI de importación (régimen 18)', 'NNN-AAAA-18-NNNNNN'),
+    ('09', '52'): (DSI_EXPORTACION_RE, 'DSI de exportación (régimen 48)', 'NNN-AAAA-48-NNNNNN'),
+}
 
 # Puertos (cat_63, listID 1) y aeropuertos (cat_64, listID 2) SUNAT: código -> (ubigeo,
 # nombre). El biller los emite como cac:FirstArrivalPortLocation (codPuerto + locTypePuerto
@@ -201,10 +216,15 @@ class L10nPeNeGuiaRemision(models.Model):
     # terceros) — nunca se manda un codEstab* sin su rucEstab* gemelo.
     cod_estab_partida = fields.Char(string='Cód. establecimiento partida')
     cod_estab_llegada = fields.Char(string='Cód. establecimiento llegada')
-    # Comercio exterior (08 Importación / 09 Exportación): N° de la DAM/DUA (Declaración
-    # Aduanera de Mercancías). Viaja como documento relacionado DocumentTypeCode 50; su
-    # formato codifica el régimen — 10 importación, 40 exportación. Ver DAM_*_RE.
-    dam_numero = fields.Char(string='N° de DAM/DUA')
+    # Comercio exterior (08 Importación / 09 Exportación): N° de la declaración aduanera.
+    # Viaja como documento relacionado; su formato codifica el régimen según el tipo — DAM/DUA
+    # (50) 10 importación / 40 exportación, DSI (52) 18 / 48. Ver DECLARACION_REGIMEN.
+    dam_numero = fields.Char(string='N° de declaración aduanera')
+    # Tipo de declaración aduanera (DocumentTypeCode SUNAT del docRelacionado): 50 = DAM/DUA
+    # (Declaración Aduanera de Mercancías) · 52 = DSI (Declaración Simplificada). El régimen
+    # embebido en dam_numero depende de este tipo (ver DECLARACION_REGIMEN).
+    dam_tipo = fields.Selection([('50', 'DAM/DUA'), ('52', 'DSI')],
+                                string='Tipo de declaración', default='50')
     # Puerto/aeropuerto de embarque/desembarque (cat_63 puerto / cat_64 aeropuerto). El
     # nombre se deriva del catálogo (PUERTOS/AEROPUERTOS), no es un campo. En la importación
     # (08) el ubigeo del puerto es el punto de partida; en la exportación (09), el de llegada.
@@ -216,6 +236,12 @@ class L10nPeNeGuiaRemision(models.Model):
     # bultos quedan PROHIBIDOS (SUNAT 3621) — el biller los suprime con el sentinela "-".
     num_contenedor = fields.Char(string='N° de contenedor')
     num_precinto = fields.Char(string='N° de precinto')
+    # Segundo contenedor (opcional): SUNAT admite un MÁXIMO de 2 contenedores por guía
+    # (regla 3420). Requiere el primero (num_contenedor), su propio precinto (3422) y ser
+    # distinto del primero en contenedor y precinto (3423). El biller lo emite en su propio
+    # cac:Package con las claves planas numContenedor2/numPrecinto2.
+    num_contenedor2 = fields.Char(string='N° de contenedor 2')
+    num_precinto2 = fields.Char(string='N° de precinto 2')
 
     # Autorización de carga (permiso especial de transporte, catálogo D37 SUNAT).
     ent_autorizacion_carga = fields.Char(string='Entidad autorización de carga (D37)')
@@ -416,6 +442,12 @@ class L10nPeNeGuiaRemision(models.Model):
             cab['numContenedor'] = self.num_contenedor
             cab['numPrecinto'] = self.num_precinto or ''
             cab['numBultosDatosEnvio'] = '-'
+        # Segundo contenedor (comercio exterior, máx 2 por SUNAT 3420): el biller emite un 2°
+        # cac:Package con su precinto. El sentinela '-' de bultos ya lo puso el primer
+        # contenedor (un 2° siempre exige el 1° — ver _l10n_pe_ne_validar), así que no se re-toca.
+        if self.num_contenedor2:
+            cab['numContenedor2'] = self.num_contenedor2
+            cab['numPrecinto2'] = self.num_precinto2 or ''
         # Establecimientos propios (motivo 04): el RUC gemelo SIEMPRE es el de esta
         # compañía — nunca se manda un codEstab* sin su rucEstab* (el biller lo rechaza).
         # Sin RUC de compañía configurado no hay con qué llenar rucEstab*: mejor fallar acá
@@ -488,7 +520,7 @@ class L10nPeNeGuiaRemision(models.Model):
                     'apellidos': c.apellidos or '',
                     'licencia': c.licencia or '',
                 } for c in secundarios_cond]
-        return {
+        resp = {
             'id': {
                 'ruc': self.company_id.vat or '',
                 'serie': self.serie or 'T001',
@@ -500,6 +532,10 @@ class L10nPeNeGuiaRemision(models.Model):
             'detalle': self._l10n_pe_ne_guia_detalle_lines(),
             'docRelacionado': self._l10n_pe_ne_guia_doc_relacionado(),
         }
+        _logger.info("--------------------- PAYLOAD GRE ---------------------")
+        _logger.info('GRE payload: %s', resp)
+        _logger.info("--------------------- FIN PAYLOAD GRE ---------------------")
+        return resp
 
     def _l10n_pe_ne_guia_detalle_lines(self):
         """detalle (bienes) del payload — idéntico en remitente y transportista: código
@@ -522,11 +558,12 @@ class L10nPeNeGuiaRemision(models.Model):
             'codTipDocRel': m.l10n_pe_ne_tipo_doc or '01',
             'numDocRel': '%s-%s' % (m.l10n_pe_ne_serie_emit, m.l10n_pe_ne_corr_emit or ''),
         } for m in docs if m.l10n_pe_ne_serie_emit]
-        # Comercio exterior (08 importación / 09 exportación): la DAM/DUA como documento
-        # relacionado DocumentTypeCode 50 (no lleva IssuerParty — el gate 3380/3382 no aplica
-        # a 50/52).
+        # Comercio exterior (08 importación / 09 exportación): la declaración aduanera como
+        # documento relacionado — DAM/DUA (DocumentTypeCode 50) o DSI (52) según dam_tipo. No
+        # lleva IssuerParty (el gate 3380/3382 no aplica a 50/52); el FTL del biller emite el
+        # bloque idéntico para ambos códigos.
         if self.motivo_traslado in ('08', '09') and self.dam_numero:
-            rel.append({'codTipDocRel': '50', 'numDocRel': self.dam_numero})
+            rel.append({'codTipDocRel': self.dam_tipo or '50', 'numDocRel': self.dam_numero})
         return rel
 
     def _l10n_pe_ne_build_gre_transportista_payload(self):
@@ -670,20 +707,22 @@ class L10nPeNeGuiaRemision(models.Model):
             raise UserError(_('El motivo "Otros" requiere describir el motivo del traslado.'))
         # El contenedor (cac:Package) solo aplica a comercio exterior: en otros motivos el XSLT
         # lo rechaza (el detalle de contenedor por línea 7024-7028 es exclusivo del motivo 19).
-        if self.num_contenedor and self.motivo_traslado not in ('08', '09'):
+        if (self.num_contenedor or self.num_contenedor2) and self.motivo_traslado not in ('08', '09'):
             raise UserError(_('El contenedor solo aplica a comercio exterior (importación/exportación).'))
         if self.motivo_traslado in ('08', '09'):
-            # Comercio exterior: la DAM/DUA es obligatoria (SUNAT 3440) y su N° codifica el
-            # régimen (SUNAT 3441): 10 = importación, 40 = exportación.
+            # Comercio exterior: la declaración aduanera (DAM/DUA o DSI) es obligatoria (SUNAT
+            # 3440) y su N° codifica el régimen (SUNAT 3441) según el tipo — DAM 10/40, DSI 18/48.
+            # El regex y la etiqueta (nombran el documento y el régimen) salen del lookup.
             dam = (self.dam_numero or '').strip()
+            tipo = self.dam_tipo or '50'
             if not dam:
-                raise UserError(_('El comercio exterior requiere el N° de DAM/DUA.'))
-            if self.motivo_traslado == '08' and not re.match(DAM_IMPORTACION_RE, dam):
-                raise UserError(_('El N° de DAM/DUA de importación debe codificar el régimen 10 '
-                                  '(formato NNN-AAAA-10-NNNNNN, p. ej. 235-2024-10-123456).'))
-            if self.motivo_traslado == '09' and not re.match(DAM_EXPORTACION_RE, dam):
-                raise UserError(_('El N° de DAM/DUA de exportación debe codificar el régimen 40 '
-                                  '(formato NNN-AAAA-40-NNNNNN, p. ej. 235-2024-40-123456).'))
+                raise UserError(_('El comercio exterior requiere el N° de %s.')
+                                % ('DSI' if tipo == '52' else 'DAM/DUA'))
+            regimen = DECLARACION_REGIMEN.get((self.motivo_traslado, tipo))
+            if regimen and not re.match(regimen[0], dam):
+                raise UserError(_('El N° de %s debe tener el formato %s (p. ej. %s).')
+                                % (regimen[1], regimen[2], regimen[2].replace('NNN', '235', 1)
+                                   .replace('AAAA', '2024').replace('NNNNNN', '123456')))
             # Contenedor: con el indicador total el precinto es obligatorio (SUNAT 3422); ambos
             # tienen formato acotado (contenedor 4071, precinto 4074).
             if self.num_contenedor:
@@ -697,6 +736,26 @@ class L10nPeNeGuiaRemision(models.Model):
                 if not re.match(r'^(?!0+$)[A-Z0-9]{1,100}$', prec):
                     raise UserError(_('El N° de precinto debe ser alfanumérico en mayúscula '
                                       '(SUNAT 4074).'))
+            # Segundo contenedor (opcional, máx 2 por SUNAT 3420): requiere el PRIMERO (no puede
+            # haber un 2° sin 1°), su propio precinto (3422), formatos válidos (4071/4074) y ser
+            # DISTINTO del primero en contenedor y precinto (3423).
+            if self.num_contenedor2:
+                cont2 = (self.num_contenedor2 or '').strip()
+                if not self.num_contenedor:
+                    raise UserError(_('Indica primero el N° de contenedor antes de agregar un segundo.'))
+                if not re.match(r'^[A-Z0-9\-/]{1,17}$', cont2):
+                    raise UserError(_('El N° de contenedor 2 debe tener hasta 17 caracteres '
+                                      'alfanuméricos en mayúscula (SUNAT 4071).'))
+                prec2 = (self.num_precinto2 or '').strip()
+                if not prec2:
+                    raise UserError(_('El segundo contenedor requiere el N° de precinto (SUNAT 3422).'))
+                if not re.match(r'^(?!0+$)[A-Z0-9]{1,100}$', prec2):
+                    raise UserError(_('El N° de precinto 2 debe ser alfanumérico en mayúscula '
+                                      '(SUNAT 4074).'))
+                if cont2 == (self.num_contenedor or '').strip():
+                    raise UserError(_('Los dos contenedores deben ser distintos (SUNAT 3423).'))
+                if prec2 == (self.num_precinto or '').strip():
+                    raise UserError(_('Los precintos de ambos contenedores deben ser distintos (SUNAT 3423).'))
         # Puerto/aeropuerto (cat_63/cat_64): si se declara, exige el tipo y que el código
         # exista en el catálogo — de ahí sale el ubigeo que la regla SUNAT 3364 obliga a
         # que coincida con el punto de partida (importación) o de llegada (exportación).
@@ -841,6 +900,15 @@ class L10nPeNeGuiaRemision(models.Model):
         if code == '0':
             self.estado = 'enviado'
             self.l10n_pe_biller_message = _('Aceptada por SUNAT — CDR ResponseCode 0. %s') % (desc or '')
+            # Automatización (opt-in): al aceptarse, enviar la guía (XML + PDF + CDR) al correo
+            # del destinatario. Gateado por config para no mandar correos sin querer; nunca rompe
+            # la emisión (un fallo de correo se loguea y sigue). Espeja email_on_accept de factura.
+            if self.env['ir.config_parameter'].sudo().get_param(
+                    'l10n_pe_ne_biller.email_guia_on_accept', '').strip().lower() in ('1', 'true'):
+                try:
+                    self._l10n_pe_ne_email_guia()
+                except Exception as e:  # noqa: BLE001
+                    _logger.warning('email guía %s: %s', self.name, e)
         elif not code:
             # CDR ilegible (base64/zip corrupto o sin ResponseCode): NO es un rechazo
             # de SUNAT — queda en_proceso para que el botón/cron reintenten con el ticket.
@@ -849,6 +917,53 @@ class L10nPeNeGuiaRemision(models.Model):
         else:
             self.estado = 'rechazado'
             self.l10n_pe_biller_message = _('Rechazada por SUNAT (ResponseCode %s). %s') % (code or '—', desc or '')
+
+    def _l10n_pe_ne_email_guia(self):
+        """Envía la guía aceptada (XML firmado + PDF + CDR) al correo del destinatario, con copia
+        al remitente en el tipo 31. Automatiza la entrega manual. No-op si no hay correo; nunca
+        lanza (el llamador la envuelve, pero igual usamos send sin excepción). Espeja
+        _l10n_pe_ne_email_comprobante de la factura."""
+        self.ensure_one()
+        email = (self.partner_id.email or '').strip()
+        cc = (self.remitente_id.email or '').strip() if (self.tipo_gre == '31' and self.remitente_id) else ''
+        if not email and not cc:
+            _logger.info('email guía %s: sin correo de destinatario/remitente, se omite', self.name)
+            return False
+        atts = self.env['ir.attachment']
+        if self.l10n_pe_biller_xml:
+            atts |= self.l10n_pe_biller_xml
+        try:
+            pdf, _ct = self.env['ir.actions.report'].sudo()._render_qweb_pdf(
+                'l10n_pe_ne_biller.action_report_guia', res_ids=self.ids)
+            if pdf:
+                atts |= self.env['ir.attachment'].sudo().create({
+                    'name': '%s.pdf' % self.name,
+                    'res_model': 'l10n_pe_ne.guia_remision', 'res_id': self.id,
+                    'mimetype': 'application/pdf', 'raw': pdf,
+                })
+        except Exception:  # noqa: BLE001 — el PDF es deseable pero no bloquea el correo
+            pass
+        if self.l10n_pe_biller_cdr:
+            atts |= self.l10n_pe_biller_cdr
+        subject = _('Guía de remisión electrónica %s') % self.name
+        body = _(
+            '<p>Estimado,</p>'
+            '<p>Adjuntamos la guía de remisión electrónica <b>%(num)s</b> emitida por '
+            '<b>%(emisor)s</b> y aceptada por SUNAT.</p>'
+            '<p>Se incluyen el XML firmado, la representación impresa (PDF) y el CDR.</p>'
+        ) % {'num': self.name, 'emisor': self.company_id.name or ''}
+        mail = self.env['mail.mail'].sudo().create({
+            'subject': subject,
+            'body_html': body,
+            'email_to': email or cc,
+            'email_cc': cc if (email and cc) else '',
+            'email_from': self.company_id.email or self.env.user.email_formatted,
+            'attachment_ids': [(6, 0, atts.ids)],
+            'auto_delete': False,
+        })
+        mail.send(raise_exception=False)
+        _logger.info('email guía %s enviado a %s (%d adjuntos)', self.name, email or cc, len(atts))
+        return True
 
     def l10n_pe_ne_emitir_guia(self):
         """Emite la GRE al biller: firma, envía a SUNAT y recoge el CDR. Según el tipo, va al
@@ -871,6 +986,8 @@ class L10nPeNeGuiaRemision(models.Model):
         base = icp.get_param('l10n_pe_ne_biller.url', 'http://localhost:8090').rstrip('/')
         timeout = int(icp.get_param('l10n_pe_ne_biller.timeout', '240'))
         headers = {'X-Api-Key': self.company_id.sudo().l10n_pe_ne_api_key or ''}
+        _logger.info("----------------------- Guia %s ---------------------", self.name)
+        _logger.info('tipo_gre: %s', self.tipo_gre)
         if self.tipo_gre == '31':
             endpoint, payload = '/generator/guiaTransportista', self._l10n_pe_ne_build_gre_transportista_payload()
         else:
@@ -968,7 +1085,7 @@ class L10nPeNeGuiaRemision(models.Model):
     # ------------------------------------------------------- serialización
     def _l10n_pe_ne_guia_dict(self):
         self.ensure_one()
-        return {
+        resp = {
             'id': self.id,
             'numero': self.name,
             'destinatario': self.partner_id.name or '',
@@ -980,6 +1097,10 @@ class L10nPeNeGuiaRemision(models.Model):
             'items': len(self.line_ids),
             'mensaje': self.l10n_pe_biller_message or '',
         }
+        _logger.info("----------------------- Guia %s ---------------------", self.name)
+        _logger.info('guia_dict: %s', resp)
+        _logger.info('estado: %s', self.estado)
+        return resp
 
     def l10n_pe_ne_guia_detalle(self):
         """Detalle completo para el formulario/PDF: cabecera + bienes."""
@@ -1004,10 +1125,11 @@ class L10nPeNeGuiaRemision(models.Model):
             'fechaInicioTraslado': c.fecha_inicio_traslado.strftime('%Y-%m-%d') if c.fecha_inicio_traslado else '',
             'ubigeoPartida': c.ubigeo_partida or '', 'dirPartida': c.dir_partida or '',
             'ubigeoLlegada': c.ubigeo_llegada or '', 'dirLlegada': c.dir_llegada or '',
-            'damNumero': c.dam_numero or '',
+            'damNumero': c.dam_numero or '', 'damTipo': c.dam_tipo or '50',
             'puertoCodigo': c.puerto_codigo or '', 'puertoTipo': c.puerto_tipo or '',
             'puertoNombre': (c._l10n_pe_ne_puerto_entry() or (None, ''))[1],
             'numContenedor': c.num_contenedor or '', 'numPrecinto': c.num_precinto or '',
+            'numContenedor2': c.num_contenedor2 or '', 'numPrecinto2': c.num_precinto2 or '',
             'numPlaca': c.num_placa or '',
             'conductorTipoDoc': c.conductor_tipo_doc or '1', 'conductorNumDoc': c.conductor_num_doc or '',
             'conductorNombres': c.conductor_nombres or '', 'conductorApellidos': c.conductor_apellidos or '',
@@ -1153,9 +1275,10 @@ class L10nPeNeGuiaRemision(models.Model):
             'ubigeoPartida': 'ubigeo_partida', 'dirPartida': 'dir_partida',
             'ubigeoLlegada': 'ubigeo_llegada', 'dirLlegada': 'dir_llegada',
             'codEstabPartida': 'cod_estab_partida', 'codEstabLlegada': 'cod_estab_llegada',
-            'damNumero': 'dam_numero',
+            'damNumero': 'dam_numero', 'damTipo': 'dam_tipo',
             'puertoCodigo': 'puerto_codigo', 'puertoTipo': 'puerto_tipo',
             'numContenedor': 'num_contenedor', 'numPrecinto': 'num_precinto',
+            'numContenedor2': 'num_contenedor2', 'numPrecinto2': 'num_precinto2',
             'entAutorizacionCarga': 'ent_autorizacion_carga',
             'numAutorizacionCarga': 'num_autorizacion_carga',
         }

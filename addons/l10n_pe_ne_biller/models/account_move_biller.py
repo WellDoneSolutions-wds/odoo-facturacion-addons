@@ -272,6 +272,94 @@ class AccountMove(models.Model):
         copy=False,
         help="Tipo del comprobante de anticipo que se regulariza (cat. 12).",
     )
+    l10n_pe_ne_es_anticipo = fields.Boolean(
+        string="Es pago anticipado",
+        copy=False,
+        help="Marca que ESTE comprobante se emite por un pago anticipado (doc. A del ciclo de "
+        "anticipos, equivale al 'Sí' de SEE-SOL). Es una venta interna normal (0101) por el monto "
+        "anticipado; su descripción lleva 'PAGO ANTICIPADO' y queda disponible para regularizarse "
+        "luego en la factura de venta final. No confundir con el anticipo aplicado, que descuenta "
+        "un anticipo ya emitido (doc. B).",
+    )
+    l10n_pe_ne_anticipo_origen_id = fields.Many2one(
+        "account.move",
+        string="Anticipo regularizado",
+        copy=False,
+        help="Comprobante de anticipo (doc. A) que ESTA venta final regulariza. Lo fija el "
+        "autocompletado del formulario al elegir un anticipo pendiente del cliente; enlaza la "
+        "regularización con el anticipo para llevar su saldo. Si el anticipo se emitió por fuera "
+        "(SEE-SOL), queda vacío y solo valen los campos serie/monto/tipo tecleados a mano.",
+    )
+    l10n_pe_ne_anticipo_aplicado = fields.Monetary(
+        string="Anticipo ya aplicado",
+        compute="_compute_l10n_pe_ne_anticipo_saldo",
+        help="Suma de las regularizaciones vivas que apuntan a este anticipo (doc. A).",
+    )
+    l10n_pe_ne_anticipo_saldo = fields.Monetary(
+        string="Saldo del anticipo",
+        compute="_compute_l10n_pe_ne_anticipo_saldo",
+        help="Importe del anticipo aún disponible para regularizar = total − aplicado. Solo "
+        "aplica a comprobantes marcados como pago anticipado (doc. A).",
+    )
+
+    @api.depends("l10n_pe_ne_es_anticipo", "amount_total")
+    def _compute_l10n_pe_ne_anticipo_saldo(self):
+        """Saldo por anticipo (doc. A) = total − regularizaciones vivas que lo aplican. Mismo
+        criterio de 'vivo' que las NC (posteadas y no rechazadas/anuladas/con error; las en cola
+        cuentan, para que dos regularizaciones simultáneas no consuman más que el total)."""
+        anticipos = self.filtered("l10n_pe_ne_es_anticipo")
+        aplicado = {}
+        if anticipos:
+            grupos = self.env["account.move"]._read_group(
+                [
+                    ("l10n_pe_ne_anticipo_origen_id", "in", anticipos.ids),
+                    ("state", "=", "posted"),
+                    ("l10n_pe_biller_state", "not in", ("rechazado", "error", "anulado")),
+                ],
+                groupby=["l10n_pe_ne_anticipo_origen_id"],
+                aggregates=["l10n_pe_ne_anticipo_total:sum"],
+            )
+            aplicado = {origen.id: (total or 0.0) for origen, total in grupos}
+        for move in self:
+            ap = aplicado.get(move.id, 0.0) if move.l10n_pe_ne_es_anticipo else 0.0
+            move.l10n_pe_ne_anticipo_aplicado = ap
+            move.l10n_pe_ne_anticipo_saldo = (
+                round(move.amount_total - ap, 2) if move.l10n_pe_ne_es_anticipo else 0.0
+            )
+
+    def l10n_pe_ne_anticipos_pendientes(self, ruc=None, partner_id=None, moneda=None):
+        """Anticipos (doc. A) ACEPTADOS por SUNAT y con saldo pendiente, para autocompletar la
+        regularización en la venta final. Filtra por cliente (id o RUC/DNI) y, opcionalmente,
+        moneda. Devuelve serie-correlativo, tipo (cat. 12: 02 factura / 03 boleta) y saldo."""
+        domain = [
+            ("l10n_pe_ne_es_anticipo", "=", True),
+            ("l10n_pe_biller_state", "=", "enviado"),
+            ("move_type", "=", "out_invoice"),
+        ]
+        if partner_id:
+            domain.append(("partner_id", "=", int(partner_id)))
+        elif ruc:
+            domain.append(("partner_id.vat", "=", (ruc or "").strip()))
+        if moneda:
+            domain.append(("currency_id.name", "=", moneda))
+        out = []
+        for m in self.search(domain, order="id desc", limit=100):
+            if round(m.l10n_pe_ne_anticipo_saldo, 2) <= 0:
+                continue
+            out.append(
+                {
+                    "id": m.id,
+                    "doc": "%s-%s" % (m.l10n_pe_ne_serie_emit or "", m.l10n_pe_ne_corr_emit or ""),
+                    "tipo": "02" if (m.l10n_pe_ne_tipo_doc or "01") == "01" else "03",
+                    "total": m.amount_total,
+                    "aplicado": m.l10n_pe_ne_anticipo_aplicado,
+                    "saldo": m.l10n_pe_ne_anticipo_saldo,
+                    "moneda": m.currency_id.name or "PEN",
+                    "cliente": m.partner_id.name or "",
+                    "fechaEmision": m.invoice_date.strftime("%Y-%m-%d") if m.invoice_date else "",
+                }
+            )
+        return out
 
     def _l10n_pe_importe_cobrar(self):
         """Importe neto a cobrar = total − anticipo aplicado − bienes gratuitos (lo que el cliente paga)."""
@@ -334,6 +422,13 @@ class AccountMove(models.Model):
         """Valida que el anticipo sea representable (descuento global código 04) antes de emitir el XML.
         Rechaza con un mensaje claro los casos no soportados, en vez de generar un comprobante inválido."""
         self.ensure_one()
+        if self.l10n_pe_ne_es_anticipo and self._l10n_pe_anticipo():
+            raise UserError(
+                _(
+                    "Un comprobante que se emite por un pago anticipado no puede a la vez regularizar "
+                    "otro anticipo. Desmarque una de las dos opciones."
+                )
+            )
         if not self._l10n_pe_anticipo():
             return
         if not (self.l10n_pe_ne_anticipo_doc or "").strip():
@@ -349,6 +444,48 @@ class AccountMove(models.Model):
                 )
                 % (self.l10n_pe_ne_anticipo_total, self.amount_total)
             )
+        # Si la regularización enlaza un anticipo local (doc. A), valida moneda y saldo disponible:
+        # el importe aplicado no puede exceder lo que le queda al anticipo (evita doble consumo).
+        origen = self.l10n_pe_ne_anticipo_origen_id
+        if origen:
+            if not origen.l10n_pe_ne_es_anticipo:
+                raise UserError(
+                    _("El documento enlazado (%s) no está marcado como pago anticipado.")
+                    % origen.display_name
+                )
+            if origen.partner_id != self.partner_id:
+                raise UserError(
+                    _("El anticipo (%s) pertenece a otro cliente: solo puede regularizarlo su titular.")
+                    % origen.display_name
+                )
+            if origen.currency_id != self.currency_id:
+                raise UserError(
+                    _(
+                        "El anticipo (%s) y la factura deben estar en la misma moneda: "
+                        "regularice el anticipo en un comprobante de su misma moneda."
+                    )
+                    % origen.display_name
+                )
+            # Otras regularizaciones vivas que ya consumen este anticipo (excluye esta factura).
+            otras = self.env["account.move"].search(
+                [
+                    ("l10n_pe_ne_anticipo_origen_id", "=", origen.id),
+                    ("id", "!=", self.id),
+                    ("state", "=", "posted"),
+                    ("l10n_pe_biller_state", "not in", ("rechazado", "error", "anulado")),
+                ]
+            )
+            disponible = round(
+                origen.amount_total - sum(otras.mapped("l10n_pe_ne_anticipo_total")), 2
+            )
+            if round(self.l10n_pe_ne_anticipo_total, 2) > disponible + 0.01:
+                raise UserError(
+                    _(
+                        "El anticipo %s ya no tiene saldo suficiente: disponible %.2f, "
+                        "intentas aplicar %.2f."
+                    )
+                    % (origen.display_name, disponible, self.l10n_pe_ne_anticipo_total)
+                )
         _cod, _tasa, motivo = self._l10n_pe_anticipo_gravado()
         if motivo:
             raise UserError(
@@ -419,7 +556,11 @@ class AccountMove(models.Model):
                 {
                     "tipVariableGlobal": "false",
                     "codTipoVariableGlobal": "04",
-                    "porVariableGlobal": "%.2f" % (valor / base if base else 0.0),
+                    # Factor con 5 decimales: SUNAT valida mtoVariableGlobal ≈ base × por (tolerancia
+                    # ~±1, error 3307). Con solo 2 decimales, un anticipo parcial cuyo valor no es
+                    # fracción redonda de la base (p.ej. 254.24 sobre 1000 → 0.25) descuadra y se
+                    # rechaza; 5 decimales reconstruyen el monto dentro de la tolerancia.
+                    "porVariableGlobal": "%.5f" % (valor / base if base else 0.0),
                     "monMontoVariableGlobal": moneda,
                     "mtoVariableGlobal": fmt(valor),
                     "monBaseImponibleVariableGlobal": moneda,
@@ -586,6 +727,13 @@ class AccountMove(models.Model):
         [("09", "Guía de remisión remitente"), ("31", "Guía de remisión transportista")],
         string="Tipo de guía referenciada",
         default="09",
+    )
+    # Proyecto/contrato (facturación por avance de obra): controla que la suma de las
+    # valorizaciones no supere el valor total del contrato (QA-039).
+    l10n_pe_ne_proyecto_id = fields.Many2one(
+        "l10n_pe_ne.proyecto", string="Proyecto / contrato", copy=False,
+        help="Contrato al que pertenece esta valorización. El total facturado no puede superar "
+        "el valor del contrato.",
     )
     l10n_pe_ne_forma_pago = fields.Selection(
         [("Contado", "Contado"), ("Credito", "Crédito")],
@@ -791,6 +939,17 @@ class AccountMove(models.Model):
         xmlid = uom.get_external_id().get(uom.id, "")
         return UOM_CODE_BY_XMLID.get(xmlid, DEFAULT_UNIT_CODE)
 
+    _L10N_PE_ANTICIPO_PREFIX = "PAGO ANTICIPADO"
+
+    def _l10n_pe_des_item(self, line):
+        """Descripción del ítem para el XML. En un comprobante marcado como pago anticipado
+        (doc. A) antepone 'PAGO ANTICIPADO' para que el documento identifique la operación sin
+        depender de una leyenda cat. 52 (que no existe para anticipos)."""
+        desc = line.name or line.product_id.display_name or ""
+        if self.l10n_pe_ne_es_anticipo and not desc.startswith(self._L10N_PE_ANTICIPO_PREFIX):
+            desc = ("%s - %s" % (self._L10N_PE_ANTICIPO_PREFIX, desc)).strip(" -")
+        return desc
+
     def _l10n_pe_detalle(self):
         fmt = self._l10n_pe_fmt
         detalle = []
@@ -819,7 +978,7 @@ class AccountMove(models.Model):
                 "codProductoSUNAT": line.l10n_pe_ne_cod_producto_sunat or "-",
                 "codUnidadMedida": self._l10n_pe_unit_code(line),
                 "ctdUnidadItem": fmt(qty),
-                "desItem": line.name or line.product_id.display_name or "",
+                "desItem": self._l10n_pe_des_item(line),
                 "mtoValorUnitario": fmt(gross / qty if qty else 0.0),
                 "mtoValorVentaItem": fmt(base),
                 # Precio de venta unitario = (valor venta + ISC + IGV) / cantidad; NO incluye el ICBPER.
@@ -1192,7 +1351,11 @@ class AccountMove(models.Model):
                     "codBienPropiedad": "-",
                     "tipVariable": "false",
                     "codTipoVariable": "00",
-                    "porVariable": "%.2f" % (line.discount / 100.0),
+                    # Factor con 5 decimales: SUNAT valida mtoVariable ≈ base × porVariable (error 3290,
+                    # "cargo/descuento por ítem difiere"). Con 2 decimales, un descuento en monto fijo
+                    # (p.ej. S/50 sobre 470 → 10.6383% → 0.11) descuadra y se rechaza; 5 decimales
+                    # reconstruyen el monto dentro de la tolerancia.
+                    "porVariable": "%.5f" % (line.discount / 100.0),
                     "monMontoVariable": moneda,
                     "mtoVariable": fmt(disc),
                     "monBaseImponibleVariable": moneda,
@@ -2202,6 +2365,21 @@ class AccountMove(models.Model):
             cot = self.env["l10n_pe_ne.cotizacion"].browse(int(cotid)).exists()
             if cot:
                 cot.l10n_pe_ne_vincular_comprobante(move.id)
+        # Avance de obra (QA-039): la suma de las valorizaciones no puede superar el valor total
+        # del contrato. Se valida con el move ya posteado (amount_total disponible); si se pasa,
+        # el raise revierte la transacción y no se emite.
+        proj = move.l10n_pe_ne_proyecto_id
+        if proj:
+            otras = move.amount_total or 0.0  # esta valorización
+            if round(proj.facturado + otras, 2) > round(proj.valor_total or 0.0, 2) + 0.01:
+                raise UserError(_(
+                    "Esta valorización (%s) haría que lo facturado del contrato «%s» supere su "
+                    "valor total. Facturado: %s · Contrato: %s · Esta: %s."
+                ) % (
+                    self._l10n_pe_fmt(otras), proj.name,
+                    self._l10n_pe_fmt(proj.facturado), self._l10n_pe_fmt(proj.valor_total),
+                    self._l10n_pe_fmt(otras),
+                ))
         move.action_l10n_pe_send_to_biller()
         return move.l10n_pe_ne_quick_result()
 
@@ -4976,12 +5154,17 @@ class AccountMove(models.Model):
         if p:
             move.l10n_pe_ne_percepcion = True
             move.l10n_pe_ne_percepcion_rate = float(p.get("tasa") or 2)
+        if payload.get("esAnticipo"):
+            move.l10n_pe_ne_es_anticipo = True
         a = payload.get("anticipo")
         if a:
             move.l10n_pe_ne_anticipo_total = float(a.get("total") or 0)
             move.l10n_pe_ne_anticipo_doc = a.get("doc") or ""
             if a.get("tipo"):
                 move.l10n_pe_ne_anticipo_tipo = a["tipo"]
+            # Enlace al anticipo local (doc. A) elegido en el autocompletado, para llevar su saldo.
+            if a.get("origenId"):
+                move.l10n_pe_ne_anticipo_origen_id = int(a["origenId"])
         # Forma de pago: Crédito (con cuotas) emite cac:PaymentTerms; medios de pago
         # (efectivo/Yape/…) se guardan como dato interno del POS (no van al XML SUNAT).
         # Establecimiento emisor (sucursal): código de local anexo SUNAT del comprobante.
@@ -4992,6 +5175,9 @@ class AccountMove(models.Model):
             move.l10n_pe_ne_guia_ref = payload["guiaRef"]
             if payload.get("guiaTipo"):
                 move.l10n_pe_ne_guia_tipo = payload["guiaTipo"]
+        # Proyecto/contrato (avance de obra).
+        if payload.get("proyectoId"):
+            move.l10n_pe_ne_proyecto_id = int(payload["proyectoId"])
         fp = payload.get("formaPago") or {}
         if fp.get("tipo") == "Credito" or fp.get("cuotas"):
             move.l10n_pe_ne_forma_pago = "Credito"
@@ -5261,6 +5447,21 @@ class AccountMove(models.Model):
             "target": "self",
         }
 
+    def _l10n_pe_ne_medios_pago_texto(self):
+        """Detalle de medios de pago del POS ('Efectivo S/ 50.00, Yape S/ 68.00') para la
+        representación impresa. NO va al XML SUNAT (es interno del punto de venta). Devuelve
+        "" si no hay medios con importe (medio sin detallar → no se muestra el bloque). Lo usan
+        el ticket 80mm (dentro del bloque POS `adicionalTxt`) y el A4 (param `MEDIOS_PAGO`)."""
+        self.ensure_one()
+        medios = self.l10n_pe_ne_medios_pago or []
+
+        def _txt(m):
+            base = "%s S/ %.2f" % (m.get("medio") or "", float(m.get("monto") or 0))
+            op = str(m.get("numOp") or "").strip()
+            return "%s (Op. %s)" % (base, op) if op else base
+
+        return ", ".join(_txt(m) for m in medios if float(m.get("monto") or 0) > 0)
+
     def _l10n_pe_ne_ticket_adicional(self):
         """Bloque de pago del ticket 80mm (se manda como `adicionalTxt`): medios de pago del
         POS, vuelto, cajero y nota. Estos datos NO van al XML SUNAT (son internos del punto de
@@ -5269,11 +5470,8 @@ class AccountMove(models.Model):
         self.ensure_one()
         partes = []
         medios = self.l10n_pe_ne_medios_pago or []
-        if medios:
-            det = ", ".join(
-                "%s S/ %.2f" % (m.get("medio") or "", float(m.get("monto") or 0))
-                for m in medios
-            )
+        det = self._l10n_pe_ne_medios_pago_texto()
+        if det:
             partes.append("Pago: " + det)
             pagado = sum(float(m.get("monto") or 0) for m in medios)
             vuelto = round(pagado - (self.amount_total or 0.0), 2)
@@ -5330,6 +5528,13 @@ class AccountMove(models.Model):
             "dirCliente": ", ".join(
                 p for p in (self.partner_id.street, self.partner_id.street2) if p
             ),
+            # Vendedor/cajero que atendió (no va al XML SUNAT): va en ambos formatos como
+            # "Atendido por" (el ticket ya lo traía en el bloque POS; ahora también el A4).
+            "atendidoPor": self.invoice_user_id.name or "",
+            # Medios de pago del POS (Efectivo/Yape/Plin…): NO van al XML SUNAT. El A4 los
+            # muestra junto a la forma de pago (param MEDIOS_PAGO); el ticket ya los trae en
+            # el bloque POS (adicionalTxt). "" si no hay medios detallados.
+            "mediosPago": self._l10n_pe_ne_medios_pago_texto(),
         }
         # Logo del emisor (si lo tiene): va en ambos formatos (A4 y ticket).
         logo = self.company_id.logo

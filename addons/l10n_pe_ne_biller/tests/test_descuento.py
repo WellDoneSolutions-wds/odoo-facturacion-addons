@@ -41,7 +41,7 @@ class TestBillerDescuento(TransactionCase):
         self.assertEqual(a['idLinea'], '1')
         self.assertEqual(a['nomPropiedad'], '-')             # salta el bloque AdditionalItemProperty
         self.assertEqual(a['codTipoVariable'], '00')
-        self.assertEqual(a['porVariable'], '0.10')
+        self.assertEqual(a['porVariable'], '0.10000')        # 5 decimales (SUNAT 3290)
         self.assertEqual(a['mtoVariable'], '50.00')          # descuento
         self.assertEqual(a['mtoBaseImpVariable'], '500.00')  # base bruta
 
@@ -49,3 +49,18 @@ class TestBillerDescuento(TransactionCase):
         payload = self._move(0.0)._l10n_pe_build_invoice_request()
         self.assertEqual(payload['adicionalDetalle'], [])
         self.assertEqual(payload['detalle'][0]['mtoValorVentaItem'], '500.00')
+
+    def test_descuento_monto_fijo_factor_reconstruye(self):
+        """SUNAT 3290: con un descuento cuyo % NO es fracción redonda de la base (un descuento en
+        monto fijo, p.ej. S/50 sobre 470 → 10.6383%), el factor por ítem debe reconstruir el monto
+        (|base·por − monto| ≤ 1). Con 2 decimales descuadraba y SUNAT rechazaba."""
+        move = self.env['account.move'].create({
+            'move_type': 'out_invoice', 'partner_id': self.partner.id, 'invoice_date': '2026-06-20',
+            'l10n_pe_serie': 'F001', 'l10n_pe_correlativo': '2',
+            'invoice_line_ids': [(0, 0, {'product_id': self.product.id, 'quantity': 1.0,
+                                         'price_unit': 470.0, 'discount': 10.6383,
+                                         'tax_ids': [(6, 0, self.igv.ids)]})]})
+        move.action_post()
+        a = move._l10n_pe_build_invoice_request()['adicionalDetalle'][0]
+        base, por, monto = (float(a['mtoBaseImpVariable']), float(a['porVariable']), float(a['mtoVariable']))
+        self.assertLessEqual(abs(base * por - monto), 1.0)

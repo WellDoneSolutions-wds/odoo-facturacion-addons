@@ -374,6 +374,10 @@ class TestOrdenTrabajoViaA(EnvioSincronoMixin, TransactionCase):
         self.assertTrue(ant, "Vía A: el adelanto emite su propio comprobante")
         self.assertEqual(ant.l10n_pe_biller_state, "enviado")   # el mock lo deja enviado
         self.assertEqual(ant.move_type, "out_invoice")
+        # Modelo formal del biller: el doc del anticipo queda MARCADO como doc. A (es_anticipo) —
+        # entra a "anticipos pendientes" del cliente y lleva saldo aplicado/disponible.
+        self.assertTrue(ant.l10n_pe_ne_es_anticipo)
+        self.assertEqual(ant.l10n_pe_ne_anticipo_saldo, ant.amount_total)   # aún sin regularizar
         # el movimiento de caja sigue ligado a la orden (aunque el arqueo lo salte, la traza queda)
         mov = orden.adelanto_movimiento_id
         self.assertTrue(mov)
@@ -412,6 +416,11 @@ class TestOrdenTrabajoViaA(EnvioSincronoMixin, TransactionCase):
         self.assertEqual(final.l10n_pe_ne_anticipo_doc, doc_esperado)
         self.assertRegex(final.l10n_pe_ne_anticipo_doc, r"^F\d{3}-\d{8}$")   # factura → serie F
         self.assertEqual(final.l10n_pe_ne_anticipo_tipo, "02")              # RUC → factura (cat. 12)
+        # Modelo formal: la regularización ENLAZA el doc. A (origen) y consume su saldo — la
+        # validación del biller impediría aplicar este anticipo otra vez.
+        self.assertEqual(final.l10n_pe_ne_anticipo_origen_id, ant)
+        self.assertEqual(ant.l10n_pe_ne_anticipo_aplicado, orden.adelanto_monto)
+        self.assertEqual(ant.l10n_pe_ne_anticipo_saldo, 0.0)
         # contrato del biller (test_anticipo): el XML descuenta el anticipo y lo informa.
         req = final._l10n_pe_build_invoice_request()
         self.assertEqual(req["cabecera"]["sumTotalAnticipos"], "50.00")

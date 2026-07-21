@@ -305,6 +305,9 @@ class L10nPeNeOrdenTrabajo(models.Model):
                 "total": self.adelanto_monto,
                 "doc": self._l10n_pe_ne_anticipo_doc_ref(),
                 "tipo": "02" if self._l10n_pe_ne_anticipo_es_factura() else "03",
+                # origenId enlaza la regularización con el doc. A local: el biller lleva el saldo
+                # (aplicado/disponible), valida moneda, e impide aplicar más de lo que queda.
+                "origenId": self.anticipo_factura_id.id,
             }
         res = self.env["account.move"].l10n_pe_ne_quick_emit(payload_emision)
         move_id = res.get("id") if isinstance(res, dict) else False
@@ -382,6 +385,10 @@ class L10nPeNeOrdenTrabajo(models.Model):
         return {
             "tipoDoc": tipo_doc,
             "cliente": cliente,
+            # esAnticipo: marca el doc. A en el modelo formal del biller (l10n_pe_ne_es_anticipo):
+            # entra a "anticipos pendientes" del cliente, lleva saldo aplicado/disponible, y la
+            # validación del biller impide consumirlo dos veces desde cualquier regularización.
+            "esAnticipo": True,
             "lineas": [{
                 "descripcion": _("Anticipo a cuenta — %s") % self.name,
                 "cantidad": 1,

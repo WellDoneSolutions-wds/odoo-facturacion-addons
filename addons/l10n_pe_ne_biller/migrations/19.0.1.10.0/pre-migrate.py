@@ -13,10 +13,18 @@ def migrate(cr, version):
     """
     cr.execute("""
         SELECT column_name FROM information_schema.columns
-        WHERE table_name='account_move' AND column_name='l10n_pe_ne_anticipo_total'
+        WHERE table_schema='public' AND table_name='account_move'
+          AND column_name='l10n_pe_ne_anticipo_total'
     """)
     if not cr.fetchone():
         return  # ya migrado o BD nueva (nunca tuvo las columnas escalares)
+    # El pre-migrate corre ANTES de que el ORM cree las columnas del módulo, así que
+    # `l10n_pe_ne_anticipos` puede no existir todavía (BD que viene de main 19.0.1.9.0,
+    # donde solo existen las columnas escalares). Crearla aquí es inofensivo si ya existe;
+    # el ORM la reconoce igual en el setup posterior.
+    cr.execute("""
+        ALTER TABLE account_move ADD COLUMN IF NOT EXISTS l10n_pe_ne_anticipos jsonb
+    """)
     cr.execute("""
         UPDATE account_move
         SET l10n_pe_ne_anticipos = jsonb_build_array(jsonb_build_object(

@@ -426,7 +426,11 @@ class AccountMove(models.Model):
 
     def _l10n_pe_ne_anticipos_list(self):
         """Lista normalizada de anticipos de esta factura: [{doc, monto, tipo, origenId}]. Vacía
-        si no aplica (no out_invoice, NC/ND o sin anticipos)."""
+        si no aplica (no out_invoice, NC/ND o sin anticipos).
+        `origenId` se coerciona con seguridad (nunca explota con basura tipo "abc"): esta lista
+        la recorre también `_compute_l10n_pe_ne_anticipo_saldo` para TODAS las regularizaciones
+        vivas del sistema, así que una fila envenenada en OTRA factura no debe romper el
+        saldo/pendientes de todas las demás — se trata como sin origen local (None)."""
         self.ensure_one()
         if self.move_type != "out_invoice" or self.debit_origin_id:
             return []
@@ -435,44 +439,48 @@ class AccountMove(models.Model):
             monto = round(float(a.get("monto") or 0.0), 2)
             if monto <= 0:
                 continue
+            origen_raw = a.get("origenId")
+            try:
+                origen_id = int(origen_raw) if origen_raw not in (None, "", False) else None
+            except (TypeError, ValueError):
+                origen_id = None
             out.append({
                 "doc": (a.get("doc") or "").strip(),
                 "monto": monto,
                 "tipo": a.get("tipo") or "02",
-                "origenId": int(a["origenId"]) if a.get("origenId") not in (None, "", False) else None,
+                "origenId": origen_id,
             })
         return out
 
     def _l10n_pe_anticipos_montos(self):
-        """Lista [(valor_i, igv_i, total_i)] por anticipo + agregado (valor, igv, total). Vacía si
-        no aplica (no out_invoice, NC/ND o sin anticipos). El valor de CADA anticipo se separa con
-        la tasa gravada homogénea real de la factura (no asume 18%); el agregado es la suma de los
-        valores/igv por anticipo (no el total dividido una sola vez), así que con montos que no son
-        fracción redonda de la base el agregado no arrastra un desvío de redondeo distinto al que
-        vería cada `AdditionalDocumentReference` individual."""
+        """(valor, igv, total) AGREGADO de los anticipos: (0.0, 0.0, 0.0) si no aplica (no
+        out_invoice, NC/ND o sin anticipos). El valor de CADA anticipo se separa con la tasa
+        gravada homogénea real de la factura (no asume 18%) y el agregado es la SUMA de los
+        valores/igv por anticipo (no el total dividido una sola vez), así que con montos que no
+        son fracción redonda de la base el agregado no arrastra un desvío de redondeo distinto al
+        que vería cada `AdditionalDocumentReference` individual — de ahí que el loop por ítem se
+        mantenga aunque solo se devuelva el agregado (nadie más consume el desglose por ítem)."""
         self.ensure_one()
         lst = self._l10n_pe_ne_anticipos_list()
         if not lst:
-            return [], (0.0, 0.0, 0.0)
+            return (0.0, 0.0, 0.0)
         _cod, tasa, _m = self._l10n_pe_anticipo_gravado()
-        por = []
         vt = it = tt = 0.0
         for a in lst:
             total = round(a["monto"], 2)
             valor = round(total / (1.0 + (tasa or 0.0) / 100.0), 2)
             igv = round(total - valor, 2)
-            por.append((valor, igv, total))
             vt += valor
             it += igv
             tt += total
-        return por, (round(vt, 2), round(it, 2), round(tt, 2))
+        return round(vt, 2), round(it, 2), round(tt, 2)
 
     def _l10n_pe_anticipo(self):
         """(valor, igv, total) AGREGADO de los anticipos, o None si no hay ninguno. Wrapper de
         `_l10n_pe_anticipos_montos()` para no romper a los llamadores previos (percepción, importe
         a cobrar, cabecera, tributos, variable global 04) que solo necesitan el agregado."""
         self.ensure_one()
-        _por, (v, i, t) = self._l10n_pe_anticipos_montos()
+        v, i, t = self._l10n_pe_anticipos_montos()
         return (v, i, t) if t > 0 else None
 
     def _l10n_pe_desc_no_afecta(self):
@@ -525,6 +533,12 @@ class AccountMove(models.Model):
         ])
         aplicado_en_esta = {}  # origenId -> suma de monto ya visto en ESTA factura (mismo origen 2x).
         for idx, a in enumerate(lst, start=1):
+            if a["tipo"] not in ("02", "03"):
+                raise UserError(
+                    _(
+                        "Tipo de documento de anticipo inválido (debe ser 02 factura o 03 boleta)."
+                    )
+                )
             if not a["doc"]:
                 raise UserError(
                     _(

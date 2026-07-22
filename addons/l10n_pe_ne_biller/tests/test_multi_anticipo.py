@@ -90,3 +90,35 @@ class TestMultiAnticipo(TransactionCase):
                 {'doc': 'F001-00000100', 'monto': 800.0, 'tipo': '02'},
                 {'doc': 'F001-00000101', 'monto': 800.0, 'tipo': '02'},
             ], precio=1000.0)._l10n_pe_build_invoice_request()
+
+    def test_tipo_invalido_rechaza_al_emitir(self):
+        # '01' (factura normal, no de anticipo) no es un tipo válido de cat. 12 para el doc.
+        # relacionado de anticipo: solo 02 (factura) / 03 (boleta). Postear no valida (solo
+        # emitir), igual que 'sin doc' — el guard vive en `_l10n_pe_check_anticipo`.
+        move = self._venta(anticipos=[
+            {'doc': 'F001-00000100', 'monto': 118.0, 'tipo': '01'},
+        ])
+        with self.assertRaises(UserError):
+            move._l10n_pe_build_invoice_request()
+
+    def test_origen_id_no_numerico_se_trata_como_sin_origen(self):
+        # origenId basura (import manual, dato corrupto) no debe explotar con ValueError: se
+        # coerciona a None (regularización "por fuera", sin enlace a un anticipo local).
+        move = self._venta(anticipos=[
+            {'doc': 'F001-00000100', 'monto': 118.0, 'tipo': '02', 'origenId': 'abc'},
+        ])
+        lst = move._l10n_pe_ne_anticipos_list()
+        self.assertIsNone(lst[0]['origenId'])
+        # tampoco rompe la emisión (sin origen local, se valida como anticipo "por fuera").
+        move._l10n_pe_build_invoice_request()
+
+    def test_origen_id_invalido_en_otra_factura_no_rompe_saldo(self):
+        # `_compute_l10n_pe_ne_anticipo_saldo` escanea TODAS las regularizaciones vivas del
+        # sistema: una fila con origenId basura en OTRA factura no debe romper (ValueError) el
+        # saldo/pendientes de un anticipo real ajeno a esa fila.
+        origen = self._venta(precio=1000.0)
+        origen.l10n_pe_ne_es_anticipo = True
+        self._venta(anticipos=[
+            {'doc': 'F001-00000200', 'monto': 50.0, 'tipo': '02', 'origenId': 'abc'},
+        ])
+        self.assertEqual(origen.l10n_pe_ne_anticipo_saldo, 1180.0)

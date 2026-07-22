@@ -276,22 +276,13 @@ class AccountMove(models.Model):
     l10n_pe_ne_percepcion_rate = fields.Float(
         string="% Percepción", digits=(5, 2), default=2.0, copy=False
     )
-    l10n_pe_ne_anticipo_total = fields.Monetary(
-        string="Anticipo aplicado (total con IGV)",
+    l10n_pe_ne_anticipos = fields.Json(
+        string="Anticipos regularizados",
         copy=False,
-        help="Importe del anticipo (IGV incluido) ya facturado que se regulariza/deduce en esta factura.",
-    )
-    l10n_pe_ne_anticipo_doc = fields.Char(
-        string="Comprobante de anticipo",
-        copy=False,
-        help="Serie-correlativo de la factura de anticipo (ej. F001-00000100).",
-    )
-    l10n_pe_ne_anticipo_tipo = fields.Selection(
-        [("02", "Factura de anticipo"), ("03", "Boleta de anticipo")],
-        string="Tipo doc. anticipo",
-        default="02",
-        copy=False,
-        help="Tipo del comprobante de anticipo que se regulariza (cat. 12).",
+        help="Lista de anticipos (doc. A) que ESTA venta final regulariza/deduce. Cada elemento: "
+        "{doc: serie-correlativo, monto: importe con IGV, tipo: '02'/'03' (cat. 12), "
+        "origenId: id del anticipo local enlazado o null si se emitió por fuera}. SUNAT permite "
+        "varios (pagos escalonados): se emiten como N documentos relacionados con numIdeAnticipo 1..N.",
     )
     l10n_pe_ne_es_anticipo = fields.Boolean(
         string="Es pago anticipado",
@@ -301,15 +292,6 @@ class AccountMove(models.Model):
         "anticipado; su descripción lleva 'PAGO ANTICIPADO' y queda disponible para regularizarse "
         "luego en la factura de venta final. No confundir con el anticipo aplicado, que descuenta "
         "un anticipo ya emitido (doc. B).",
-    )
-    l10n_pe_ne_anticipo_origen_id = fields.Many2one(
-        "account.move",
-        string="Anticipo regularizado",
-        copy=False,
-        help="Comprobante de anticipo (doc. A) que ESTA venta final regulariza. Lo fija el "
-        "autocompletado del formulario al elegir un anticipo pendiente del cliente; enlaza la "
-        "regularización con el anticipo para llevar su saldo. Si el anticipo se emitió por fuera "
-        "(SEE-SOL), queda vacío y solo valen los campos serie/monto/tipo tecleados a mano.",
     )
     l10n_pe_ne_anticipo_aplicado = fields.Monetary(
         string="Anticipo ya aplicado",
@@ -335,22 +317,27 @@ class AccountMove(models.Model):
     def _compute_l10n_pe_ne_anticipo_saldo(self):
         """Saldo por anticipo (doc. A) = total − regularizaciones vivas que lo aplican. Mismo
         criterio de 'vivo' que las NC (posteadas y no rechazadas/anuladas/con error; las en cola
-        cuentan, para que dos regularizaciones simultáneas no consuman más que el total)."""
+        cuentan, para que dos regularizaciones simultáneas no consuman más que el total).
+        El dato vive en una lista JSON (`l10n_pe_ne_anticipos`): no se puede agrupar por
+        contenido JSON con `_read_group`, así que se busca las regularizaciones vivas y se
+        agrega en Python sumando el `monto` de cada anticipo cuyo `origenId` matchee."""
         anticipos = self.filtered("l10n_pe_ne_es_anticipo")
-        aplicado = {}
+        aplicado = {a.id: 0.0 for a in anticipos}
         if anticipos:
-            grupos = self.env["account.move"]._read_group(
-                [
-                    ("l10n_pe_ne_anticipo_origen_id", "in", anticipos.ids),
-                    ("state", "=", "posted"),
-                    ("l10n_pe_biller_state", "not in", ("rechazado", "error", "anulado")),
-                ],
-                groupby=["l10n_pe_ne_anticipo_origen_id"],
-                aggregates=["l10n_pe_ne_anticipo_total:sum"],
-            )
-            aplicado = {origen.id: (total or 0.0) for origen, total in grupos}
+            # Nota de escala: search + loop Python sobre TODAS las regularizaciones vivas del
+            # sistema; para volúmenes altos se podría filtrar por partner/JSONB, pero YAGNI.
+            regs = self.env["account.move"].search([
+                ("l10n_pe_ne_anticipos", "!=", False),
+                ("state", "=", "posted"),
+                ("l10n_pe_biller_state", "not in", ("rechazado", "error", "anulado")),
+            ])
+            for reg in regs:
+                for a in reg._l10n_pe_ne_anticipos_list():
+                    oid = a["origenId"]
+                    if oid in aplicado:
+                        aplicado[oid] += a["monto"]
         for move in self:
-            ap = aplicado.get(move.id, 0.0) if move.l10n_pe_ne_es_anticipo else 0.0
+            ap = round(aplicado.get(move.id, 0.0), 2) if move.l10n_pe_ne_es_anticipo else 0.0
             move.l10n_pe_ne_anticipo_aplicado = ap
             move.l10n_pe_ne_anticipo_saldo = (
                 round(move.amount_total - ap, 2) if move.l10n_pe_ne_es_anticipo else 0.0
@@ -437,17 +424,64 @@ class AccountMove(models.Model):
         )
         return cod_tri, tasa, None
 
-    def _l10n_pe_anticipo(self):
-        """(valor, igv, total) del anticipo aplicado, o None. El total trae el impuesto incluido; el
-        valor se separa con la tasa real de la operación gravada (1+tasa/100), no asumiendo 18%."""
+    def _l10n_pe_ne_anticipos_list(self):
+        """Lista normalizada de anticipos de esta factura: [{doc, monto, tipo, origenId}]. Vacía
+        si no aplica (no out_invoice, NC/ND o sin anticipos).
+        `origenId` se coerciona con seguridad (nunca explota con basura tipo "abc"): esta lista
+        la recorre también `_compute_l10n_pe_ne_anticipo_saldo` para TODAS las regularizaciones
+        vivas del sistema, así que una fila envenenada en OTRA factura no debe romper el
+        saldo/pendientes de todas las demás — se trata como sin origen local (None)."""
         self.ensure_one()
-        total = self.l10n_pe_ne_anticipo_total or 0.0
-        # El anticipo solo se regulariza en factura/boleta de venta, nunca en notas (NC/ND).
-        if total <= 0 or self.move_type != "out_invoice" or self.debit_origin_id:
-            return None
-        _cod, tasa, _motivo = self._l10n_pe_anticipo_gravado()
-        valor = round(total / (1.0 + (tasa or 0.0) / 100.0), 2)
-        return valor, round(total - valor, 2), round(total, 2)
+        if self.move_type != "out_invoice" or self.debit_origin_id:
+            return []
+        out = []
+        for a in (self.l10n_pe_ne_anticipos or []):
+            monto = round(float(a.get("monto") or 0.0), 2)
+            if monto <= 0:
+                continue
+            origen_raw = a.get("origenId")
+            try:
+                origen_id = int(origen_raw) if origen_raw not in (None, "", False) else None
+            except (TypeError, ValueError):
+                origen_id = None
+            out.append({
+                "doc": (a.get("doc") or "").strip(),
+                "monto": monto,
+                "tipo": a.get("tipo") or "02",
+                "origenId": origen_id,
+            })
+        return out
+
+    def _l10n_pe_anticipos_montos(self):
+        """(valor, igv, total) AGREGADO de los anticipos: (0.0, 0.0, 0.0) si no aplica (no
+        out_invoice, NC/ND o sin anticipos). El valor de CADA anticipo se separa con la tasa
+        gravada homogénea real de la factura (no asume 18%) y el agregado es la SUMA de los
+        valores/igv por anticipo (no el total dividido una sola vez), así que con montos que no
+        son fracción redonda de la base el agregado no arrastra un desvío de redondeo distinto al
+        que vería cada `AdditionalDocumentReference` individual — de ahí que el loop por ítem se
+        mantenga aunque solo se devuelva el agregado (nadie más consume el desglose por ítem)."""
+        self.ensure_one()
+        lst = self._l10n_pe_ne_anticipos_list()
+        if not lst:
+            return (0.0, 0.0, 0.0)
+        _cod, tasa, _m = self._l10n_pe_anticipo_gravado()
+        vt = it = tt = 0.0
+        for a in lst:
+            total = round(a["monto"], 2)
+            valor = round(total / (1.0 + (tasa or 0.0) / 100.0), 2)
+            igv = round(total - valor, 2)
+            vt += valor
+            it += igv
+            tt += total
+        return round(vt, 2), round(it, 2), round(tt, 2)
+
+    def _l10n_pe_anticipo(self):
+        """(valor, igv, total) AGREGADO de los anticipos, o None si no hay ninguno. Wrapper de
+        `_l10n_pe_anticipos_montos()` para no romper a los llamadores previos (percepción, importe
+        a cobrar, cabecera, tributos, variable global 04) que solo necesitan el agregado."""
+        self.ensure_one()
+        v, i, t = self._l10n_pe_anticipos_montos()
+        return (v, i, t) if t > 0 else None
 
     def _l10n_pe_desc_no_afecta(self):
         """Monto del descuento global que NO afecta la base del IGV, topeado para no dejar el total
@@ -464,8 +498,11 @@ class AccountMove(models.Model):
         return round(min(monto, max(0.0, tope)), 2)
 
     def _l10n_pe_check_anticipo(self):
-        """Valida que el anticipo sea representable (descuento global código 04) antes de emitir el XML.
-        Rechaza con un mensaje claro los casos no soportados, en vez de generar un comprobante inválido."""
+        """Valida que los anticipos sean representables (N documentos relacionados + un descuento
+        global código 04 AGREGADO) antes de emitir el XML. Rechaza con un mensaje claro los casos no
+        soportados, en vez de generar un comprobante inválido. Cada anticipo de la lista se valida
+        individualmente (doc, origen, partner, moneda y saldo propio); la SUMA se valida contra el
+        total de la factura."""
         self.ensure_one()
         if self.l10n_pe_ne_es_anticipo and self._l10n_pe_anticipo():
             raise UserError(
@@ -476,23 +513,49 @@ class AccountMove(models.Model):
             )
         if not self._l10n_pe_anticipo():
             return
-        if not (self.l10n_pe_ne_anticipo_doc or "").strip():
+        lst = self._l10n_pe_ne_anticipos_list()
+        total_aplicado = round(sum(a["monto"] for a in lst), 2)
+        if total_aplicado > self.amount_total + 0.01:
             raise UserError(
                 _(
-                    "Indique el comprobante de anticipo (serie-correlativo, ej. F001-00000100)."
+                    "El total de anticipos (%.2f) no puede exceder el total de la factura (%.2f)."
                 )
+                % (total_aplicado, self.amount_total)
             )
-        if round(self.l10n_pe_ne_anticipo_total, 2) > self.amount_total + 0.01:
-            raise UserError(
-                _(
-                    "El anticipo aplicado (%.2f) no puede exceder el total de la factura (%.2f)."
+        # Otras regularizaciones vivas que ya consumen anticipos (excluye esta factura). El dato vive
+        # en la lista JSON: se busca ampliamente UNA sola vez y se filtra/agrega en Python por origen
+        # (mismo patrón que `_compute_l10n_pe_ne_anticipo_saldo`).
+        otras = self.env["account.move"].search([
+            ("id", "!=", self.id),
+            ("l10n_pe_ne_anticipos", "!=", False),
+            ("state", "=", "posted"),
+            ("l10n_pe_biller_state", "not in", ("rechazado", "error", "anulado")),
+        ])
+        aplicado_en_esta = {}  # origenId -> suma de monto ya visto en ESTA factura (mismo origen 2x).
+        for idx, a in enumerate(lst, start=1):
+            if a["tipo"] not in ("02", "03"):
+                raise UserError(
+                    _(
+                        "Tipo de documento de anticipo inválido (debe ser 02 factura o 03 boleta)."
+                    )
                 )
-                % (self.l10n_pe_ne_anticipo_total, self.amount_total)
+            if not a["doc"]:
+                raise UserError(
+                    _(
+                        "Indique el comprobante del anticipo #%d (serie-correlativo, ej. F001-00000100)."
+                    )
+                    % idx
+                )
+            # Si la regularización enlaza un anticipo local (doc. A), valida moneda y saldo
+            # disponible: el importe aplicado no puede exceder lo que le queda al anticipo (evita
+            # doble consumo), sea desde otra factura o desde otra línea de esta misma lista.
+            origen = (
+                self.env["account.move"].browse(a["origenId"])
+                if a["origenId"]
+                else self.env["account.move"]
             )
-        # Si la regularización enlaza un anticipo local (doc. A), valida moneda y saldo disponible:
-        # el importe aplicado no puede exceder lo que le queda al anticipo (evita doble consumo).
-        origen = self.l10n_pe_ne_anticipo_origen_id
-        if origen:
+            if not origen:
+                continue
             if not origen.l10n_pe_ne_es_anticipo:
                 raise UserError(
                     _("El documento enlazado (%s) no está marcado como pago anticipado.")
@@ -511,25 +574,26 @@ class AccountMove(models.Model):
                     )
                     % origen.display_name
                 )
-            # Otras regularizaciones vivas que ya consumen este anticipo (excluye esta factura).
-            otras = self.env["account.move"].search(
-                [
-                    ("l10n_pe_ne_anticipo_origen_id", "=", origen.id),
-                    ("id", "!=", self.id),
-                    ("state", "=", "posted"),
-                    ("l10n_pe_biller_state", "not in", ("rechazado", "error", "anulado")),
-                ]
+            aplicado_otras = round(
+                sum(
+                    oa["monto"]
+                    for m in otras
+                    for oa in m._l10n_pe_ne_anticipos_list()
+                    if oa["origenId"] == origen.id
+                ),
+                2,
             )
-            disponible = round(
-                origen.amount_total - sum(otras.mapped("l10n_pe_ne_anticipo_total")), 2
+            aplicado_en_esta[origen.id] = round(
+                aplicado_en_esta.get(origen.id, 0.0) + a["monto"], 2
             )
-            if round(self.l10n_pe_ne_anticipo_total, 2) > disponible + 0.01:
+            disponible = round(origen.amount_total - aplicado_otras, 2)
+            if aplicado_en_esta[origen.id] > disponible + 0.01:
                 raise UserError(
                     _(
                         "El anticipo %s ya no tiene saldo suficiente: disponible %.2f, "
                         "intentas aplicar %.2f."
                     )
-                    % (origen.display_name, disponible, self.l10n_pe_ne_anticipo_total)
+                    % (origen.display_name, disponible, aplicado_en_esta[origen.id])
                 )
         _cod, _tasa, motivo = self._l10n_pe_anticipo_gravado()
         if motivo:
@@ -577,15 +641,17 @@ class AccountMove(models.Model):
                     "numDocEmisor": self.company_id.vat or "",
                 }
             )
-        ant = self._l10n_pe_anticipo()
-        if ant:
+        # N AdditionalDocumentReference (uno por anticipo), numIdeAnticipo correlativo 1..N en el
+        # orden de la lista — así SUNAT liga cada PrepaidPayment con su propio documento relacionado.
+        lst = self._l10n_pe_ne_anticipos_list()
+        for idx, a in enumerate(lst, start=1):
             rels.append(
                 {
                     "indDocRelacionado": "2",
-                    "tipDocRelacionado": self.l10n_pe_ne_anticipo_tipo or "02",
-                    "numDocRelacionado": self.l10n_pe_ne_anticipo_doc or "",
-                    "numIdeAnticipo": "1",
-                    "mtoDocRelacionado": self._l10n_pe_fmt(ant[2]),
+                    "tipDocRelacionado": a["tipo"] or "02",
+                    "numDocRelacionado": a["doc"],
+                    "numIdeAnticipo": str(idx),
+                    "mtoDocRelacionado": self._l10n_pe_fmt(a["monto"]),
                     "tipDocEmisor": "6",
                     "numDocEmisor": self.company_id.vat or "",
                 }
@@ -595,8 +661,11 @@ class AccountMove(models.Model):
     def _l10n_pe_variables_globales(self):
         """Variables globales de la factura:
         - código 51: percepción (el agente percibe un % sobre la venta; el cliente paga total + percepción).
-        - código 04: descuento global por anticipo (regulariza un anticipo ya facturado; reduce la
-          base del IGV en el valor del anticipo). Exigido por SUNAT (regla 3287) cuando hay anticipo."""
+        - código 04: descuento global por anticipo (regulariza uno o más anticipos ya facturados;
+          reduce la base del IGV en el valor AGREGADO de todos los anticipos). Exigido por SUNAT
+          (regla 3287) cuando hay anticipo. Con N>1 anticipos se emite UN solo 04 con la suma —no uno
+          por anticipo—, en línea con los N documentos relacionados (`_l10n_pe_relacionados`) que sí
+          van uno por cada `AdditionalDocumentReference`/`numIdeAnticipo`."""
         fmt = self._l10n_pe_fmt
         moneda = self.currency_id.name or "PEN"
         out = []
@@ -5500,15 +5569,23 @@ class AccountMove(models.Model):
         )
         if desc_no_afecta > 0:
             move.l10n_pe_ne_desc_no_afecta = desc_no_afecta
-        a = payload.get("anticipo")
-        if a:
-            move.l10n_pe_ne_anticipo_total = float(a.get("total") or 0)
-            move.l10n_pe_ne_anticipo_doc = a.get("doc") or ""
-            if a.get("tipo"):
-                move.l10n_pe_ne_anticipo_tipo = a["tipo"]
-            # Enlace al anticipo local (doc. A) elegido en el autocompletado, para llevar su saldo.
-            if a.get("origenId"):
-                move.l10n_pe_ne_anticipo_origen_id = int(a["origenId"])
+        # Anticipos regularizados: lista JSON (varios anticipos / pagos escalonados). Retrocompat
+        # con el payload viejo de un solo anticipo (objeto): se envuelve en lista de 1.
+        anticipos = payload.get("anticipos")
+        if anticipos is None and payload.get("anticipo"):
+            anticipos = [payload["anticipo"]]
+        if anticipos:
+            move.l10n_pe_ne_anticipos = [
+                {
+                    "doc": a.get("doc"),
+                    "monto": float(a.get("monto") or a.get("total") or 0),
+                    "tipo": a.get("tipo") or "02",
+                    # Enlace al anticipo local (doc. A) elegido en el autocompletado, para
+                    # llevar su saldo.
+                    "origenId": a.get("origenId"),
+                }
+                for a in anticipos
+            ]
         # Forma de pago: Crédito (con cuotas) emite cac:PaymentTerms; medios de pago
         # (efectivo/Yape/…) se guardan como dato interno del POS (no van al XML SUNAT).
         # Establecimiento emisor (sucursal): código de local anexo SUNAT del comprobante.
@@ -5735,6 +5812,7 @@ class AccountMove(models.Model):
             "mensaje": self.l10n_pe_biller_message or "",
             "formaPago": self.l10n_pe_ne_forma_pago or "Contado",
             "docOrigen": ("%s %s-%s" % (ot, os_, on)) if on else "",
+            "anticipos": self._l10n_pe_ne_anticipos_list(),
             "lineas": lineas,
             "notasCredito": [
                 {

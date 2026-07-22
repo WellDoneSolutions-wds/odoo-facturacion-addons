@@ -155,10 +155,14 @@ def _apply_flags(move, flags):
         move.l10n_pe_ne_es_anticipo = True   # doc. A: comprobante emitido POR un pago anticipado
     if f.get('anticipo'):
         a = f['anticipo']
-        move.l10n_pe_ne_anticipo_total = float(a.get('total', 0))
-        move.l10n_pe_ne_anticipo_doc = a.get('doc', 'F001-00000100')
-        if a.get('tipo'):
-            move.l10n_pe_ne_anticipo_tipo = a['tipo']
+        # Campo escalar retirado (Task 1): el anticipo ahora vive en la lista JSON
+        # `l10n_pe_ne_anticipos` ([{doc, monto, tipo, origenId}]).
+        move.l10n_pe_ne_anticipos = [{
+            'doc': a.get('doc', 'F001-00000100'),
+            'monto': float(a.get('total', 0)),
+            'tipo': a.get('tipo') or '02',
+            'origenId': a.get('origen_id'),
+        }]
     if f.get('motivo'):
         move.l10n_pe_motivo_code = f['motivo']
 
@@ -301,11 +305,16 @@ def _run_anticipo_ciclo(case):
         'invoice_line_ids': [_line_vals(l) for l in case.get('final_lines', case['lines'])]})
     b.l10n_pe_serie = f.get('serie_final', 'F001')
     b.l10n_pe_correlativo = str(random.randint(40000, 99000))
-    b.l10n_pe_ne_anticipo_origen_id = a.id
-    b.l10n_pe_ne_anticipo_total = float(f.get('aplicar') or a.amount_total)
-    b.l10n_pe_ne_anticipo_doc = '%s-%s' % (a.l10n_pe_ne_serie_emit or a.l10n_pe_serie,
-                                           a.l10n_pe_ne_corr_emit or '')
-    b.l10n_pe_ne_anticipo_tipo = '02'
+    # Campo escalar retirado (Task 1): el anticipo ahora vive en la lista JSON
+    # `l10n_pe_ne_anticipos` ([{doc, monto, tipo, origenId}]).
+    monto_aplicado = float(f.get('aplicar') or a.amount_total)
+    b.l10n_pe_ne_anticipos = [{
+        'doc': '%s-%s' % (a.l10n_pe_ne_serie_emit or a.l10n_pe_serie,
+                           a.l10n_pe_ne_corr_emit or ''),
+        'monto': monto_aplicado,
+        'tipo': '02',
+        'origenId': a.id,
+    }]
     b.action_post()
     sb, mb = _send_move(b)
     a.invalidate_recordset(['l10n_pe_ne_anticipo_saldo', 'l10n_pe_ne_anticipo_aplicado'])
@@ -317,7 +326,7 @@ def _run_anticipo_ciclo(case):
                      'desItem_pago_anticipado': des_ok, 'tipOperacion_0101': op_ok,
                      'msg': (ma or '')[:120]},
             'docB': {'state': sb, 'code': _code(mb), 'accepted': bool(acc_b),
-                     'aplicado': b.l10n_pe_ne_anticipo_total, 'msg': (mb or '')[:120]},
+                     'aplicado': monto_aplicado, 'msg': (mb or '')[:120]},
             'saldo_antes': round(saldo0, 2), 'saldo_despues': round(saldo1, 2),
             'expected': case.get('expected', 'accepted'),
             'ok': bool(acc_a and acc_b and des_ok and op_ok and saldo1 < saldo0)}

@@ -150,8 +150,7 @@ class TestBillerTaxFaltante(EnvioSincronoMixin, TransactionCase):
             'move_type': 'out_invoice', 'partner_id': self.partner.id,
             'invoice_date': '2026-06-20', 'l10n_pe_serie': 'F001',
             'l10n_pe_correlativo': '79',
-            'l10n_pe_ne_anticipo_total': 100.0,
-            'l10n_pe_ne_anticipo_doc': 'F001-00000100',
+            'l10n_pe_ne_anticipos': [{'doc': 'F001-00000100', 'monto': 100.0}],
             'invoice_line_ids': [(0, 0, {
                 'product_id': self.product.id, 'quantity': 1.0,
                 'price_unit': 500.0, 'tax_ids': [(6, 0, exo.ids)]})]})

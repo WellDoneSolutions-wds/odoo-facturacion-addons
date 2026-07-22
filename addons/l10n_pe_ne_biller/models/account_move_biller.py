@@ -840,6 +840,16 @@ class AccountMove(models.Model):
     l10n_pe_ne_medios_pago = fields.Json(
         string="Medios de pago (POS)", copy=False
     )  # [{'medio','monto'}]
+    # Redondeo de efectivo (Ley 29571 + retiro de monedas < S/ 0.10): ajuste ≤ 0 a favor del
+    # consumidor sobre el total a cobrar EN EFECTIVO. NO va al XML/comprobante (amount_total sigue
+    # exacto); es un dato de caja: el arqueo espera 'amount_total + redondeo' de efectivo, y el
+    # ticket muestra 'A pagar efectivo'. Ver _l10n_pe_ne_ticket_adicional y l10n_pe_ne_caja.
+    l10n_pe_ne_redondeo = fields.Monetary(
+        string="Redondeo efectivo",
+        copy=False,
+        help="Ajuste (≤ 0) del importe cobrado en efectivo por redondeo al décimo. No altera el "
+        "comprobante ni las bases/IGV; solo el efectivo cobrado y el arqueo de caja.",
+    )
 
     l10n_pe_motivo_code = fields.Char(
         string="Cód. motivo NC/ND",
@@ -2963,6 +2973,9 @@ class AccountMove(models.Model):
             "igv": 18.0,
             "icbperRate": self._l10n_pe_ne_ensure_icbper_tax().amount,
             "agentePercepcion": bool(self.env.company.l10n_pe_ne_agente_percepcion),
+            # Redondeo de efectivo: el POS lo aplica en vivo con estos parámetros (ver lib/redondeo.ts).
+            "redondeoActivo": bool(self.env.company.l10n_pe_ne_redondeo_activo),
+            "redondeoModo": self.env.company.l10n_pe_ne_redondeo_modo or "favor",
         }
 
     @api.model
@@ -3048,6 +3061,8 @@ class AccountMove(models.Model):
             "datosPago": company.l10n_pe_ne_datos_pago or "",
             "hasLogo": bool(company.logo),
             "agentePercepcion": bool(company.l10n_pe_ne_agente_percepcion),
+            "redondeoActivo": bool(company.l10n_pe_ne_redondeo_activo),
+            "redondeoModo": company.l10n_pe_ne_redondeo_modo or "favor",
         }
 
     def l10n_pe_ne_get_logo(self):
@@ -3144,6 +3159,10 @@ class AccountMove(models.Model):
             company.l10n_pe_ne_datos_pago = (vals.get("datosPago") or "").strip() or False
         if "agentePercepcion" in vals:
             company.l10n_pe_ne_agente_percepcion = bool(vals.get("agentePercepcion"))
+        if "redondeoActivo" in vals:
+            company.l10n_pe_ne_redondeo_activo = bool(vals.get("redondeoActivo"))
+        if vals.get("redondeoModo") in ("favor", "cercano"):
+            company.l10n_pe_ne_redondeo_modo = vals["redondeoModo"]
         if "logo" in vals:
             self._l10n_pe_ne_set_logo(company, vals.get("logo"))
         return self.l10n_pe_ne_negocio()
@@ -5487,6 +5506,21 @@ class AccountMove(models.Model):
                 move.invoice_date_due = venc
         if fp.get("medios"):
             move.l10n_pe_ne_medios_pago = fp.get("medios")
+        # Redondeo de efectivo (dato de caja, no del XML): el POS lo calcula en vivo (≤ 0). Se
+        # persiste solo si el pago es efectivo y el flag de la compañía está activo; ausente/0 = sin
+        # redondeo. El importe entregado en efectivo = amount_total + redondeo.
+        red = payload.get("redondeo")
+        if red and move.company_id.l10n_pe_ne_redondeo_activo and self._l10n_pe_ne_solo_efectivo(fp.get("medios")):
+            move.l10n_pe_ne_redondeo = float(red)
+
+    @staticmethod
+    def _l10n_pe_ne_solo_efectivo(medios):
+        """¿el pago es 100% efectivo? Sin medios detallados el POS asume efectivo (True). Un solo
+        medio no-efectivo o mezcla desactiva el redondeo (espeja lib/redondeo.ts:esSoloEfectivo)."""
+        con_monto = [m for m in (medios or []) if float(m.get("monto") or 0) > 0]
+        if not con_monto:
+            return True
+        return all((m.get("medio") or "Efectivo").strip() == "Efectivo" for m in con_monto)
 
     def l10n_pe_ne_quick_result(self):
         self.ensure_one()
@@ -5770,8 +5804,15 @@ class AccountMove(models.Model):
         det = self._l10n_pe_ne_medios_pago_texto()
         if det:
             partes.append("Pago: " + det)
+            # Redondeo de efectivo (≤ 0): el comprobante mantiene amount_total, pero en efectivo se
+            # cobra 'a pagar' = amount_total + redondeo. El vuelto se calcula contra ese importe.
+            redondeo = self.l10n_pe_ne_redondeo or 0.0
+            a_pagar = round((self.amount_total or 0.0) + redondeo, 2)
+            if redondeo:
+                partes.append("Redondeo: S/ %.2f" % redondeo)
+                partes.append("A pagar efectivo: S/ %.2f" % a_pagar)
             pagado = sum(float(m.get("monto") or 0) for m in medios)
-            vuelto = round(pagado - (self.amount_total or 0.0), 2)
+            vuelto = round(pagado - a_pagar, 2)
             if vuelto > 0:
                 partes.append("Vuelto: S/ %.2f" % vuelto)
         if self.invoice_user_id:

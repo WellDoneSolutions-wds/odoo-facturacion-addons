@@ -72,6 +72,10 @@ class TestPercepcionCatalogo(TransactionCase):
             "commit": True,
         })
         self.assertTrue(res.get("errores"))
+        self.assertIn("mayor a 0 y hasta 10", res["errores"][0]["msg"])
+        self.assertFalse(
+            self.env['product.product'].search([('default_code', '=', 'PEC003')], limit=1),
+            "la fila inválida no debe crear/actualizar el producto")
 
         # -- columna ausente (plantilla vieja) no borra la tasa ya guardada ----------------
         d = self.Move.l10n_pe_ne_create_producto({
@@ -114,3 +118,45 @@ class TestPercepcionCatalogo(TransactionCase):
         self.assertFalse(res.get("errores"), res)
         p5 = self.env['product.product'].browse(d2['id'])
         self.assertFalse(p5.l10n_pe_ne_percepcion_tasa)
+
+    def test_import_percepcion_celda_cero_procesa_fila_y_limpia(self):
+        """0 = "no sujeto" (mismo significado que vacío/percepTasa: 0 en la API): la fila SE
+        PROCESA igual (precio incluido), no se descarta como si fuera un valor inválido."""
+        import io, base64, xlsxwriter
+
+        d = self.Move.l10n_pe_ne_create_producto({
+            'descripcion': 'YOGURT REIMPORT', 'codigo': 'PEC006',
+            'precio': 6.0, 'taxCode': '1000', 'percepTasa': 2.0,
+        })
+        self.assertEqual(d['percepTasa'], 2.0)
+        buf = io.BytesIO()
+        wb = xlsxwriter.Workbook(buf, {"in_memory": True})
+        ws = wb.add_worksheet("Productos")
+        ws.write_row(0, 0, ["CÓDIGO", "NOMBRE", "UNIDAD", "PRECIO VENTA", "AFECTACIÓN", "PERCEPCION %"])
+        ws.write_row(1, 0, ["PEC006", "YOGURT REIMPORT", "UNIDAD", 9, "GRAVADO", 0])
+        wb.close()
+        res = self.Move.l10n_pe_ne_importar_productos({
+            "contentB64": base64.b64encode(buf.getvalue()).decode(),
+            "commit": True,
+        })
+        self.assertFalse(res.get("errores"), res)
+        p6 = self.env['product.product'].browse(d['id'])
+        self.assertFalse(p6.l10n_pe_ne_percepcion_tasa)
+        self.assertEqual(p6.list_price, 9.0)  # la fila SE PROCESÓ: precio también se actualizó
+
+    def test_import_percepcion_coma_decimal(self):
+        import io, base64, xlsxwriter
+
+        buf = io.BytesIO()
+        wb = xlsxwriter.Workbook(buf, {"in_memory": True})
+        ws = wb.add_worksheet("Productos")
+        ws.write_row(0, 0, ["CÓDIGO", "NOMBRE", "UNIDAD", "PRECIO VENTA", "AFECTACIÓN", "PERCEPCION %"])
+        ws.write_row(1, 0, ["PEC007", "ACEITE COMA", "UNIDAD", 15, "GRAVADO", "1,5"])
+        wb.close()
+        res = self.Move.l10n_pe_ne_importar_productos({
+            "contentB64": base64.b64encode(buf.getvalue()).decode(),
+            "commit": True,
+        })
+        self.assertFalse(res.get("errores"), res)
+        p7 = self.env['product.product'].search([('default_code', '=', 'PEC007')], limit=1)
+        self.assertEqual(p7.l10n_pe_ne_percepcion_tasa, 1.5)

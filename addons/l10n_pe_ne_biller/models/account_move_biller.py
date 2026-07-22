@@ -4912,14 +4912,19 @@ class AccountMove(models.Model):
                 errores.append({"fila": n, "msg": "DETRACCIÓN debe ser el código de 3 dígitos del catálogo 54 (ej. 027) o vacío"})
                 continue
             percep_raw = txt(cell(row, "percepcion %"))
+            # 0 = "no sujeto" (help del campo / percepTasa: 0 en la API): limpia el campo igual
+            # que la celda vacía, NO es un valor inválido. Solo <0, >10 o no-numérico son error
+            # de fila (y ahí sí se descarta la fila completa, incluido precio/nombre).
+            percep_val = False
             if percep_raw:
                 try:
-                    percep_val = float(percep_raw.replace(",", "."))
+                    percep_num = float(percep_raw.replace(",", "."))
                 except ValueError:
-                    percep_val = -1.0
-                if not (0 < percep_val <= 10):
-                    errores.append({"fila": n, "msg": "PERCEPCION % debe ser un número entre 0 y 10 (ej. 2) o vacío"})
+                    percep_num = None
+                if percep_num is None or percep_num < 0 or percep_num > 10:
+                    errores.append({"fila": n, "msg": "PERCEPCION % debe ser un número mayor a 0 y hasta 10 (ej. 2), 0/vacío para no sujeto."})
                     continue
+                percep_val = percep_num or False  # 0 limpia el campo, igual que vacío
             barcode = txt(cell(row, "codigo de barras"))
             bolsa = norm(cell(row, "bolsa")) in ("si", "s")  # ICBPER: SI/NO (vacío = NO)
 
@@ -4944,7 +4949,7 @@ class AccountMove(models.Model):
             if "detraccion" in idx:
                 vals["l10n_pe_ne_detraccion_cod"] = detra_raw or False
             if "percepcion %" in idx:
-                vals["l10n_pe_ne_percepcion_tasa"] = float(percep_raw.replace(",", ".")) if percep_raw else False
+                vals["l10n_pe_ne_percepcion_tasa"] = percep_val
             if precio is not None:
                 vals["list_price"] = precio
             if costo is not None:

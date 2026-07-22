@@ -491,6 +491,15 @@ class AccountMove(models.Model):
         if not self._l10n_pe_anticipo():
             return
         lst = self._l10n_pe_ne_anticipos_list()
+        # TODO(Task 2 multi-anticipo): quitar este guard al soportar N. Hoy la emisión (relacionados,
+        # variable global 04) solo arma UN AdditionalDocumentReference/PrepaidPayment con el PRIMER
+        # anticipo de la lista aunque la cabecera sume el TOTAL agregado: con N>1 se emitiría un XML
+        # inconsistente (cabecera con la suma, un solo documento relacionado). Se corta aquí hasta que
+        # la etapa de emisión N-way exista.
+        if len(lst) > 1:
+            raise UserError(
+                _("Regularizar más de un anticipo en una factura aún no está soportado.")
+            )
         primero = lst[0]
         total_aplicado = round(sum(a["monto"] for a in lst), 2)
         if not primero["doc"]:
@@ -5714,6 +5723,7 @@ class AccountMove(models.Model):
             "mensaje": self.l10n_pe_biller_message or "",
             "formaPago": self.l10n_pe_ne_forma_pago or "Contado",
             "docOrigen": ("%s %s-%s" % (ot, os_, on)) if on else "",
+            "anticipos": self._l10n_pe_ne_anticipos_list(),
             "lineas": lineas,
             "notasCredito": [
                 {

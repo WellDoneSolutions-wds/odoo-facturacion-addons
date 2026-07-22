@@ -1,4 +1,5 @@
 from odoo.tests import TransactionCase, tagged
+from odoo.exceptions import UserError
 
 
 @tagged('post_install', '-at_install')
@@ -46,3 +47,18 @@ class TestMultiAnticipo(TransactionCase):
 
     def test_sin_anticipos_lista_vacia(self):
         self.assertEqual(self._venta()._l10n_pe_ne_anticipos_list(), [])
+
+    def test_mas_de_un_anticipo_rechaza_hasta_task2(self):
+        """GATE TRANSITORIO: la emisión (relacionados + variable global 04) hoy solo arma un
+        AdditionalDocumentReference/PrepaidPayment con el PRIMER anticipo de la lista, aunque la
+        cabecera sumaría el TOTAL agregado — con N>1 se emitiría un XML inconsistente. Mientras
+        Task 2 no implemente la emisión N-way (N AdditionalDocumentReference, numIdeAnticipo 1..N),
+        `_l10n_pe_check_anticipo` debe rechazar explícitamente cualquier factura con más de un
+        anticipo, en vez de dejarla emitir mal en silencio. Este test se AJUSTARÁ (o eliminará)
+        cuando Task 2 soporte N>1."""
+        m = self._venta(anticipos=[
+            {'doc': 'F001-00000100', 'monto': 236.0, 'tipo': '02'},
+            {'doc': 'F001-00000101', 'monto': 118.0, 'tipo': '02'},
+        ])
+        with self.assertRaises(UserError):
+            m._l10n_pe_build_invoice_request()

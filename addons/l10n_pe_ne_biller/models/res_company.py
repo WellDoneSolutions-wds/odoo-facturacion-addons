@@ -197,6 +197,12 @@ class ResCompany(models.Model):
         string='API key del facturador', groups='base.group_system', copy=False,
         help="API key de autenticación de este emisor ante el microservicio (header X-Api-Key). "
              "Debe coincidir con la registrada en el servidor para el RUC de la compañía.")
+    l10n_pe_ne_agente_percepcion = fields.Boolean(
+        string="Agente de percepción",
+        help="Marcar SOLO si SUNAT designó a la empresa como agente de percepción del IGV "
+             "(por resolución). Activa la detección/sugerencia de percepción en Emitir para "
+             "los bienes del Apéndice 1; sin esto, el toggle manual sigue disponible.",
+    )
 
     @api.model
     def l10n_pe_ne_provision_tenant(self, vals):

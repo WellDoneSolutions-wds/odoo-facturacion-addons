@@ -2949,6 +2949,7 @@ class AccountMove(models.Model):
         return {
             "igv": 18.0,
             "icbperRate": self._l10n_pe_ne_ensure_icbper_tax().amount,
+            "agentePercepcion": bool(self.env.company.l10n_pe_ne_agente_percepcion),
         }
 
     @api.model
@@ -3033,6 +3034,7 @@ class AccountMove(models.Model):
             "departamento": p.state_id.name or "",
             "datosPago": company.l10n_pe_ne_datos_pago or "",
             "hasLogo": bool(company.logo),
+            "agentePercepcion": bool(company.l10n_pe_ne_agente_percepcion),
         }
 
     def l10n_pe_ne_get_logo(self):
@@ -3127,6 +3129,8 @@ class AccountMove(models.Model):
             p.write(pvals)
         if "datosPago" in vals:
             company.l10n_pe_ne_datos_pago = (vals.get("datosPago") or "").strip() or False
+        if "agentePercepcion" in vals:
+            company.l10n_pe_ne_agente_percepcion = bool(vals.get("agentePercepcion"))
         if "logo" in vals:
             self._l10n_pe_ne_set_logo(company, vals.get("logo"))
         return self.l10n_pe_ne_negocio()

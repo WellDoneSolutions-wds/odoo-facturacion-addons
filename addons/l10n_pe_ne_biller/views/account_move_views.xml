@@ -41,10 +41,9 @@
         <field name="l10n_pe_ne_percepcion_rate" invisible="not l10n_pe_ne_percepcion"/>
         <field name="l10n_pe_ne_es_anticipo" invisible="move_type != 'out_invoice'"/>
         <field name="l10n_pe_ne_anticipo_saldo" invisible="not l10n_pe_ne_es_anticipo"/>
-        <field name="l10n_pe_ne_anticipo_total" invisible="move_type != 'out_invoice' or l10n_pe_ne_es_anticipo"/>
-        <field name="l10n_pe_ne_anticipo_doc" invisible="not l10n_pe_ne_anticipo_total"/>
-        <field name="l10n_pe_ne_anticipo_tipo" invisible="not l10n_pe_ne_anticipo_total"/>
-        <field name="l10n_pe_ne_anticipo_origen_id" invisible="not l10n_pe_ne_anticipo_origen_id" readonly="1"/>
+        <!-- l10n_pe_ne_anticipos (lista JSON de anticipos regularizados) no tiene widget de
+             edición de lista en el form de Odoo; se completa vía quick_emit/API (mismo patrón
+             que l10n_pe_ne_cuotas / l10n_pe_ne_medios_pago, tampoco expuestos aquí). -->
         <field name="l10n_pe_ne_baja_motivo" invisible="l10n_pe_biller_state not in ('enviado', 'anulado')"/>
         <field name="l10n_pe_ne_baja_doc" readonly="1" invisible="not l10n_pe_ne_baja_doc"/>
         <field name="l10n_pe_biller_xml" readonly="1" invisible="not l10n_pe_biller_xml"/>

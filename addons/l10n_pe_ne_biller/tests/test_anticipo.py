@@ -30,9 +30,12 @@ class TestBillerAnticipo(TransactionCase):
             'l10n_pe_serie': 'F001', 'l10n_pe_correlativo': '9',
             'invoice_line_ids': [(0, 0, {'product_id': self.product.id, 'quantity': 1.0,
                                          'price_unit': 500.0, 'tax_ids': [(6, 0, self.igv.ids)]})]}
+        # 'l10n_pe_ne_anticipo_origen_id' es el nombre viejo (campo escalar retirado); se sigue
+        # aceptando como kwarg del helper y se traduce a la lista JSON `l10n_pe_ne_anticipos`.
+        origen_id = vals.pop('l10n_pe_ne_anticipo_origen_id', None)
         if anticipo_total:
-            base.update({'l10n_pe_ne_anticipo_total': anticipo_total,
-                         'l10n_pe_ne_anticipo_doc': 'F001-00000100'})
+            base['l10n_pe_ne_anticipos'] = [{'doc': 'F001-00000100', 'monto': anticipo_total,
+                                              'tipo': '02', 'origenId': origen_id}]
         base.update(vals)
         move = self.env['account.move'].create(base)
         move.action_post()
@@ -96,11 +99,12 @@ class TestBillerAnticipo(TransactionCase):
     def test_anticipo_sin_doc_rechaza(self):
         move = self.env['account.move'].create({
             'move_type': 'out_invoice', 'partner_id': self.partner.id, 'invoice_date': '2026-06-20',
-            'l10n_pe_serie': 'F001', 'l10n_pe_correlativo': '9', 'l10n_pe_ne_anticipo_total': 118.0,
+            'l10n_pe_serie': 'F001', 'l10n_pe_correlativo': '9',
+            'l10n_pe_ne_anticipos': [{'monto': 118.0}],   # sin 'doc'
             'invoice_line_ids': [(0, 0, {'product_id': self.product.id, 'quantity': 1.0,
                                          'price_unit': 500.0, 'tax_ids': [(6, 0, self.igv.ids)]})]})
         move.action_post()
-        with self.assertRaises(UserError):   # falta l10n_pe_ne_anticipo_doc
+        with self.assertRaises(UserError):   # falta el doc del anticipo
             move._l10n_pe_build_invoice_request()
 
     def test_anticipo_exonerado_rechaza(self):
@@ -112,7 +116,7 @@ class TestBillerAnticipo(TransactionCase):
         move = self.env['account.move'].create({
             'move_type': 'out_invoice', 'partner_id': self.partner.id, 'invoice_date': '2026-06-20',
             'l10n_pe_serie': 'F001', 'l10n_pe_correlativo': '9',
-            'l10n_pe_ne_anticipo_total': 100.0, 'l10n_pe_ne_anticipo_doc': 'F001-00000100',
+            'l10n_pe_ne_anticipos': [{'doc': 'F001-00000100', 'monto': 100.0}],
             'invoice_line_ids': [(0, 0, {'product_id': self.product.id, 'quantity': 1.0,
                                          'price_unit': 500.0, 'tax_ids': [(6, 0, exo.ids)]})]})
         move.action_post()

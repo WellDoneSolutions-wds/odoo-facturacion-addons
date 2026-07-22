@@ -203,6 +203,22 @@ class ResCompany(models.Model):
              "(por resolución). Activa la detección/sugerencia de percepción en Emitir para "
              "los bienes del Apéndice 1; sin esto, el toggle manual sigue disponible.",
     )
+    # Redondeo de efectivo (Ley 29571 / retiro de monedas < S/ 0.10). Activo por defecto: cobrar
+    # exacto una fracción que no existe en efectivo expone al negocio ante INDECOPI si redondea en su
+    # favor; el modo 'favor' (hacia abajo) es el seguro. Solo afecta el efectivo, nunca el XML.
+    l10n_pe_ne_redondeo_activo = fields.Boolean(
+        string="Redondeo de efectivo",
+        default=True,
+        help="Redondea al décimo (S/ 0.10) el importe a cobrar EN EFECTIVO cuando el pago es 100% "
+             "efectivo. No altera el comprobante ni el IGV; es un ajuste de caja.",
+    )
+    l10n_pe_ne_redondeo_modo = fields.Selection(
+        [("favor", "A favor del consumidor (hacia abajo)"), ("cercano", "Al décimo más cercano")],
+        string="Modo de redondeo",
+        default="favor",
+        help="'A favor del consumidor' (recomendado) siempre redondea hacia abajo; 'más cercano' "
+             "redondea al 0.10 más próximo (el empate .05 sube).",
+    )
 
     @api.model
     def l10n_pe_ne_provision_tenant(self, vals):

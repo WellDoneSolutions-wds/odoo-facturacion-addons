@@ -783,6 +783,13 @@ class AccountMove(models.Model):
             block["mtoTotPercepcion"] = fmt(
                 self._l10n_pe_importe_cobrar() + self._l10n_pe_percepcion_monto()
             )
+        # Exportación (tipOperacion 0200): el adquirente es no domiciliado. SUNAT pide el país del
+        # cliente (cat. país, ISO 3166 alpha-2 = el mismo code de res.country). El biller lo mapea a
+        # codPaisCliente del AdditionalHeader. Se omite si el partner no tiene país (evita "" inútil).
+        if self._l10n_pe_tipo_operacion() == "0200":
+            pais = (self.partner_id.country_id.code or "").strip().upper()
+            if pais:
+                block["codPaisCliente"] = pais
         return block or None
 
     def _l10n_pe_dato_pago(self):
@@ -909,6 +916,16 @@ class AccountMove(models.Model):
     l10n_pe_ne_medios_pago = fields.Json(
         string="Medios de pago (POS)", copy=False
     )  # [{'medio','monto'}]
+    # Redondeo de efectivo (Ley 29571 + retiro de monedas < S/ 0.10): ajuste ≤ 0 a favor del
+    # consumidor sobre el total a cobrar EN EFECTIVO. NO va al XML/comprobante (amount_total sigue
+    # exacto); es un dato de caja: el arqueo espera 'amount_total + redondeo' de efectivo, y el
+    # ticket muestra 'A pagar efectivo'. Ver _l10n_pe_ne_ticket_adicional y l10n_pe_ne_caja.
+    l10n_pe_ne_redondeo = fields.Monetary(
+        string="Redondeo efectivo",
+        copy=False,
+        help="Ajuste (≤ 0) del importe cobrado en efectivo por redondeo al décimo. No altera el "
+        "comprobante ni las bases/IGV; solo el efectivo cobrado y el arqueo de caja.",
+    )
 
     l10n_pe_motivo_code = fields.Char(
         string="Cód. motivo NC/ND",
@@ -2889,6 +2906,13 @@ class AccountMove(models.Model):
                 vals["street"] = dire
             if urb:
                 vals["street2"] = urb
+            # País del adquirente (exportación / no domiciliado): alimenta codPaisCliente en la
+            # cabecera 0200. Solo al crear (la emisión no reescribe un partner ya existente).
+            pais = (c.get("pais") or "").strip().upper()
+            if pais:
+                country = self.env["res.country"].search([("code", "=", pais)], limit=1)
+                if country:
+                    vals["country_id"] = country.id
             found = Partner.create(vals)
         # Dirección faltante → la completamos (sin pisar una ya guardada). Primero lo que
         # mandó el front; si no vino, el domicilio fiscal del padrón. Así la representación
@@ -3032,7 +3056,17 @@ class AccountMove(models.Model):
             "igv": 18.0,
             "icbperRate": self._l10n_pe_ne_ensure_icbper_tax().amount,
             "agentePercepcion": bool(self.env.company.l10n_pe_ne_agente_percepcion),
+            # Redondeo de efectivo: el POS lo aplica en vivo con estos parámetros (ver lib/redondeo.ts).
+            "redondeoActivo": bool(self.env.company.l10n_pe_ne_redondeo_activo),
+            "redondeoModo": self.env.company.l10n_pe_ne_redondeo_modo or "favor",
         }
+
+    @api.model
+    def l10n_pe_ne_paises(self):
+        """Catálogo de países (ISO 3166 alpha-2) para el selector del cliente extranjero en la
+        factura de exportación. Perú primero (default habitual) y el resto por nombre."""
+        paises = self.env["res.country"].search([("code", "!=", False)], order="name")
+        return [{"code": c.code, "name": c.name} for c in paises]
 
     @api.model
     def l10n_pe_ne_series(self, limit=None, offset=None):
@@ -3117,6 +3151,8 @@ class AccountMove(models.Model):
             "datosPago": company.l10n_pe_ne_datos_pago or "",
             "hasLogo": bool(company.logo),
             "agentePercepcion": bool(company.l10n_pe_ne_agente_percepcion),
+            "redondeoActivo": bool(company.l10n_pe_ne_redondeo_activo),
+            "redondeoModo": company.l10n_pe_ne_redondeo_modo or "favor",
         }
 
     def l10n_pe_ne_get_logo(self):
@@ -3213,6 +3249,10 @@ class AccountMove(models.Model):
             company.l10n_pe_ne_datos_pago = (vals.get("datosPago") or "").strip() or False
         if "agentePercepcion" in vals:
             company.l10n_pe_ne_agente_percepcion = bool(vals.get("agentePercepcion"))
+        if "redondeoActivo" in vals:
+            company.l10n_pe_ne_redondeo_activo = bool(vals.get("redondeoActivo"))
+        if vals.get("redondeoModo") in ("favor", "cercano"):
+            company.l10n_pe_ne_redondeo_modo = vals["redondeoModo"]
         if "logo" in vals:
             self._l10n_pe_ne_set_logo(company, vals.get("logo"))
         return self.l10n_pe_ne_negocio()
@@ -4522,6 +4562,7 @@ class AccountMove(models.Model):
             "email": p.email or "",
             "telefono": p.phone or "",
             "direccion": p.street or "",
+            "pais": p.country_id.code or "",
             "exceptuadoPercepcion": p.l10n_pe_ne_exceptuado_percepcion,
             "parteVinculada": p.l10n_pe_ne_parte_vinculada,
         }
@@ -4542,6 +4583,12 @@ class AccountMove(models.Model):
             t = self._l10n_pe_ne_ident_type(c["tipoDoc"])
             if t:
                 vals["l10n_latam_identification_type_id"] = t.id
+        # País del adquirente (exportación / no domiciliado): ISO 3166 alpha-2 = res.country.code.
+        # Alimenta codPaisCliente en la cabecera 0200. "" limpia el país.
+        if "pais" in c:
+            code = (c.get("pais") or "").strip().upper()
+            country = self.env["res.country"].search([("code", "=", code)], limit=1) if code else False
+            vals["country_id"] = country.id if country else False
         for key, field in (
             ("email", "email"),
             ("telefono", "phone"),
@@ -5564,6 +5611,21 @@ class AccountMove(models.Model):
                 move.invoice_date_due = venc
         if fp.get("medios"):
             move.l10n_pe_ne_medios_pago = fp.get("medios")
+        # Redondeo de efectivo (dato de caja, no del XML): el POS lo calcula en vivo (≤ 0). Se
+        # persiste solo si el pago es efectivo y el flag de la compañía está activo; ausente/0 = sin
+        # redondeo. El importe entregado en efectivo = amount_total + redondeo.
+        red = payload.get("redondeo")
+        if red and move.company_id.l10n_pe_ne_redondeo_activo and self._l10n_pe_ne_solo_efectivo(fp.get("medios")):
+            move.l10n_pe_ne_redondeo = float(red)
+
+    @staticmethod
+    def _l10n_pe_ne_solo_efectivo(medios):
+        """¿el pago es 100% efectivo? Sin medios detallados el POS asume efectivo (True). Un solo
+        medio no-efectivo o mezcla desactiva el redondeo (espeja lib/redondeo.ts:esSoloEfectivo)."""
+        con_monto = [m for m in (medios or []) if float(m.get("monto") or 0) > 0]
+        if not con_monto:
+            return True
+        return all((m.get("medio") or "Efectivo").strip() == "Efectivo" for m in con_monto)
 
     def l10n_pe_ne_quick_result(self):
         self.ensure_one()
@@ -5848,8 +5910,15 @@ class AccountMove(models.Model):
         det = self._l10n_pe_ne_medios_pago_texto()
         if det:
             partes.append("Pago: " + det)
+            # Redondeo de efectivo (≤ 0): el comprobante mantiene amount_total, pero en efectivo se
+            # cobra 'a pagar' = amount_total + redondeo. El vuelto se calcula contra ese importe.
+            redondeo = self.l10n_pe_ne_redondeo or 0.0
+            a_pagar = round((self.amount_total or 0.0) + redondeo, 2)
+            if redondeo:
+                partes.append("Redondeo: S/ %.2f" % redondeo)
+                partes.append("A pagar efectivo: S/ %.2f" % a_pagar)
             pagado = sum(float(m.get("monto") or 0) for m in medios)
-            vuelto = round(pagado - (self.amount_total or 0.0), 2)
+            vuelto = round(pagado - a_pagar, 2)
             if vuelto > 0:
                 partes.append("Vuelto: S/ %.2f" % vuelto)
         if self.invoice_user_id:

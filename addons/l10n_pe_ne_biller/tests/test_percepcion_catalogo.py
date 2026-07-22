@@ -20,3 +20,97 @@ class TestPercepcionCatalogo(TransactionCase):
     def test_config_expone_agente(self):
         self.env.company.l10n_pe_ne_agente_percepcion = True
         self.assertTrue(self.Move.l10n_pe_ne_config()['agentePercepcion'])
+
+    def test_crear_producto_con_percepcion(self):
+        d = self.Move.l10n_pe_ne_create_producto({
+            'descripcion': 'GASEOSA 3L', 'precio': 10.0, 'taxCode': '1000', 'percepTasa': 2.0,
+        })
+        self.assertEqual(d['percepTasa'], 2.0)
+
+    def test_producto_sin_percepcion_expone_cero(self):
+        d = self.Move.l10n_pe_ne_create_producto({'descripcion': 'CLAVOS', 'precio': 5.0})
+        self.assertEqual(d['percepTasa'], 0.0)
+
+    def test_update_cambia_y_limpia_percepcion(self):
+        d = self.Move.l10n_pe_ne_create_producto({'descripcion': 'CERVEZA', 'precio': 8.0, 'percepTasa': 2.0})
+        d2 = self.Move.l10n_pe_ne_update_producto({'id': d['id'], 'percepTasa': 1.0})
+        self.assertEqual(d2['percepTasa'], 1.0)
+        d3 = self.Move.l10n_pe_ne_update_producto({'id': d['id'], 'percepTasa': 0})
+        self.assertEqual(d3['percepTasa'], 0.0)
+
+    # -- import masivo (columna PERCEPCION % de la plantilla) ------------------------------
+    def test_import_columna_percepcion(self):
+        import io, base64, xlsxwriter
+
+        # -- con valor (+ celda vacía en producto nuevo) ------------------------------------
+        buf = io.BytesIO()
+        wb = xlsxwriter.Workbook(buf, {"in_memory": True})
+        ws = wb.add_worksheet("Productos")
+        ws.write_row(0, 0, ["CÓDIGO", "NOMBRE", "UNIDAD", "PRECIO VENTA", "AFECTACIÓN", "PERCEPCION %"])
+        ws.write_row(1, 0, ["PEC001", "GASEOSA 3L IMPORT", "UNIDAD", 10, "GRAVADO", 2])
+        ws.write_row(2, 0, ["PEC002", "CLAVOS IMPORT", "UNIDAD", 5, "GRAVADO", ""])
+        wb.close()
+        res = self.Move.l10n_pe_ne_importar_productos({
+            "contentB64": base64.b64encode(buf.getvalue()).decode(),
+            "commit": True,
+        })
+        self.assertFalse(res.get("errores"), res)
+        p1 = self.env['product.product'].search([('default_code', '=', 'PEC001')], limit=1)
+        self.assertEqual(p1.l10n_pe_ne_percepcion_tasa, 2.0)
+        p2 = self.env['product.product'].search([('default_code', '=', 'PEC002')], limit=1)
+        self.assertFalse(p2.l10n_pe_ne_percepcion_tasa)
+
+        # -- inválida (> 10) da error de fila -----------------------------------------------
+        buf = io.BytesIO()
+        wb = xlsxwriter.Workbook(buf, {"in_memory": True})
+        ws = wb.add_worksheet("Productos")
+        ws.write_row(0, 0, ["CÓDIGO", "NOMBRE", "UNIDAD", "PRECIO VENTA", "AFECTACIÓN", "PERCEPCION %"])
+        ws.write_row(1, 0, ["PEC003", "PRODUCTO X", "UNIDAD", 20, "GRAVADO", 15])
+        wb.close()
+        res = self.Move.l10n_pe_ne_importar_productos({
+            "contentB64": base64.b64encode(buf.getvalue()).decode(),
+            "commit": True,
+        })
+        self.assertTrue(res.get("errores"))
+
+        # -- columna ausente (plantilla vieja) no borra la tasa ya guardada ----------------
+        d = self.Move.l10n_pe_ne_create_producto({
+            'descripcion': 'GASEOSA REIMPORT', 'codigo': 'PEC004',
+            'precio': 10.0, 'taxCode': '1000', 'percepTasa': 2.0,
+        })
+        self.assertEqual(d['percepTasa'], 2.0)
+        buf = io.BytesIO()
+        wb = xlsxwriter.Workbook(buf, {"in_memory": True})
+        ws = wb.add_worksheet("Productos")
+        # Plantilla vieja: SIN columna PERCEPCION % (solo actualiza precio).
+        ws.write_row(0, 0, ["CÓDIGO", "NOMBRE", "UNIDAD", "PRECIO VENTA", "AFECTACIÓN"])
+        ws.write_row(1, 0, ["PEC004", "GASEOSA REIMPORT", "UNIDAD", 12, "GRAVADO"])
+        wb.close()
+        res = self.Move.l10n_pe_ne_importar_productos({
+            "contentB64": base64.b64encode(buf.getvalue()).decode(),
+            "commit": True,
+        })
+        self.assertFalse(res.get("errores"), res)
+        p4 = self.env['product.product'].browse(d['id'])
+        self.assertEqual(p4.l10n_pe_ne_percepcion_tasa, 2.0)
+        self.assertEqual(p4.list_price, 12.0)
+
+        # -- columna presente, celda vacía SÍ limpia la tasa en un producto existente ------
+        d2 = self.Move.l10n_pe_ne_create_producto({
+            'descripcion': 'CERVEZA REIMPORT', 'codigo': 'PEC005',
+            'precio': 8.0, 'taxCode': '1000', 'percepTasa': 1.0,
+        })
+        self.assertEqual(d2['percepTasa'], 1.0)
+        buf = io.BytesIO()
+        wb = xlsxwriter.Workbook(buf, {"in_memory": True})
+        ws = wb.add_worksheet("Productos")
+        ws.write_row(0, 0, ["CÓDIGO", "NOMBRE", "UNIDAD", "PRECIO VENTA", "AFECTACIÓN", "PERCEPCION %"])
+        ws.write_row(1, 0, ["PEC005", "CERVEZA REIMPORT", "UNIDAD", 8, "GRAVADO", ""])
+        wb.close()
+        res = self.Move.l10n_pe_ne_importar_productos({
+            "contentB64": base64.b64encode(buf.getvalue()).decode(),
+            "commit": True,
+        })
+        self.assertFalse(res.get("errores"), res)
+        p5 = self.env['product.product'].browse(d2['id'])
+        self.assertFalse(p5.l10n_pe_ne_percepcion_tasa)

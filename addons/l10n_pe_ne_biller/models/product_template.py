@@ -41,3 +41,12 @@ class ProductTemplate(models.Model):
              "resolución) y queda editable. Emitir lo usa para detectar operaciones "
              "mixtas — la RS 183-2004 (art. 19) exige comprobantes separados.",
     )
+
+    l10n_pe_ne_percepcion_tasa = fields.Float(
+        string="Percepción sugerida (%)",
+        digits=(5, 2),
+        help="Tasa de percepción del IGV sugerida si el bien está en el Apéndice 1 "
+             "(Ley 29173): 2% general, 1% combustibles. 0 = no sujeto. Es sugerencia: "
+             "la tasa final se confirma al emitir (el 0.5% del listado SUNAT se ajusta "
+             "a mano). Solo aplica si el negocio es agente de percepción.",
+    )

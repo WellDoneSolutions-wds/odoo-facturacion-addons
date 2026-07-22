@@ -130,14 +130,18 @@ class TestBillerSerie(TransactionCase):
         self.assertEqual(move._l10n_pe_serie_correlativo(), ('F888', str(int(corr))))
 
     def test_correlativo_manual_sigue_teniendo_prioridad(self):
-        """Un correlativo manual se respeta y NO consume la secuencia por serie."""
+        """Un correlativo manual se RESPETA (no lo pisa la secuencia). Y como queda EMITIDO en la
+        serie, siembra la secuencia automática: la auto continúa DESPUÉS del manual, evitando
+        colisión (reiniciar en 1 chocaría con el F888-500 manual). Mismo principio de sembrado que
+        test_secuencia_siembra_desde_lo_ya_emitido."""
         manual = self._move(l10n_pe_serie='F888', l10n_pe_correlativo='500')
         manual.action_post()
         manual._l10n_pe_ne_assign_numero()
         self.assertEqual(manual.l10n_pe_ne_corr_emit, '00000500')
-        # la secuencia arranca en 1 (el manual no la tocó)
+        # El manual quedó emitido (F888-500): la auto siembra tras él → 501 (no reinicia en 1 ni
+        # colisiona con el manual).
         auto = self._asigna('F888')
-        self.assertEqual(auto.l10n_pe_ne_corr_emit, '00000001')
+        self.assertEqual(auto.l10n_pe_ne_corr_emit, '00000501')
 
     def test_secuencia_siembra_desde_lo_ya_emitido(self):
         """Al primer uso, la secuencia por serie se siembra tras el correlativo más alto ya

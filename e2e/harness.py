@@ -84,7 +84,10 @@ def _partner(kind):
         t = (Type.search([('l10n_pe_vat_code', '=', '4')], limit=1)
              or Type.search([('l10n_pe_vat_code', '=', '7')], limit=1)
              or Type.search([('l10n_pe_vat_code', '=', '0')], limit=1))
+        # País del adquirente (no domiciliado): alimenta codPaisCliente en la cabecera 0200.
+        us = env.ref('base.us', raise_if_not_found=False)
         return env['res.partner'].create({'name': 'FOREIGN BUYER INC', 'vat': 'EXT0001',
+                                           'country_id': us.id if us else False,
                                            'l10n_latam_identification_type_id': t.id if t else False})
     return env['res.partner'].create({'name': 'VARIOS'})  # consumidor final
 

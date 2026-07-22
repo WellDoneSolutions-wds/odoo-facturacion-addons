@@ -34,6 +34,33 @@ class TestMultiAnticipo(TransactionCase):
         m.action_post()
         return m
 
+    def test_descuento_04_factor_unitario(self):
+        # El descuento 04 va con FACTOR UNITARIO: base = valor, factor 1.00000, monto = valor.
+        payload = self._venta(anticipos=[{'doc': 'F001-00000100', 'monto': 118.0, 'tipo': '02'}],
+                              precio=500.0)._l10n_pe_build_invoice_request()
+        vg = [v for v in payload['variablesGlobales'] if v['codTipoVariableGlobal'] == '04'][0]
+        self.assertEqual(vg['porVariableGlobal'], '1.00000')
+        self.assertEqual(vg['mtoVariableGlobal'], '100.00')
+        self.assertEqual(vg['mtoBaseImpVariableGlobal'], '100.00')  # base del descuento = el valor, no la base de la operacion
+
+    def test_base_alta_cumple_regla_4322(self):
+        # base 300000; anticipo total 53101.77 (valor 45001.50). Con el factor viejo a 5 decimales,
+        # base*factor = 45003 -> desvio 1.50 > 1 -> SUNAT 4322. Con factor unitario: base*factor = valor exacto.
+        payload = self._venta(anticipos=[{'doc': 'F001-00000100', 'monto': 53101.77, 'tipo': '02'}],
+                              precio=300000.0)._l10n_pe_build_invoice_request()
+        vg = [v for v in payload['variablesGlobales'] if v['codTipoVariableGlobal'] == '04'][0]
+        amount = float(vg['mtoVariableGlobal']); base = float(vg['mtoBaseImpVariableGlobal']); factor = float(vg['porVariableGlobal'])
+        self.assertLessEqual(abs(amount - base * factor), 1.0)  # regla SUNAT 4322
+        self.assertEqual(vg['porVariableGlobal'], '1.00000')
+
+    def test_cabecera_no_cambia_con_factor_unitario(self):
+        # Paridad: la reduccion de IGV/base de cabecera es la misma (usa el valor del anticipo, no el
+        # BaseAmount del descuento). Venta 590 + anticipo 118 -> base gravada 400, IGV 72, Payable 472.
+        cab = self._venta(anticipos=[{'doc': 'F001-00000100', 'monto': 118.0, 'tipo': '02'}],
+                          precio=500.0)._l10n_pe_build_invoice_request()['cabecera']
+        self.assertEqual(cab['sumTotalAnticipos'], '118.00')
+        self.assertEqual(cab['sumImpVenta'], '472.00')
+
     def test_lista_normalizada(self):
         m = self._venta(anticipos=[
             {'doc': 'F001-00000100', 'monto': 236.0, 'tipo': '02'},

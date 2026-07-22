@@ -10,6 +10,7 @@ class TestExportacion(TransactionCase):
     def setUp(self):
         super().setUp()
         self.company = self.env.company
+        self.Move = self.env["account.move"]
 
         def sale_tax(code):
             return self.env["account.tax"].search([
@@ -79,3 +80,31 @@ class TestExportacion(TransactionCase):
         self.assertEqual(move._l10n_pe_tipo_operacion(), "0101")
         adic = move._l10n_pe_adicional_cabecera() or {}
         self.assertNotIn("codPaisCliente", adic)
+
+    # ---------------------------------------------------------------- país del cliente (UX)
+    def test_crear_cliente_con_pais_round_trip(self):
+        d = self.Move.l10n_pe_ne_create_cliente({
+            "razonSocial": "FRESH IMPORTS LLC", "numDoc": "PAS123", "tipoDoc": "7", "pais": "US"})
+        self.assertEqual(d["pais"], "US")
+        p = self.env["res.partner"].browse(d["id"])
+        self.assertEqual(p.country_id.code, "US")
+
+    def test_actualizar_cliente_cambia_pais(self):
+        d = self.Move.l10n_pe_ne_create_cliente({"razonSocial": "X SA", "numDoc": "PAS999", "tipoDoc": "7", "pais": "US"})
+        d2 = self.Move.l10n_pe_ne_update_cliente({"id": d["id"], "pais": "CL"})
+        self.assertEqual(d2["pais"], "CL")
+
+    def test_emision_con_pais_en_payload_llega_a_cabecera(self):
+        if not self.exp:
+            self.skipTest("No hay tax de exportación (9995) en el plan")
+        # Partner nuevo creado en la emisión con país en el payload del cliente.
+        partner = self.Move._l10n_pe_ne_quick_partner({
+            "razonSocial": "NUEVO EXTRANJERO", "numDoc": "EXTNEW", "tipoDoc": "7", "pais": "US"})
+        self.assertEqual(partner.country_id.code, "US")
+        move = self._invoice([self._line(self.exp)], partner=partner)
+        self.assertEqual(move._l10n_pe_adicional_cabecera()["codPaisCliente"], "US")
+
+    def test_paises_catalogo_no_vacio(self):
+        paises = self.Move.l10n_pe_ne_paises()
+        self.assertTrue(any(p["code"] == "US" for p in paises))
+        self.assertTrue(all(p.get("code") and p.get("name") for p in paises))

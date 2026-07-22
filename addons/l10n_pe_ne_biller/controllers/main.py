@@ -491,6 +491,16 @@ class L10nPeNeApi(http.Controller):
         except Exception as e:  # noqa: BLE001
             return self._fail(e)
 
+    @http.route("/ne/api/paises", **_GET)
+    def paises(self, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        try:
+            return self._json(self._move(uid).l10n_pe_ne_paises())
+        except Exception as e:  # noqa: BLE001
+            return self._fail(e)
+
     @http.route("/ne/api/tipo-cambio", **_GET)
     def tipo_cambio(self, fecha=None, **kw):
         """TC SUNAT (venta) para la fecha dada o la de hoy. {tc, fecha, fuente}."""

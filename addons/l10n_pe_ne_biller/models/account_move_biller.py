@@ -144,6 +144,10 @@ def _percep_float(v):
 class AccountMoveLine(models.Model):
     _inherit = "account.move.line"
 
+    # Cantidad con 3 decimales (SUNAT admite hasta 10 en ctdUnidadItem). Por defecto la precisión
+    # de UoM de Odoo es 2 y truncaba la venta al peso de balanza (18.375 kg -> 18.38). Ver QA-020.
+    quantity = fields.Float(digits=(16, 3))
+
     # Overrides SUNAT por línea para el flujo rápido (sin depender de la UoM/producto de Odoo,
     # evitando el problema de categorías de unidad de medida).
     l10n_pe_ne_unit_code = fields.Char(
@@ -978,6 +982,16 @@ class AccountMove(models.Model):
     def _l10n_pe_fmt(self, amount):
         return "%.2f" % (amount or 0.0)
 
+    def _l10n_pe_fmt_cant(self, qty):
+        """Cantidad para SUNAT (ctdUnidadItem): hasta 3 decimales, sin ceros de relleno más allá
+        de 2. Conserva la venta al peso de balanza (18.375) sin ensuciar los conteos (2 -> 2.00).
+        SUNAT admite hasta 10 decimales; `_l10n_pe_fmt` (2 dec) es solo para montos."""
+        entero, _p, dec = ("%.3f" % (qty or 0.0)).partition(".")
+        dec = dec.rstrip("0")
+        if len(dec) < 2:
+            dec = (dec + "00")[:2]
+        return "%s.%s" % (entero, dec)
+
     def _l10n_pe_document_type(self):
         """Código SUNAT del comprobante: 01 Factura, 03 Boleta, 07 NC, 08 ND."""
         self.ensure_one()
@@ -1183,7 +1197,7 @@ class AccountMove(models.Model):
                 "codProducto": line.product_id.default_code or "-",
                 "codProductoSUNAT": line.l10n_pe_ne_cod_producto_sunat or "-",
                 "codUnidadMedida": self._l10n_pe_unit_code(line),
-                "ctdUnidadItem": fmt(qty),
+                "ctdUnidadItem": self._l10n_pe_fmt_cant(qty),
                 "desItem": self._l10n_pe_des_item(line),
                 "mtoValorUnitario": fmt(gross / qty if qty else 0.0),
                 "mtoValorVentaItem": fmt(base),

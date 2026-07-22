@@ -2837,6 +2837,13 @@ class AccountMove(models.Model):
                 vals["street"] = dire
             if urb:
                 vals["street2"] = urb
+            # País del adquirente (exportación / no domiciliado): alimenta codPaisCliente en la
+            # cabecera 0200. Solo al crear (la emisión no reescribe un partner ya existente).
+            pais = (c.get("pais") or "").strip().upper()
+            if pais:
+                country = self.env["res.country"].search([("code", "=", pais)], limit=1)
+                if country:
+                    vals["country_id"] = country.id
             found = Partner.create(vals)
         # Dirección faltante → la completamos (sin pisar una ya guardada). Primero lo que
         # mandó el front; si no vino, el domicilio fiscal del padrón. Así la representación
@@ -2984,6 +2991,13 @@ class AccountMove(models.Model):
             "redondeoActivo": bool(self.env.company.l10n_pe_ne_redondeo_activo),
             "redondeoModo": self.env.company.l10n_pe_ne_redondeo_modo or "favor",
         }
+
+    @api.model
+    def l10n_pe_ne_paises(self):
+        """Catálogo de países (ISO 3166 alpha-2) para el selector del cliente extranjero en la
+        factura de exportación. Perú primero (default habitual) y el resto por nombre."""
+        paises = self.env["res.country"].search([("code", "!=", False)], order="name")
+        return [{"code": c.code, "name": c.name} for c in paises]
 
     @api.model
     def l10n_pe_ne_series(self, limit=None, offset=None):
@@ -4479,6 +4493,7 @@ class AccountMove(models.Model):
             "email": p.email or "",
             "telefono": p.phone or "",
             "direccion": p.street or "",
+            "pais": p.country_id.code or "",
             "exceptuadoPercepcion": p.l10n_pe_ne_exceptuado_percepcion,
             "parteVinculada": p.l10n_pe_ne_parte_vinculada,
         }
@@ -4499,6 +4514,12 @@ class AccountMove(models.Model):
             t = self._l10n_pe_ne_ident_type(c["tipoDoc"])
             if t:
                 vals["l10n_latam_identification_type_id"] = t.id
+        # País del adquirente (exportación / no domiciliado): ISO 3166 alpha-2 = res.country.code.
+        # Alimenta codPaisCliente en la cabecera 0200. "" limpia el país.
+        if "pais" in c:
+            code = (c.get("pais") or "").strip().upper()
+            country = self.env["res.country"].search([("code", "=", code)], limit=1) if code else False
+            vals["country_id"] = country.id if country else False
         for key, field in (
             ("email", "email"),
             ("telefono", "phone"),

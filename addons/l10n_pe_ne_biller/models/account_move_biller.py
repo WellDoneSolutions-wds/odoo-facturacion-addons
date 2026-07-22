@@ -714,6 +714,13 @@ class AccountMove(models.Model):
             block["mtoTotPercepcion"] = fmt(
                 self._l10n_pe_importe_cobrar() + self._l10n_pe_percepcion_monto()
             )
+        # Exportación (tipOperacion 0200): el adquirente es no domiciliado. SUNAT pide el país del
+        # cliente (cat. país, ISO 3166 alpha-2 = el mismo code de res.country). El biller lo mapea a
+        # codPaisCliente del AdditionalHeader. Se omite si el partner no tiene país (evita "" inútil).
+        if self._l10n_pe_tipo_operacion() == "0200":
+            pais = (self.partner_id.country_id.code or "").strip().upper()
+            if pais:
+                block["codPaisCliente"] = pais
         return block or None
 
     def _l10n_pe_dato_pago(self):

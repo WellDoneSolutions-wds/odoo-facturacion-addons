@@ -443,21 +443,37 @@ class AccountMove(models.Model):
             })
         return out
 
-    def _l10n_pe_anticipo(self):
-        """(valor, igv, total) AGREGADO de los anticipos aplicados (suma de `monto` de
-        `l10n_pe_ne_anticipos`), o None si no hay ninguno. El total trae el impuesto incluido; el
-        valor se separa con la tasa real de la operación gravada (1+tasa/100), no asumiendo 18%.
-        Con 0 o 1 anticipo el resultado es idéntico al campo escalar anterior; la emisión de N
-        documentos relacionados (numIdeAnticipo 1..N) para más de un anticipo es responsabilidad
-        de la etapa de emisión multi-anticipo (no implementada aquí)."""
+    def _l10n_pe_anticipos_montos(self):
+        """Lista [(valor_i, igv_i, total_i)] por anticipo + agregado (valor, igv, total). Vacía si
+        no aplica (no out_invoice, NC/ND o sin anticipos). El valor de CADA anticipo se separa con
+        la tasa gravada homogénea real de la factura (no asume 18%); el agregado es la suma de los
+        valores/igv por anticipo (no el total dividido una sola vez), así que con montos que no son
+        fracción redonda de la base el agregado no arrastra un desvío de redondeo distinto al que
+        vería cada `AdditionalDocumentReference` individual."""
         self.ensure_one()
-        total = round(sum(a["monto"] for a in self._l10n_pe_ne_anticipos_list()), 2)
-        # El anticipo solo se regulariza en factura/boleta de venta, nunca en notas (NC/ND).
-        if total <= 0 or self.move_type != "out_invoice" or self.debit_origin_id:
-            return None
-        _cod, tasa, _motivo = self._l10n_pe_anticipo_gravado()
-        valor = round(total / (1.0 + (tasa or 0.0) / 100.0), 2)
-        return valor, round(total - valor, 2), round(total, 2)
+        lst = self._l10n_pe_ne_anticipos_list()
+        if not lst:
+            return [], (0.0, 0.0, 0.0)
+        _cod, tasa, _m = self._l10n_pe_anticipo_gravado()
+        por = []
+        vt = it = tt = 0.0
+        for a in lst:
+            total = round(a["monto"], 2)
+            valor = round(total / (1.0 + (tasa or 0.0) / 100.0), 2)
+            igv = round(total - valor, 2)
+            por.append((valor, igv, total))
+            vt += valor
+            it += igv
+            tt += total
+        return por, (round(vt, 2), round(it, 2), round(tt, 2))
+
+    def _l10n_pe_anticipo(self):
+        """(valor, igv, total) AGREGADO de los anticipos, o None si no hay ninguno. Wrapper de
+        `_l10n_pe_anticipos_montos()` para no romper a los llamadores previos (percepción, importe
+        a cobrar, cabecera, tributos, variable global 04) que solo necesitan el agregado."""
+        self.ensure_one()
+        _por, (v, i, t) = self._l10n_pe_anticipos_montos()
+        return (v, i, t) if t > 0 else None
 
     def _l10n_pe_desc_no_afecta(self):
         """Monto del descuento global que NO afecta la base del IGV, topeado para no dejar el total
@@ -474,12 +490,11 @@ class AccountMove(models.Model):
         return round(min(monto, max(0.0, tope)), 2)
 
     def _l10n_pe_check_anticipo(self):
-        """Valida que el anticipo sea representable (descuento global código 04) antes de emitir el XML.
-        Rechaza con un mensaje claro los casos no soportados, en vez de generar un comprobante inválido.
-        NOTA: con la lista JSON, valida el PRIMER anticipo (doc/origen) y el TOTAL agregado (suma de
-        todos los `monto`); con 0 o 1 anticipo el comportamiento es idéntico al de los campos escalares
-        anteriores. La validación completa por-cada-anticipo (N>1: cada doc, cada origen y su saldo
-        propio) es responsabilidad de la etapa de emisión multi-anticipo (no implementada aquí)."""
+        """Valida que los anticipos sean representables (N documentos relacionados + un descuento
+        global código 04 AGREGADO) antes de emitir el XML. Rechaza con un mensaje claro los casos no
+        soportados, en vez de generar un comprobante inválido. Cada anticipo de la lista se valida
+        individualmente (doc, origen, partner, moneda y saldo propio); la SUMA se valida contra el
+        total de la factura."""
         self.ensure_one()
         if self.l10n_pe_ne_es_anticipo and self._l10n_pe_anticipo():
             raise UserError(
@@ -491,38 +506,42 @@ class AccountMove(models.Model):
         if not self._l10n_pe_anticipo():
             return
         lst = self._l10n_pe_ne_anticipos_list()
-        # TODO(Task 2 multi-anticipo): quitar este guard al soportar N. Hoy la emisión (relacionados,
-        # variable global 04) solo arma UN AdditionalDocumentReference/PrepaidPayment con el PRIMER
-        # anticipo de la lista aunque la cabecera sume el TOTAL agregado: con N>1 se emitiría un XML
-        # inconsistente (cabecera con la suma, un solo documento relacionado). Se corta aquí hasta que
-        # la etapa de emisión N-way exista.
-        if len(lst) > 1:
-            raise UserError(
-                _("Regularizar más de un anticipo en una factura aún no está soportado.")
-            )
-        primero = lst[0]
         total_aplicado = round(sum(a["monto"] for a in lst), 2)
-        if not primero["doc"]:
-            raise UserError(
-                _(
-                    "Indique el comprobante de anticipo (serie-correlativo, ej. F001-00000100)."
-                )
-            )
         if total_aplicado > self.amount_total + 0.01:
             raise UserError(
                 _(
-                    "El anticipo aplicado (%.2f) no puede exceder el total de la factura (%.2f)."
+                    "El total de anticipos (%.2f) no puede exceder el total de la factura (%.2f)."
                 )
                 % (total_aplicado, self.amount_total)
             )
-        # Si la regularización enlaza un anticipo local (doc. A), valida moneda y saldo disponible:
-        # el importe aplicado no puede exceder lo que le queda al anticipo (evita doble consumo).
-        origen = (
-            self.env["account.move"].browse(primero["origenId"])
-            if primero["origenId"]
-            else self.env["account.move"]
-        )
-        if origen:
+        # Otras regularizaciones vivas que ya consumen anticipos (excluye esta factura). El dato vive
+        # en la lista JSON: se busca ampliamente UNA sola vez y se filtra/agrega en Python por origen
+        # (mismo patrón que `_compute_l10n_pe_ne_anticipo_saldo`).
+        otras = self.env["account.move"].search([
+            ("id", "!=", self.id),
+            ("l10n_pe_ne_anticipos", "!=", False),
+            ("state", "=", "posted"),
+            ("l10n_pe_biller_state", "not in", ("rechazado", "error", "anulado")),
+        ])
+        aplicado_en_esta = {}  # origenId -> suma de monto ya visto en ESTA factura (mismo origen 2x).
+        for idx, a in enumerate(lst, start=1):
+            if not a["doc"]:
+                raise UserError(
+                    _(
+                        "Indique el comprobante del anticipo #%d (serie-correlativo, ej. F001-00000100)."
+                    )
+                    % idx
+                )
+            # Si la regularización enlaza un anticipo local (doc. A), valida moneda y saldo
+            # disponible: el importe aplicado no puede exceder lo que le queda al anticipo (evita
+            # doble consumo), sea desde otra factura o desde otra línea de esta misma lista.
+            origen = (
+                self.env["account.move"].browse(a["origenId"])
+                if a["origenId"]
+                else self.env["account.move"]
+            )
+            if not origen:
+                continue
             if not origen.l10n_pe_ne_es_anticipo:
                 raise UserError(
                     _("El documento enlazado (%s) no está marcado como pago anticipado.")
@@ -541,32 +560,26 @@ class AccountMove(models.Model):
                     )
                     % origen.display_name
                 )
-            # Otras regularizaciones vivas que ya consumen este anticipo (excluye esta factura). El
-            # dato vive en la lista JSON: se busca ampliamente y se filtra/agrega en Python (mismo
-            # patrón que `_compute_l10n_pe_ne_anticipo_saldo`).
-            otras = self.env["account.move"].search([
-                ("id", "!=", self.id),
-                ("l10n_pe_ne_anticipos", "!=", False),
-                ("state", "=", "posted"),
-                ("l10n_pe_biller_state", "not in", ("rechazado", "error", "anulado")),
-            ])
             aplicado_otras = round(
                 sum(
-                    a["monto"]
+                    oa["monto"]
                     for m in otras
-                    for a in m._l10n_pe_ne_anticipos_list()
-                    if a["origenId"] == origen.id
+                    for oa in m._l10n_pe_ne_anticipos_list()
+                    if oa["origenId"] == origen.id
                 ),
                 2,
             )
+            aplicado_en_esta[origen.id] = round(
+                aplicado_en_esta.get(origen.id, 0.0) + a["monto"], 2
+            )
             disponible = round(origen.amount_total - aplicado_otras, 2)
-            if total_aplicado > disponible + 0.01:
+            if aplicado_en_esta[origen.id] > disponible + 0.01:
                 raise UserError(
                     _(
                         "El anticipo %s ya no tiene saldo suficiente: disponible %.2f, "
                         "intentas aplicar %.2f."
                     )
-                    % (origen.display_name, disponible, total_aplicado)
+                    % (origen.display_name, disponible, aplicado_en_esta[origen.id])
                 )
         _cod, _tasa, motivo = self._l10n_pe_anticipo_gravado()
         if motivo:
@@ -614,20 +627,17 @@ class AccountMove(models.Model):
                     "numDocEmisor": self.company_id.vat or "",
                 }
             )
-        # NOTA: con la lista JSON solo se referencia el PRIMER anticipo (numIdeAnticipo "1"); con 0
-        # o 1 anticipo es idéntico al comportamiento anterior. Emitir N AdditionalDocumentReference
-        # (uno por anticipo, numIdeAnticipo 1..N) es responsabilidad de la etapa de emisión
-        # multi-anticipo (no implementada aquí).
+        # N AdditionalDocumentReference (uno por anticipo), numIdeAnticipo correlativo 1..N en el
+        # orden de la lista — así SUNAT liga cada PrepaidPayment con su propio documento relacionado.
         lst = self._l10n_pe_ne_anticipos_list()
-        if lst:
-            primero = lst[0]
+        for idx, a in enumerate(lst, start=1):
             rels.append(
                 {
                     "indDocRelacionado": "2",
-                    "tipDocRelacionado": primero["tipo"] or "02",
-                    "numDocRelacionado": primero["doc"] or "",
-                    "numIdeAnticipo": "1",
-                    "mtoDocRelacionado": self._l10n_pe_fmt(primero["monto"]),
+                    "tipDocRelacionado": a["tipo"] or "02",
+                    "numDocRelacionado": a["doc"],
+                    "numIdeAnticipo": str(idx),
+                    "mtoDocRelacionado": self._l10n_pe_fmt(a["monto"]),
                     "tipDocEmisor": "6",
                     "numDocEmisor": self.company_id.vat or "",
                 }
@@ -637,8 +647,11 @@ class AccountMove(models.Model):
     def _l10n_pe_variables_globales(self):
         """Variables globales de la factura:
         - código 51: percepción (el agente percibe un % sobre la venta; el cliente paga total + percepción).
-        - código 04: descuento global por anticipo (regulariza un anticipo ya facturado; reduce la
-          base del IGV en el valor del anticipo). Exigido por SUNAT (regla 3287) cuando hay anticipo."""
+        - código 04: descuento global por anticipo (regulariza uno o más anticipos ya facturados;
+          reduce la base del IGV en el valor AGREGADO de todos los anticipos). Exigido por SUNAT
+          (regla 3287) cuando hay anticipo. Con N>1 anticipos se emite UN solo 04 con la suma —no uno
+          por anticipo—, en línea con los N documentos relacionados (`_l10n_pe_relacionados`) que sí
+          van uno por cada `AdditionalDocumentReference`/`numIdeAnticipo`."""
         fmt = self._l10n_pe_fmt
         moneda = self.currency_id.name or "PEN"
         out = []

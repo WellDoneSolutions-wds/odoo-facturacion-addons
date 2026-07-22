@@ -48,17 +48,45 @@ class TestMultiAnticipo(TransactionCase):
     def test_sin_anticipos_lista_vacia(self):
         self.assertEqual(self._venta()._l10n_pe_ne_anticipos_list(), [])
 
-    def test_mas_de_un_anticipo_rechaza_hasta_task2(self):
-        """GATE TRANSITORIO: la emisión (relacionados + variable global 04) hoy solo arma un
-        AdditionalDocumentReference/PrepaidPayment con el PRIMER anticipo de la lista, aunque la
-        cabecera sumaría el TOTAL agregado — con N>1 se emitiría un XML inconsistente. Mientras
-        Task 2 no implemente la emisión N-way (N AdditionalDocumentReference, numIdeAnticipo 1..N),
-        `_l10n_pe_check_anticipo` debe rechazar explícitamente cualquier factura con más de un
-        anticipo, en vez de dejarla emitir mal en silencio. Este test se AJUSTARÁ (o eliminará)
-        cuando Task 2 soporte N>1."""
-        m = self._venta(anticipos=[
+    def test_dos_anticipos_dos_relacionados_numide(self):
+        # venta 1180 (1000 + IGV 180); anticipos 236 (val 200) + 118 (val 100) = 354.
+        payload = self._venta(anticipos=[
             {'doc': 'F001-00000100', 'monto': 236.0, 'tipo': '02'},
             {'doc': 'F001-00000101', 'monto': 118.0, 'tipo': '02'},
-        ])
+        ])._l10n_pe_build_invoice_request()
+        rels = [r for r in payload['relacionados'] if r['indDocRelacionado'] == '2']
+        self.assertEqual(len(rels), 2)
+        self.assertEqual([r['numIdeAnticipo'] for r in rels], ['1', '2'])
+        self.assertEqual([r['numDocRelacionado'] for r in rels], ['F001-00000100', 'F001-00000101'])
+        self.assertEqual([r['mtoDocRelacionado'] for r in rels], ['236.00', '118.00'])
+
+    def test_cabecera_suma_y_descuento_04_agregado(self):
+        payload = self._venta(anticipos=[
+            {'doc': 'F001-00000100', 'monto': 236.0, 'tipo': '02'},
+            {'doc': 'F001-00000101', 'monto': 118.0, 'tipo': '02'},
+        ])._l10n_pe_build_invoice_request()
+        cab = payload['cabecera']
+        self.assertEqual(cab['sumTotalAnticipos'], '354.00')       # 236 + 118
+        self.assertEqual(cab['sumImpVenta'], '826.00')             # 1180 − 354
+        vg = [v for v in payload['variablesGlobales'] if v['codTipoVariableGlobal'] == '04']
+        self.assertEqual(len(vg), 1)                                # un 04 agregado
+        self.assertEqual(vg[0]['mtoVariableGlobal'], '300.00')      # valor total (200 + 100)
+        igv = [t for t in payload['tributos'] if t['ideTributo'] == '1000'][0]
+        self.assertEqual(igv['mtoBaseImponible'], '700.00')        # 1000 − 300
+        self.assertEqual(igv['mtoTributo'], '126.00')              # 180 − 54
+
+    def test_un_anticipo_sigue_igual(self):
+        # paridad con el caso escalar previo (lista de 1).
+        payload = self._venta(anticipos=[{'doc': 'F001-00000100', 'monto': 118.0, 'tipo': '02'}],
+                              precio=500.0)._l10n_pe_build_invoice_request()
+        self.assertEqual(payload['cabecera']['sumTotalAnticipos'], '118.00')
+        rels = [r for r in payload['relacionados'] if r['indDocRelacionado'] == '2']
+        self.assertEqual(len(rels), 1)
+        self.assertEqual(rels[0]['numIdeAnticipo'], '1')
+
+    def test_suma_excede_total_rechaza(self):
         with self.assertRaises(UserError):
-            m._l10n_pe_build_invoice_request()
+            self._venta(anticipos=[
+                {'doc': 'F001-00000100', 'monto': 800.0, 'tipo': '02'},
+                {'doc': 'F001-00000101', 'monto': 800.0, 'tipo': '02'},
+            ], precio=1000.0)._l10n_pe_build_invoice_request()

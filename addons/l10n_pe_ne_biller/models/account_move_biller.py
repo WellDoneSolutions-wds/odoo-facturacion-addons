@@ -128,6 +128,19 @@ AFECT_IMPORT = {
 _UNIDAD_CODES = set(UNIDAD_IMPORT.values())
 
 
+def _percep_float(v):
+    """float() de percepTasa que no revienta con un 500 críptico: tolera coma decimal (igual
+    que el import masivo) y, si no es numérico, da un UserError legible en vez de un
+    ValueError sin traducir. Vacío/None/False → 0.0 (limpia el campo, mismo criterio de
+    siempre)."""
+    if v in (None, "", False):
+        return 0.0
+    try:
+        return float(str(v).replace(",", "."))
+    except (TypeError, ValueError):
+        raise UserError(_("La percepción sugerida debe ser un número (ej. 2 o 1.5)."))
+
+
 class AccountMoveLine(models.Model):
     _inherit = "account.move.line"
 
@@ -4385,7 +4398,7 @@ class AccountMove(models.Model):
         if ln.get("detraCod"):
             vals["l10n_pe_ne_detraccion_cod"] = str(ln["detraCod"]).strip()
         if ln.get("percepTasa"):
-            vals["l10n_pe_ne_percepcion_tasa"] = float(ln["percepTasa"])
+            vals["l10n_pe_ne_percepcion_tasa"] = _percep_float(ln["percepTasa"])
         if uni:
             vals["l10n_pe_ne_unit_code"] = uni
         if tax:
@@ -4619,7 +4632,7 @@ class AccountMove(models.Model):
         if "detraCod" in producto:
             vals["l10n_pe_ne_detraccion_cod"] = (producto.get("detraCod") or "").strip() or False
         if producto.get("percepTasa") is not None:
-            vals["l10n_pe_ne_percepcion_tasa"] = float(producto.get("percepTasa") or 0)
+            vals["l10n_pe_ne_percepcion_tasa"] = _percep_float(producto.get("percepTasa"))
         if "unidad" in producto:
             vals["l10n_pe_ne_unit_code"] = (producto.get("unidad") or "").strip() or False
         if producto.get("tipo"):

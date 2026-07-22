@@ -1,4 +1,5 @@
-from odoo import fields, models
+from odoo import _, api, fields, models
+from odoo.exceptions import ValidationError
 
 
 class ProductTemplate(models.Model):
@@ -50,3 +51,12 @@ class ProductTemplate(models.Model):
              "la tasa final se confirma al emitir (el 0.5% del listado SUNAT se ajusta "
              "a mano). Solo aplica si el negocio es agente de percepción.",
     )
+
+    @api.constrains("l10n_pe_ne_percepcion_tasa")
+    def _check_percepcion_tasa(self):
+        # Defensa en profundidad: el import masivo y la API de productos ya validan el rango
+        # 0-10 antes de llegar acá, pero un write directo (shell, otra vía) no pasa por esos
+        # caminos. El modelo es el único lugar que ningún caller puede saltarse.
+        for rec in self:
+            if rec.l10n_pe_ne_percepcion_tasa and not (0 <= rec.l10n_pe_ne_percepcion_tasa <= 10):
+                raise ValidationError(_("La percepción sugerida debe estar entre 0 y 10%."))

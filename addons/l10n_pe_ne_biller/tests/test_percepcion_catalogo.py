@@ -1,3 +1,4 @@
+from odoo.exceptions import UserError, ValidationError
 from odoo.tests import TransactionCase, tagged
 
 
@@ -30,6 +31,23 @@ class TestPercepcionCatalogo(TransactionCase):
     def test_producto_sin_percepcion_expone_cero(self):
         d = self.Move.l10n_pe_ne_create_producto({'descripcion': 'CLAVOS', 'precio': 5.0})
         self.assertEqual(d['percepTasa'], 0.0)
+
+    def test_percep_tasa_no_numerica_da_error(self):
+        """Un percepTasa no numérico debe dar un UserError claro, no un 500 críptico."""
+        with self.assertRaises(UserError):
+            self.Move.l10n_pe_ne_create_producto({'descripcion': 'X', 'percepTasa': 'abc'})
+
+    def test_percep_tasa_coma_decimal_api(self):
+        """La API de productos tolera coma decimal igual que el import masivo."""
+        d = self.Move.l10n_pe_ne_create_producto({'descripcion': 'ACEITE COMA API', 'percepTasa': '1,5'})
+        self.assertEqual(d['percepTasa'], 1.5)
+
+    def test_percep_tasa_fuera_de_rango_constraint(self):
+        """Defensa en profundidad: fuera de 0-10 debe fallar también a nivel de modelo,
+        no solo en la validación del import masivo / la API."""
+        tmpl = self.env['product.template'].create({'name': 'PRODUCTO RANGO'})
+        with self.assertRaises(ValidationError):
+            tmpl.write({'l10n_pe_ne_percepcion_tasa': 50})
 
     def test_update_cambia_y_limpia_percepcion(self):
         d = self.Move.l10n_pe_ne_create_producto({'descripcion': 'CERVEZA', 'precio': 8.0, 'percepTasa': 2.0})

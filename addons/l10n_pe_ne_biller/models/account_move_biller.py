@@ -1492,8 +1492,15 @@ class AccountMove(models.Model):
             "horEmision": pytz.utc.localize(fields.Datetime.now())
             .astimezone(pytz.timezone("America/Lima"))
             .strftime("%H:%M:%S"),
+            # DueDate solo cuando hay PAGO DIFERIDO real: al crédito (la última cuota) o un plazo
+            # explícito posterior a la emisión. Odoo AUTOPOBLA invoice_date_due (con la fecha
+            # contable/HOY, no siempre la de emisión), así que sin este guard TODA factura contado
+            # emitía un vencimiento espurio (el PDF mostraba "Vencimiento: <fecha>" en cada contado).
+            # Un contado sin plazo (invoice_date_due <= fecha de emisión) NO lleva vencimiento.
             "fecVencimiento": self.invoice_date_due.strftime("%Y-%m-%d")
-            if self.invoice_date_due
+            if (self.invoice_date_due and (
+                self.l10n_pe_ne_forma_pago == "Credito"
+                or (self.invoice_date and self.invoice_date_due > self.invoice_date)))
             else "",
             "codLocalEmisor": (self.l10n_pe_ne_cod_establecimiento or "0000"),
             "tipDocUsuario": self._l10n_pe_cliente_doc()[0],

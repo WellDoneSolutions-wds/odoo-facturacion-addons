@@ -699,6 +699,7 @@ class L10nPeNeGuiaRemision(models.Model):
             if tuc and not re.match(r'^(?!0+$)[0-9A-Z]{10,15}$', tuc):
                 raise UserError(_('La TUC del vehículo debe tener de 10 a 15 caracteres '
                                   'alfanuméricos en mayúscula (SUNAT 3355).'))
+            self._l10n_pe_ne_validar_licencias()
             return
         if self.motivo_traslado not in SUPPORTED_MOTIVOS:
             raise UserError(_('El motivo de traslado %s aún no soportado para emisión.')
@@ -802,6 +803,13 @@ class L10nPeNeGuiaRemision(models.Model):
         if self.motivo_traslado == '04' and not (self.cod_estab_partida and self.cod_estab_llegada):
             raise UserError(_('El motivo "Traslado entre establecimientos de la misma empresa" '
                               'requiere el código de establecimiento en partida y llegada.'))
+        # SUNAT 3416 (exclusiva del motivo 18): el traslado itinerante NO admite un
+        # establecimiento anexo como punto de llegada — la venta es en ruta, la llegada
+        # queda libre. La partida sí puede ser un establecimiento propio (ninguna regla
+        # del XSL lo prohíbe para el 18).
+        if self.motivo_traslado == '18' and self.cod_estab_llegada:
+            raise UserError(_('El motivo "Traslado emisor itinerante" no admite establecimiento '
+                              'de llegada (SUNAT 3416); deja el punto de llegada sin establecimiento.'))
         # SUNAT 2554/2555: el destinatario, según el motivo, debe (o no debe) ser el propio
         # emisor. Se valida acá con un mensaje claro para que el usuario no llegue al rechazo.
         motivo_txt = dict(MOTIVOS_TRASLADO).get(self.motivo_traslado, self.motivo_traslado)
@@ -856,6 +864,32 @@ class L10nPeNeGuiaRemision(models.Model):
                 # Odoo debe fallar primero con un mensaje amigable).
                 raise UserError(_('Transporte público: indica la fecha de entrega de los '
                                   'bienes al transportista.'))
+        if self.modalidad_traslado == '02':
+            # Solo el transporte privado declara conductores en el payload.
+            self._l10n_pe_ne_validar_licencias()
+
+    # SUNAT 2573 (remitente y transportista): licencia de conducir de 9-10 alfanuméricos
+    # en mayúscula, no todo ceros. Espeja el regex de las hojas XSLT del biller
+    # (ValidaExprRegGre*-2.0.1.xsl); sin esto el biller la rechazaba con un 2573 críptico
+    # (así murió la guía QA T001-5, con una licencia de 7 caracteres).
+    _LICENCIA_RE = r'(?!0+$)[0-9A-Z]{9,10}'
+
+    def _l10n_pe_ne_validar_licencias(self):
+        """Valida el formato de TODA licencia presente en el payload: el conductor
+        principal efectivo (lista o campos legados) y, en la remitente, los secundarios.
+        Una licencia vacía no se valida acá (la exención M1L no declara conductor; la
+        completitud la exige la validación de cada modalidad, no esta)."""
+        self.ensure_one()
+        cond = self._l10n_pe_ne_principal(self.conductor_ids)
+        licencias = [(_('del conductor principal'),
+                      (cond.licencia if cond else self.conductor_licencia) or '')]
+        if self.tipo_gre != '31':
+            licencias += [(_('del conductor %s') % (c.nombres or c.num_doc),
+                           c.licencia or '') for c in (self.conductor_ids - cond)]
+        for etiqueta, lic in licencias:
+            if lic.strip() and not re.fullmatch(self._LICENCIA_RE, lic.strip()):
+                raise UserError(_('La licencia de conducir %s debe tener de 9 a 10 caracteres '
+                                  'alfanuméricos en mayúscula (SUNAT 2573).') % etiqueta)
 
     def _l10n_pe_ne_extraer_qr_url(self, cdr_bytes):
         """URL del código QR que SUNAT incluye en el CDR aceptado de la GRE. El QR de la
@@ -1028,7 +1062,11 @@ class L10nPeNeGuiaRemision(models.Model):
                         _logger.info('GRE %s: re-consulta inmediata falló (reintenta el cron): %s',
                                      self.name, exc)
         else:
-            self.estado = 'rechazado' if resp.status_code == 400 else 'error'
+            # 400 (payload inválido) y 422 (rechazo de la pre-validación XSLT de SUNAT,
+            # tipado por el biller) son culpa de los DATOS del documento: la guía queda
+            # 'rechazado' con el código SUNAT legible. El resto (500/502/503) es
+            # infraestructura: 'error', re-emitible tal cual.
+            self.estado = 'rechazado' if resp.status_code in (400, 422) else 'error'
             self.l10n_pe_biller_message = ('HTTP %s: %s' % (resp.status_code, body))[:2000]
         return self._l10n_pe_ne_guia_dict()
 

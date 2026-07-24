@@ -634,6 +634,19 @@ class AccountMove(models.Model):
         """Documentos relacionados de la factura: guía de remisión (indDocRelacionado 1,
         DespatchDocumentReference) y/o comprobante de anticipo (indDocRelacionado 2)."""
         rels = []
+        # Orden de compra (indDocRelacionado 3 → cac:OrderReference). VA PRIMERO: en el UBL Invoice
+        # el OrderReference precede a DespatchDocumentReference/AdditionalDocumentReference (orden de
+        # elementos que el XSD de SUNAT exige), y el FTL emite los relacionados en el orden de la lista.
+        oc = (self.l10n_pe_ne_orden_compra or "").strip()
+        if oc:
+            rels.append(
+                {
+                    "indDocRelacionado": "3",
+                    "numDocRelacionado": oc,
+                    "tipDocEmisor": "6",
+                    "numDocEmisor": self.company_id.vat or "",
+                }
+            )
         guia = (self.l10n_pe_ne_guia_ref or "").strip()
         if guia:
             rels.append(
@@ -902,6 +915,12 @@ class AccountMove(models.Model):
         [("09", "Guía de remisión remitente"), ("31", "Guía de remisión transportista")],
         string="Tipo de guía referenciada",
         default="09",
+    )
+    l10n_pe_ne_orden_compra = fields.Char(
+        string="Orden de compra",
+        copy=False,
+        help="Número de orden de compra del cliente (opcional). Se emite como "
+        "cac:OrderReference/cbc:ID (documento relacionado ind. 3), típico en ventas B2B.",
     )
     # Proyecto/contrato (facturación por avance de obra): controla que la suma de las
     # valorizaciones no supere el valor total del contrato (QA-039).
@@ -5622,6 +5641,9 @@ class AccountMove(models.Model):
         # Establecimiento emisor (sucursal): código de local anexo SUNAT del comprobante.
         if payload.get("codEstablecimiento"):
             move.l10n_pe_ne_cod_establecimiento = payload["codEstablecimiento"]
+        # Orden de compra del cliente (cac:OrderReference).
+        if payload.get("ordenCompra"):
+            move.l10n_pe_ne_orden_compra = str(payload["ordenCompra"]).strip()
         # Guía de remisión referenciada (DespatchDocumentReference).
         if payload.get("guiaRef"):
             move.l10n_pe_ne_guia_ref = payload["guiaRef"]

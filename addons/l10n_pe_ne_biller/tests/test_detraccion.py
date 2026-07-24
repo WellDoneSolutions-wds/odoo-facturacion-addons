@@ -42,6 +42,28 @@ class TestBillerDetraccion(TransactionCase):
         # Neto pendiente = total − detracción = 708 − 85 = 623.00 (el cliente paga el neto).
         self.assertEqual(payload['datoPago']['mtoNetoPendientePago'], '623.00')
 
+    def test_detraccion_base_resta_descuento_no_afecta(self):
+        """La base de la detracción resta el descuento que NO afecta el IGV (cat. 53 cód. 03):
+        ese descuento baja el importe de la operación que paga el adquirente, así que la
+        detracción va sobre el total YA descontado. Antes se detraía sobre el total completo
+        (mtoDetraccion y neto pendiente salían de más y no coincidían con el front/PayableAmount)."""
+        move = self.env['account.move'].create({
+            'move_type': 'out_invoice', 'partner_id': self.partner.id, 'invoice_date': '2026-06-20',
+            'l10n_pe_serie': 'F001', 'l10n_pe_correlativo': '12',
+            'l10n_pe_ne_detraccion': True, 'l10n_pe_ne_detraccion_code': '037',
+            'l10n_pe_ne_detraccion_rate': 12.0,
+            'l10n_pe_ne_desc_no_afecta': 108.0,
+            'invoice_line_ids': [(0, 0, {'product_id': self.product.id, 'quantity': 1.0,
+                                         'price_unit': 600.0, 'tax_ids': [(6, 0, self.igv.ids)]})]})
+        move.action_post()
+        payload = move._l10n_pe_build_invoice_request()
+        adic = payload['cabecera']['adicionalCabecera']
+        # total 708 − descuento no-afecta 108 = base 600; detracción 12% de 600 = 72.00
+        # (antes del fix: 12% de 708 = 84.96 -> 85.00).
+        self.assertEqual(adic['mtoDetraccion'], '72.00')
+        # Neto pendiente = base 600 − detracción 72 = 528.00.
+        self.assertEqual(payload['datoPago']['mtoNetoPendientePago'], '528.00')
+
     def test_detraccion_credito_neto_y_cuota_sobre_neto(self):
         """Crédito con detracción: el neto pendiente y la cuota (sin cuotas explícitas)
         van sobre total − detracción, no sobre el total. Regresión del bug reportado:

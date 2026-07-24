@@ -3,9 +3,9 @@ from odoo.tests import TransactionCase, tagged
 
 @tagged('post_install', '-at_install')
 class TestVencimiento(TransactionCase):
-    """fecVencimiento (cbc:DueDate) solo cuando es un vencimiento REAL (diferido). Odoo autopobla
-    invoice_date_due = fecha de emisión; un contado sin plazo NO debe emitir vencimiento (evita el
-    ruido 'Vencimiento: <fecha de emisión>' en el PDF de toda factura contado)."""
+    """fecVencimiento (cbc:DueDate) es AUTOMÁTICO y siempre presente: al contado = la fecha de
+    EMISIÓN (vence el mismo día); al crédito = la última cuota. No lo edita el emisor. El contado usa
+    invoice_date explícito (no invoice_date_due, que Odoo autopobla con la fecha contable/HOY)."""
 
     def setUp(self):
         super().setUp()
@@ -31,18 +31,19 @@ class TestVencimiento(TransactionCase):
         move.action_post()
         return move
 
-    def test_contado_sin_plazo_no_emite_vencimiento(self):
-        # contado, vencimiento = fecha de emisión (no diferido) → NO se emite fecVencimiento.
-        cab = self._move(invoice_date_due='2026-06-20')._l10n_pe_build_invoice_request()['cabecera']
-        self.assertEqual(cab['fecVencimiento'], '')
-
-    def test_contado_con_plazo_diferido_se_emite(self):
-        # contado con plazo posterior a la emisión → sí se emite.
-        cab = self._move(invoice_date_due='2026-08-15')._l10n_pe_build_invoice_request()['cabecera']
-        self.assertEqual(cab['fecVencimiento'], '2026-08-15')
-
-    def test_credito_emite_vencimiento_aunque_sea_misma_fecha(self):
-        # crédito: la forma de pago manda; se emite el vencimiento aunque coincida con la emisión.
-        cab = self._move(l10n_pe_ne_forma_pago='Credito',
-                         invoice_date_due='2026-06-20')._l10n_pe_build_invoice_request()['cabecera']
+    def test_contado_emite_la_fecha_de_emision(self):
+        # contado → el vencimiento es la propia fecha de emisión (vence el mismo día).
+        cab = self._move()._l10n_pe_build_invoice_request()['cabecera']
         self.assertEqual(cab['fecVencimiento'], '2026-06-20')
+
+    def test_contado_ignora_invoice_date_due_autopoblado(self):
+        # Odoo pudo autopoblar invoice_date_due con otra fecha (contable/HOY); al contado se ignora:
+        # el vencimiento siempre es la fecha de emisión.
+        cab = self._move(invoice_date_due='2026-08-15')._l10n_pe_build_invoice_request()['cabecera']
+        self.assertEqual(cab['fecVencimiento'], '2026-06-20')
+
+    def test_credito_emite_la_ultima_cuota(self):
+        # crédito → el vencimiento es la última cuota (invoice_date_due la fija quick_flags/cuotas).
+        cab = self._move(l10n_pe_ne_forma_pago='Credito',
+                         invoice_date_due='2026-09-30')._l10n_pe_build_invoice_request()['cabecera']
+        self.assertEqual(cab['fecVencimiento'], '2026-09-30')

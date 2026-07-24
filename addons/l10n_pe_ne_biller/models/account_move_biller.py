@@ -1492,15 +1492,17 @@ class AccountMove(models.Model):
             "horEmision": pytz.utc.localize(fields.Datetime.now())
             .astimezone(pytz.timezone("America/Lima"))
             .strftime("%H:%M:%S"),
-            # DueDate solo cuando hay PAGO DIFERIDO real: al crédito (la última cuota) o un plazo
-            # explícito posterior a la emisión. Odoo AUTOPOBLA invoice_date_due (con la fecha
-            # contable/HOY, no siempre la de emisión), así que sin este guard TODA factura contado
-            # emitía un vencimiento espurio (el PDF mostraba "Vencimiento: <fecha>" en cada contado).
-            # Un contado sin plazo (invoice_date_due <= fecha de emisión) NO lleva vencimiento.
-            "fecVencimiento": self.invoice_date_due.strftime("%Y-%m-%d")
-            if (self.invoice_date_due and (
-                self.l10n_pe_ne_forma_pago == "Credito"
-                or (self.invoice_date and self.invoice_date_due > self.invoice_date)))
+            # Vencimiento AUTOMÁTICO (no editable), siempre presente:
+            #  - Crédito → la última cuota (invoice_date_due la fija quick_flags desde las cuotas).
+            #  - Contado → la propia fecha de EMISIÓN (pago inmediato: vence el mismo día).
+            # Se usa invoice_date explícito para el contado porque Odoo autopobla invoice_date_due con
+            # la fecha contable/HOY, que no siempre coincide con la de emisión (facturas con fecha atrás).
+            "fecVencimiento": (
+                self.invoice_date_due
+                if (self.l10n_pe_ne_forma_pago == "Credito" and self.invoice_date_due)
+                else self.invoice_date
+            ).strftime("%Y-%m-%d")
+            if self.invoice_date
             else "",
             "codLocalEmisor": (self.l10n_pe_ne_cod_establecimiento or "0000"),
             "tipDocUsuario": self._l10n_pe_cliente_doc()[0],
@@ -5711,15 +5713,9 @@ class AccountMove(models.Model):
                 move.invoice_date_due = venc
         if fp.get("medios"):
             move.l10n_pe_ne_medios_pago = fp.get("medios")
-        # Fecha de vencimiento a nivel comprobante (cbc:DueDate). Al crédito la fija la última
-        # cuota (arriba); al contado es un plazo de pago opcional que el emisor decide. SUNAT
-        # admite DueDate en cualquier forma de pago (solo es obligatorio en tipOperacion 0303).
-        # Se fija explícitamente para el contado (guard por forma de pago, no por
-        # invoice_date_due: Odoo lo autopobla = fecha de emisión, así que "not ..." no serviría)
-        # y nunca pisa el vencimiento derivado de las cuotas en el crédito.
-        venc_manual = payload.get("fechaVencimiento")
-        if venc_manual and move.l10n_pe_ne_forma_pago != "Credito":
-            move.invoice_date_due = venc_manual
+        # El vencimiento (cbc:DueDate) es AUTOMÁTICO, no lo decide el emisor: al crédito la fija la
+        # última cuota (arriba); al contado la cabecera usa la fecha de emisión (vence el mismo día).
+        # Por eso ya no se recibe una fechaVencimiento manual desde el front.
         # Redondeo de efectivo (dato de caja, no del XML): el POS lo calcula en vivo (≤ 0). Se
         # persiste solo si el pago es efectivo y el flag de la compañía está activo; ausente/0 = sin
         # redondeo. El importe entregado en efectivo = amount_total + redondeo.

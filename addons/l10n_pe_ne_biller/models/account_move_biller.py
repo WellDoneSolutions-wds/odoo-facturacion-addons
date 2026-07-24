@@ -747,26 +747,36 @@ class AccountMove(models.Model):
                     serie = prefix + serie[1:]
             move.l10n_pe_serie = serie
 
+    def _l10n_pe_detraccion_base(self):
+        """Base de la detracción (SPOT) = importe de la operación = total − descuento que NO
+        afecta la base del IGV (cat. 53 cód. 03). Ese descuento reduce el MtoImpVenta que paga
+        el adquirente, así que también reduce la base sobre la que se detrae — de lo contrario
+        se detrae de más y la base no coincide con el total que muestra el front ni con el
+        PayableAmount del XML. NO se descuenta el anticipo: la base es la de la operación."""
+        self.ensure_one()
+        return round((self.amount_total or 0.0) - self._l10n_pe_desc_no_afecta(), 2)
+
     def _l10n_pe_detraccion_monto(self):
         self.ensure_one()
         # SUNAT (SPOT): el monto de la detracción se redondea al ENTERO más próximo
         # (sin decimales), medio hacia arriba. Ej.: 12% de 25 386.52 = 3046.38 -> 3046.
         return float_round(
-            self.amount_total * (self.l10n_pe_ne_detraccion_rate or 0.0) / 100.0,
+            self._l10n_pe_detraccion_base() * (self.l10n_pe_ne_detraccion_rate or 0.0) / 100.0,
             precision_digits=0,
             rounding_method="HALF-UP",
         )
 
     def _l10n_pe_neto_pendiente(self):
-        """Neto pendiente de pago = total − detracción (si aplica). Con detracción el
-        cliente solo paga el neto; el monto detraído se deposita en el Banco de la Nación,
-        así que el pendiente/cuotas van sobre el neto, no sobre el total."""
+        """Neto pendiente de pago = base de la operación − detracción (si aplica). Con detracción
+        el cliente solo paga el neto; el monto detraído se deposita en el Banco de la Nación,
+        así que el pendiente/cuotas van sobre el neto, no sobre el total. La base ya resta el
+        descuento que no afecta el IGV (mismo criterio que la base de detracción y el front)."""
         self.ensure_one()
         det = self._l10n_pe_detraccion_monto() if self.l10n_pe_ne_detraccion else 0.0
         # Venta con inicial al contado: el saldo a crédito (lo que suman las cuotas) es el total
         # menos la detracción y menos la inicial ya pagada.
         inicial = self.l10n_pe_ne_inicial_contado or 0.0
-        return round((self.amount_total or 0.0) - det - inicial, 2)
+        return round(self._l10n_pe_detraccion_base() - det - inicial, 2)
 
     def _l10n_pe_adicional_cabecera(self):
         """Bloque adicional de la cabecera: detracción y/o total a cobrar de la percepción."""

@@ -874,6 +874,15 @@ class AccountMove(models.Model):
             ]
         return out
 
+    @api.depends("l10n_pe_ne_cuotas")
+    def _compute_l10n_pe_ne_cuotas_display(self):
+        """Texto legible de las cuotas para el form de Odoo (fields.Json no tiene widget)."""
+        for m in self:
+            cuotas = m.l10n_pe_ne_cuotas or []
+            m.l10n_pe_ne_cuotas_display = " · ".join(
+                "%s @ %s" % (c.get("monto"), c.get("fecha")) for c in cuotas
+            ) or False
+
     # Establecimiento anexo emisor (código SUNAT de 4 dígitos). Va como codLocalEmisor en el XML;
     # "0000" = domicilio fiscal. Para negocios con sucursales, cada comprobante declara su local.
     l10n_pe_ne_cod_establecimiento = fields.Char(
@@ -911,6 +920,12 @@ class AccountMove(models.Model):
     l10n_pe_ne_cuotas = fields.Json(
         string="Cuotas de crédito", copy=False
     )  # [{'fecha','monto'}]
+    # Versión legible de las cuotas para el form de Odoo: fields.Json no tiene un widget de
+    # form limpio, así que el contador ve las cuotas como texto "monto @ fecha" (solo lectura).
+    l10n_pe_ne_cuotas_display = fields.Char(
+        string="Cuotas de crédito",
+        compute="_compute_l10n_pe_ne_cuotas_display",
+    )
     # Forma de pago MIXTA: parte pagada al contado (inicial) + saldo a crédito en cuotas. El neto
     # pendiente (y por ende las cuotas y el mtoNetoPendientePago SUNAT) se reduce en esta inicial.
     l10n_pe_ne_inicial_contado = fields.Monetary(
@@ -5627,6 +5642,15 @@ class AccountMove(models.Model):
                 move.invoice_date_due = venc
         if fp.get("medios"):
             move.l10n_pe_ne_medios_pago = fp.get("medios")
+        # Fecha de vencimiento a nivel comprobante (cbc:DueDate). Al crédito la fija la última
+        # cuota (arriba); al contado es un plazo de pago opcional que el emisor decide. SUNAT
+        # admite DueDate en cualquier forma de pago (solo es obligatorio en tipOperacion 0303).
+        # Se fija explícitamente para el contado (guard por forma de pago, no por
+        # invoice_date_due: Odoo lo autopobla = fecha de emisión, así que "not ..." no serviría)
+        # y nunca pisa el vencimiento derivado de las cuotas en el crédito.
+        venc_manual = payload.get("fechaVencimiento")
+        if venc_manual and move.l10n_pe_ne_forma_pago != "Credito":
+            move.invoice_date_due = venc_manual
         # Redondeo de efectivo (dato de caja, no del XML): el POS lo calcula en vivo (≤ 0). Se
         # persiste solo si el pago es efectivo y el flag de la compañía está activo; ausente/0 = sin
         # redondeo. El importe entregado en efectivo = amount_total + redondeo.
@@ -5750,6 +5774,11 @@ class AccountMove(models.Model):
                 "fechaEmision": m.invoice_date.strftime("%Y-%m-%d")
                 if m.invoice_date
                 else "",
+                # Fecha de vencimiento (cbc:DueDate): al crédito = última cuota; al contado, el
+                # plazo opcional que fijó el emisor. Vacío si el comprobante no tiene vencimiento.
+                "vencimiento": m.invoice_date_due.strftime("%Y-%m-%d")
+                if m.invoice_date_due
+                else "",
                 # Hora de creación del comprobante (≈ emisión), en tz local (Lima).
                 "hora": fields.Datetime.context_timestamp(m, m.create_date).strftime("%H:%M")
                 if m.create_date
@@ -5821,12 +5850,17 @@ class AccountMove(models.Model):
             "fecha": self.invoice_date.strftime("%Y-%m-%d")
             if self.invoice_date
             else "",
+            # Vencimiento (cbc:DueDate) y cuotas del crédito, para mostrarlos en el detalle.
+            "vencimiento": self.invoice_date_due.strftime("%Y-%m-%d")
+            if self.invoice_date_due
+            else "",
             "cliente": self.partner_id.name or "",
             "clienteDoc": self.partner_id.vat or "",
             "moneda": self.currency_id.name or "PEN",
             "estado": self.l10n_pe_biller_state or "",
             "mensaje": self.l10n_pe_biller_message or "",
             "formaPago": self.l10n_pe_ne_forma_pago or "Contado",
+            "cuotas": self.l10n_pe_ne_cuotas or [],
             "docOrigen": ("%s %s-%s" % (ot, os_, on)) if on else "",
             "anticipos": self._l10n_pe_ne_anticipos_list(),
             "lineas": lineas,

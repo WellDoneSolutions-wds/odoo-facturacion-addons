@@ -937,6 +937,19 @@ class AccountMove(models.Model):
         help="Número de orden de compra del cliente (opcional). Se emite como "
         "cac:OrderReference/cbc:ID (documento relacionado ind. 3), típico en ventas B2B.",
     )
+    # DUA/DAM de exportación (QA-023). NO va al XML de la factura: la Declaración Aduanera de
+    # Mercancías la genera ADUANAS *después* del comprobante comercial (por eso la exportación se
+    # emite sin ella — QA-024) y el XSD SUNAT de la factura de exportación no tiene un campo para
+    # el número de DUA. Se guarda como dato del ERP (data-of-record) para el archivo/reporte del
+    # exportador y para poder asociarla luego. Es un Char informativo (sin efecto contable), así que
+    # queda editable aun con el comprobante ya emitido/posteado — es lo que pide QA-024.
+    l10n_pe_ne_dua = fields.Char(
+        string="N° DUA/DAM (exportación)",
+        copy=False,
+        help="Número de la Declaración Aduanera de Mercancías (DUA/DAM) de la exportación. "
+        "Opcional y editable después de emitir: aduanas la numera tras el comprobante. No se "
+        "envía a SUNAT en el XML de la factura; queda como referencia en el ERP.",
+    )
     # Ventas al Estado (proveedor del Estado): datos del proceso de contratación pública que
     # SUNAT exige como cac:AdditionalItemProperty (catálogo 55, códigos 5000-5003) en CADA línea.
     # Las reglas SUNAT 3146-3149 los validan como GRUPO: van los 4 juntos o ninguno.
@@ -5766,6 +5779,10 @@ class AccountMove(models.Model):
             move.l10n_pe_ne_guia_ref = payload["guiaRef"]
             if payload.get("guiaTipo"):
                 move.l10n_pe_ne_guia_tipo = payload["guiaTipo"]
+        # DUA/DAM de exportación (QA-023): dato del ERP, NO va al XML (ver l10n_pe_ne_dua). Opcional
+        # —la exportación se emite sin ella (QA-024)— y solo se guarda si el front la mandó.
+        if payload.get("dua"):
+            move.l10n_pe_ne_dua = str(payload["dua"]).strip()
         # Proyecto/contrato (avance de obra).
         if payload.get("proyectoId"):
             move.l10n_pe_ne_proyecto_id = int(payload["proyectoId"])
@@ -5995,6 +6012,9 @@ class AccountMove(models.Model):
             "formaPago": self.l10n_pe_ne_forma_pago or "Contado",
             "cuotas": self.l10n_pe_ne_cuotas or [],
             "docOrigen": ("%s %s-%s" % (ot, os_, on)) if on else "",
+            # DUA/DAM de exportación (QA-023): referencia del ERP para el detalle. Vacía mientras
+            # aduanas no la haya numerado (se emite sin ella, QA-024).
+            "dua": self.l10n_pe_ne_dua or "",
             "anticipos": self._l10n_pe_ne_anticipos_list(),
             "lineas": lineas,
             "notasCredito": [

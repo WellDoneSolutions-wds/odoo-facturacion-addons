@@ -1114,3 +1114,175 @@ class TestGuiaEmail(TestGuiaBase):
             g._l10n_pe_ne_aplicar_cdr("x")
         self.assertEqual(g.estado, "enviado")
         self.assertTrue(self.env["mail.mail"].search([("email_to", "=", "dest@example.com")]))
+
+
+class TestGuiaBajaReemplazo(TestGuiaBase):
+    """Baja/reemplazo de una GRE aceptada (RS 123-2022): la GRE no tiene comunicación de
+    baja tipo RA — se da de baja emitiendo una guía NUEVA que referencia a la reemplazada
+    (el biller la emite en cac:OrderReference vía idDocBaja/codTipDocBaja/tipDocBaja) y,
+    al aceptarse la nueva, la original pasa a 'anulado'."""
+
+    def _aceptada(self, **extra):
+        g = self.Guia.create(self._vals(**extra))
+        g.write({"estado": "enviado"})
+        return g
+
+    # ------------------------------------------------------------- creación del borrador
+    def test_reemplazar_crea_borrador_con_referencia(self):
+        g = self._aceptada()
+        d = self.Guia.l10n_pe_ne_reemplazar_guia(g.id)
+        n = self.Guia.browse(d["id"])
+        self.assertEqual(n.estado, "borrador")
+        self.assertEqual(n.reemplaza_id, g)
+        self.assertEqual(n.serie, g.serie)
+        self.assertNotEqual(n.name, g.name)  # correlativo propio
+        self.assertEqual(len(n.line_ids), len(g.line_ids))  # bienes copiados
+        self.assertEqual(d["reemplazaId"], g.id)
+        self.assertEqual(d["reemplazaNumero"], g.name)
+
+    def test_reemplazar_solo_guia_aceptada(self):
+        g = self.Guia.create(self._vals())  # borrador
+        with self.assertRaisesRegex(UserError, "aceptada"):
+            self.Guia.l10n_pe_ne_reemplazar_guia(g.id)
+
+    def test_reemplazar_bloquea_doble_reemplazo_en_curso(self):
+        g = self._aceptada()
+        self.Guia.l10n_pe_ne_reemplazar_guia(g.id)
+        with self.assertRaisesRegex(UserError, "reemplazo en curso"):
+            self.Guia.l10n_pe_ne_reemplazar_guia(g.id)
+
+    def test_reemplazar_permite_reintentar_tras_rechazo(self):
+        # Un intento de reemplazo rechazado por SUNAT no bloquea crear otro borrador.
+        g = self._aceptada()
+        d = self.Guia.l10n_pe_ne_reemplazar_guia(g.id)
+        self.Guia.browse(d["id"]).estado = "rechazado"
+        d2 = self.Guia.l10n_pe_ne_reemplazar_guia(g.id)
+        self.assertNotEqual(d2["id"], d["id"])
+
+    # --------------------------------------------------------------------- payload
+    def test_payload_remitente_lleva_iddocbaja(self):
+        g = self._aceptada()
+        n = self.Guia.browse(self.Guia.l10n_pe_ne_reemplazar_guia(g.id)["id"])
+        cab = n._l10n_pe_ne_build_gre_payload()["cabecera"]
+        self.assertEqual(cab["idDocBaja"], g.name)
+        self.assertEqual(cab["codTipDocBaja"], "09")
+        self.assertIn("Remitente", cab["tipDocBaja"])
+
+    def test_payload_sin_reemplazo_no_lleva_iddocbaja(self):
+        g = self.Guia.create(self._vals())
+        self.assertNotIn("idDocBaja", g._l10n_pe_ne_build_gre_payload()["cabecera"])
+
+    def test_payload_transportista_lleva_iddocbaja(self):
+        rem = self.env["res.partner"].create({"name": "Rem Baja SAC", "vat": "20507639024"})
+        g = self._aceptada(tipo_gre="31", remitente_id=rem.id, num_reg_mtc="0123456789")
+        n = self.Guia.browse(self.Guia.l10n_pe_ne_reemplazar_guia(g.id)["id"])
+        cab = n._l10n_pe_ne_build_gre_transportista_payload()["cabecera"]
+        self.assertEqual(cab["idDocBaja"], g.name)
+        self.assertEqual(cab["codTipDocBaja"], "31")
+        self.assertIn("Transportista", cab["tipDocBaja"])
+
+    # ------------------------------------------------------------- ciclo de aceptación
+    def test_cdr_aceptado_anula_la_original(self):
+        g = self._aceptada()
+        n = self.Guia.browse(self.Guia.l10n_pe_ne_reemplazar_guia(g.id)["id"])
+        resp = _Resp(text="<DespatchAdvice/>", headers={"X-Sunat-Cdr": _cdr_zip_b64("0")})
+        with patch(RUTA + ".post", return_value=resp):
+            n.l10n_pe_ne_emitir_guia()
+        self.assertEqual(n.estado, "enviado")
+        self.assertEqual(g.estado, "anulado")
+        self.assertIn(n.name, g.l10n_pe_biller_message)
+
+    def test_cdr_rechazado_no_anula(self):
+        g = self._aceptada()
+        n = self.Guia.browse(self.Guia.l10n_pe_ne_reemplazar_guia(g.id)["id"])
+        resp = _Resp(text="<DespatchAdvice/>", headers={"X-Sunat-Cdr": _cdr_zip_b64("2324")})
+        with patch(RUTA + ".post", return_value=resp):
+            n.l10n_pe_ne_emitir_guia()
+        self.assertEqual(n.estado, "rechazado")
+        self.assertEqual(g.estado, "enviado")
+
+    def test_validar_rechaza_si_original_ya_anulada(self):
+        # Carrera: otro reemplazo ganó y la original ya está anulada — emitir este
+        # duplicaría la baja ante SUNAT; se corta en la validación.
+        g = self._aceptada()
+        n = self.Guia.browse(self.Guia.l10n_pe_ne_reemplazar_guia(g.id)["id"])
+        g.estado = "anulado"
+        with self.assertRaisesRegex(UserError, "ya no está aceptada"):
+            n._l10n_pe_ne_validar()
+
+    # ------------------------------------------------------------------ housekeeping
+    def test_delete_anulada_rechaza(self):
+        g = self._aceptada()
+        g.estado = "anulado"
+        with self.assertRaisesRegex(UserError, "anulada"):
+            self.Guia.l10n_pe_ne_delete_guia(g.id)
+
+    def test_detalle_expone_reemplazada_por(self):
+        g = self._aceptada()
+        n = self.Guia.browse(self.Guia.l10n_pe_ne_reemplazar_guia(g.id)["id"])
+        resp = _Resp(text="<DespatchAdvice/>", headers={"X-Sunat-Cdr": _cdr_zip_b64("0")})
+        with patch(RUTA + ".post", return_value=resp):
+            n.l10n_pe_ne_emitir_guia()
+        det = g.l10n_pe_ne_guia_detalle()
+        self.assertEqual(det["reemplazadaPor"], n.name)
+        det_n = n.l10n_pe_ne_guia_detalle()
+        self.assertEqual(det_n["reemplazaNumero"], g.name)
+
+    # ------------------------------------------- anti doble-baja (review adversarial)
+    def test_emitir_bloqueado_si_hermano_en_proceso(self):
+        # R1 quedó 'error' (libera el guard de creación y sigue emitible), se creó R2 y
+        # está en vuelo: re-emitir R1 aceptaría DOS bajas ante SUNAT — se corta al validar.
+        g = self._aceptada()
+        r1 = self.Guia.browse(self.Guia.l10n_pe_ne_reemplazar_guia(g.id)["id"])
+        r1.estado = "error"
+        r2 = self.Guia.browse(self.Guia.l10n_pe_ne_reemplazar_guia(g.id)["id"])
+        r2.write({"estado": "en_proceso", "num_ticket": "TCK9"})
+        with self.assertRaisesRegex(UserError, "otro reemplazo"):
+            r1._l10n_pe_ne_validar()
+
+    def test_indice_unico_un_reemplazo_en_vuelo(self):
+        # Garantía dura a nivel BD (la carrera de dos emisiones concurrentes no la ve el
+        # search bajo REPEATABLE READ): solo UN reemplazo del mismo original puede estar
+        # en_proceso/enviado a la vez.
+        from odoo.tools import mute_logger
+        g = self._aceptada()
+        r1 = self.Guia.browse(self.Guia.l10n_pe_ne_reemplazar_guia(g.id)["id"])
+        r1.estado = "error"
+        r2 = self.Guia.browse(self.Guia.l10n_pe_ne_reemplazar_guia(g.id)["id"])
+        r2.write({"estado": "en_proceso"})
+        with mute_logger("odoo.sql_db"), self.assertRaises(Exception) as ctx:
+            with self.env.cr.savepoint():
+                r1.write({"estado": "en_proceso"})
+        self.assertIn("l10n_pe_ne_guia_reemplazo_unico", str(ctx.exception))
+
+    def test_delete_en_proceso_rechaza(self):
+        # Una guía en_proceso ya fue firmada y enviada (ticket pendiente): borrarla pierde
+        # el registro que aplicaría el CDR (y en un reemplazo, libera el guard de doble baja).
+        g = self.Guia.create(self._vals())
+        g.write({"estado": "en_proceso", "num_ticket": "TCK1"})
+        with self.assertRaisesRegex(UserError, "en proceso"):
+            self.Guia.l10n_pe_ne_delete_guia(g.id)
+
+    def test_reemplazo_reestampa_fecha_entrega_transportista(self):
+        # Modalidad 01: la fecha de entrega al transportista copiada del original quedaría
+        # semanas en el pasado respecto del nuevo traslado (observación/rechazo SUNAT 3617).
+        t = self.env["res.partner"].create({"name": "Transp Baja", "vat": "20100190797"})
+        g = self._aceptada(modalidad_traslado="01", transportista_id=t.id,
+                           fecha_entrega_transportista="2026-07-01")
+        n = self.Guia.browse(self.Guia.l10n_pe_ne_reemplazar_guia(g.id)["id"])
+        self.assertTrue(n.fecha_entrega_transportista)
+        self.assertNotEqual(str(n.fecha_entrega_transportista), "2026-07-01")
+
+    def test_reemplazada_por_sobrevive_cadena(self):
+        # g -> R (aceptado, luego anulado por R2) -> R2: el detalle de g debe seguir
+        # nombrando a R (el documento que sustenta SU baja), aunque R ya esté anulado.
+        g = self._aceptada()
+        r = self.Guia.browse(self.Guia.l10n_pe_ne_reemplazar_guia(g.id)["id"])
+        resp = _Resp(text="<DespatchAdvice/>", headers={"X-Sunat-Cdr": _cdr_zip_b64("0")})
+        with patch(RUTA + ".post", return_value=resp):
+            r.l10n_pe_ne_emitir_guia()
+        r2 = self.Guia.browse(self.Guia.l10n_pe_ne_reemplazar_guia(r.id)["id"])
+        with patch(RUTA + ".post", return_value=resp):
+            r2.l10n_pe_ne_emitir_guia()
+        self.assertEqual(r.estado, "anulado")
+        self.assertEqual(g.l10n_pe_ne_guia_detalle()["reemplazadaPor"], r.name)

@@ -200,6 +200,14 @@ class L10nPeNeGuiaRemision(models.Model):
                                        'guia_id', 'move_id', string='Comprobantes relacionados',
                                        copy=False)
 
+    # Baja/reemplazo (RS 123-2022): la GRE no tiene comunicación de baja tipo RA — se da
+    # de baja emitiendo una guía NUEVA que referencia a la reemplazada (cac:OrderReference
+    # en el XML). Este M2O es esa referencia; solo lo setea l10n_pe_ne_reemplazar_guia
+    # (no está en el strmap de la API). Al aceptarse esta guía, la referenciada pasa a
+    # 'anulado' (ver _l10n_pe_ne_aplicar_cdr).
+    reemplaza_id = fields.Many2one('l10n_pe_ne.guia_remision', string='Reemplaza a (baja)',
+                                   copy=False, readonly=True, index=True)
+
     # Indicadores de traslado (booleanos GRE remitente 2.1): '1' en el payload si están
     # activos, ausentes si no (el biller no acepta 'false'/'0' — ver _l10n_pe_ne_build_gre_payload).
     ind_transbordo = fields.Boolean(string='Transbordo programado')
@@ -280,6 +288,15 @@ class L10nPeNeGuiaRemision(models.Model):
             CREATE UNIQUE INDEX IF NOT EXISTS ir_sequence_gre_code_company_uniq
             ON ir_sequence (code, company_id)
             WHERE code LIKE 'l10n_pe.ne.guia_remision.%'
+        """)
+        # Anti doble-baja: a lo sumo UN reemplazo del mismo original en vuelo o aceptado.
+        # El guard por search de _l10n_pe_ne_validar no ve commits ajenos bajo REPEATABLE
+        # READ (dos emisiones concurrentes pasan ambas); este índice convierte esa carrera
+        # en IntegrityError — una request fallida, nunca dos bajas aceptadas ante SUNAT.
+        self.env.cr.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS l10n_pe_ne_guia_reemplazo_unico
+            ON l10n_pe_ne_guia_remision (reemplaza_id)
+            WHERE reemplaza_id IS NOT NULL AND estado IN ('en_proceso', 'enviado')
         """)
 
     @api.model
@@ -411,6 +428,9 @@ class L10nPeNeGuiaRemision(models.Model):
                 'numDocProveedor': prov.vat or '',
                 'rznSocialProveedor': prov.name or '',
             })
+        # Baja/reemplazo: el biller emite cac:OrderReference con la guía dada de baja.
+        if self.reemplaza_id:
+            cab.update(self._l10n_pe_ne_baja_keys())
         # Indicadores: '1' cuando activos, ausentes cuando no (el biller rechaza 'false'/'0').
         if self.ind_transbordo:
             cab['indTransbordoProgDatosEnvio'] = '1'
@@ -607,6 +627,9 @@ class L10nPeNeGuiaRemision(models.Model):
             'ubiLlegada': self.ubigeo_llegada or '',
             'dirLlegada': self.dir_llegada or '',
         }
+        # Baja/reemplazo: mismo bloque OrderReference que la remitente.
+        if self.reemplaza_id:
+            cab.update(self._l10n_pe_ne_baja_keys())
         return {
             'id': {
                 'ruc': self.company_id.vat or '',
@@ -616,6 +639,19 @@ class L10nPeNeGuiaRemision(models.Model):
             'cabecera': cab,
             'detalle': self._l10n_pe_ne_guia_detalle_lines(),
             'docRelacionado': self._l10n_pe_ne_guia_doc_relacionado(),
+        }
+
+    def _l10n_pe_ne_baja_keys(self):
+        """Claves del bloque de baja (cac:OrderReference en el biller): identifican a la
+        guía que ESTA guía reemplaza — cbc:ID = serie-correlativo, cbc:OrderTypeCode =
+        09/31 con su nombre. Compartidas por los builders remitente y transportista."""
+        self.ensure_one()
+        orig = self.reemplaza_id
+        return {
+            'idDocBaja': orig.name or '',
+            'codTipDocBaja': orig._l10n_pe_ne_tipo_cod(),
+            'tipDocBaja': _('Guía de Remisión Transportista') if orig.tipo_gre == '31'
+                          else _('Guía de Remisión Remitente'),
         }
 
     # ------------------------------------------------------------- emisión
@@ -639,6 +675,28 @@ class L10nPeNeGuiaRemision(models.Model):
         if self.tipo_gre == '09' and prefijo != 'T':
             raise UserError(_('Una guía de remitente (09) necesita una serie T### (la actual '
                               'es %s). Crea una guía nueva con el tipo correcto.') % (self.serie or '—'))
+        # Reemplazo (baja RS 123-2022): solo procede mientras la guía referenciada siga
+        # aceptada — si ya está 'anulado', otro reemplazo ganó y emitir este duplicaría
+        # la baja ante SUNAT. Aplica a ambos tipos (09 y 31), por eso va antes del return
+        # temprano del transportista.
+        if self.reemplaza_id:
+            if self.reemplaza_id.estado != 'enviado':
+                raise UserError(_('La guía a reemplazar (%s) ya no está aceptada por SUNAT '
+                                  '(estado: %s).') % (self.reemplaza_id.name, self.reemplaza_id.estado))
+            if self.reemplaza_id.tipo_gre != self.tipo_gre:
+                raise UserError(_('El reemplazo debe ser del mismo tipo de guía que %s.')
+                                % self.reemplaza_id.name)
+            # Anti doble-baja: un hermano en vuelo/aceptado (p. ej. este intento quedó en
+            # 'error', se creó otro y AQUEL ya se emitió) — re-emitir este aceptaría dos
+            # bajas ante SUNAT. El índice único parcial (ver init()) cubre además la
+            # carrera concurrente que este search no puede ver.
+            rival = self.search([('reemplaza_id', '=', self.reemplaza_id.id),
+                                 ('id', '!=', self.id),
+                                 ('estado', 'in', ('en_proceso', 'enviado'))], limit=1)
+            if rival:
+                raise UserError(_('Ya hay otro reemplazo de %s en curso o aceptado (%s); '
+                                  'consulta o descarta ese intento antes de emitir este.')
+                                % (self.reemplaza_id.name, rival.name))
         if not self.line_ids:
             raise UserError(_('La guía necesita al menos un bien.'))
         if not self.peso_bruto or self.peso_bruto <= 0:
@@ -900,6 +958,13 @@ class L10nPeNeGuiaRemision(models.Model):
         if code == '0':
             self.estado = 'enviado'
             self.l10n_pe_biller_message = _('Aceptada por SUNAT — CDR ResponseCode 0. %s') % (desc or '')
+            # Reemplazo aceptado => la guía referenciada queda dada de baja ante SUNAT.
+            # Cubre el camino síncrono y la re-consulta del ticket (ambos pasan por acá).
+            if self.reemplaza_id and self.reemplaza_id.estado == 'enviado':
+                self.reemplaza_id.write({
+                    'estado': 'anulado',
+                    'l10n_pe_biller_message': _('Dada de baja: reemplazada por %s.') % self.name,
+                })
             # Automatización (opt-in): al aceptarse, enviar la guía (XML + PDF + CDR) al correo
             # del destinatario. Gateado por config para no mandar correos sin querer; nunca rompe
             # la emisión (un fallo de correo se loguea y sigue). Espeja email_on_accept de factura.
@@ -1147,6 +1212,16 @@ class L10nPeNeGuiaRemision(models.Model):
             # reemplazo.
             'comprobantes': [{'id': m.id, 'numero': c._l10n_pe_ne_comprobante_numero(m)}
                              for m in (c.comprobante_ids or c.comprobante_id)],
+            # Reemplazo/baja: a quién reemplaza esta guía, y quién la reemplazó a ella
+            # (solo el reemplazo ACEPTADO cuenta — es el que la dejó 'anulado').
+            'reemplazaId': c.reemplaza_id.id if c.reemplaza_id else None,
+            'reemplazaNumero': c.reemplaza_id.name if c.reemplaza_id else '',
+            # El reemplazo vigente ('enviado') o, si ya fue reemplazado a su vez ('anulado'
+            # solo es alcanzable por un reemplazo que fue aceptado), el que sustentó la baja.
+            'reemplazadaPor': (self.search([('reemplaza_id', '=', c.id), ('estado', '=', 'enviado')],
+                                           limit=1)
+                               or self.search([('reemplaza_id', '=', c.id), ('estado', '=', 'anulado')],
+                                              limit=1)).name or '',
             'indTransbordo': c.ind_transbordo, 'indM1L': c.ind_m1l,
             'indRetornoEnvases': c.ind_retorno_envases, 'indRetornoVacio': c.ind_retorno_vacio,
             'fechaEntregaTransportista': c.fecha_entrega_transportista.strftime('%Y-%m-%d')
@@ -1426,8 +1501,54 @@ class L10nPeNeGuiaRemision(models.Model):
         if g:
             if g.estado == 'enviado':
                 raise UserError(_('No se puede eliminar una guía ya aceptada por SUNAT.'))
+            if g.estado == 'anulado':
+                raise UserError(_('No se puede eliminar una guía anulada: fue un documento '
+                                  'aceptado por SUNAT y sustenta la baja.'))
+            if g.estado == 'en_proceso':
+                # Ya fue firmada y ENVIADA (ticket pendiente): borrarla pierde el registro
+                # que aplicaría el CDR — y en un reemplazo, liberaría el guard de doble baja
+                # mientras SUNAT puede estar aceptándola.
+                raise UserError(_('No se puede eliminar una guía en proceso: ya fue enviada '
+                                  'a SUNAT y tiene un ticket pendiente. Consulta su estado '
+                                  'primero.'))
             g.unlink()
         return {'ok': True, 'modo': 'eliminado'}
+
+    @api.model
+    def l10n_pe_ne_reemplazar_guia(self, rec_id):
+        """Crea el BORRADOR de reemplazo de una guía aceptada (baja RS 123-2022): copia
+        bienes/transporte/comprobantes, referencia a la original en reemplaza_id y
+        re-estampa las fechas. NO emite nada: el usuario corrige lo que motivó la baja y
+        emite el borrador como cualquier guía; recién al aceptarse el reemplazo la
+        original pasa a 'anulado'. Devuelve el detalle del borrador (la SPA lo abre)."""
+        g = self.browse(int(rec_id or 0)).exists()
+        if not g:
+            raise UserError(_('Guía no encontrada.'))
+        if g.estado != 'enviado':
+            raise UserError(_('Solo se puede dar de baja una guía aceptada por SUNAT '
+                              '(estado actual: %s).') % g.estado)
+        en_curso = self.search([('reemplaza_id', '=', g.id),
+                                ('estado', 'in', ('borrador', 'en_proceso', 'enviado'))],
+                               limit=1)
+        if en_curso:
+            raise UserError(_('La guía %s ya tiene un reemplazo en curso (%s).')
+                            % (g.name, en_curso.name))
+        hoy = fields.Date.context_today(self)
+        n = g.copy({
+            'reemplaza_id': g.id,
+            # SUNAT valida las fechas contra el momento del envío (emitir re-estampa la
+            # emisión; el inicio de traslado copiado podría quedar en el pasado). La
+            # entrega al transportista (modalidad 01) también se re-estampa: heredarla
+            # semanas atrás del nuevo traslado es observación segura (SUNAT 3617).
+            'fecha_emision': hoy,
+            'fecha_inicio_traslado': hoy,
+            'fecha_entrega_transportista': hoy if g.fecha_entrega_transportista else False,
+            # comprobante_ids es copy=False (correcto para copias manuales); el reemplazo
+            # documenta el MISMO traslado, así que la relación se conserva explícita.
+            'comprobante_ids': [(6, 0, g.comprobante_ids.ids)],
+            'comprobante_id': g.comprobante_id.id,
+        })
+        return n.l10n_pe_ne_guia_detalle()
 
 
 class L10nPeNeGuiaRemisionLine(models.Model):

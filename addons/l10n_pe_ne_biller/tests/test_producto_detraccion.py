@@ -102,11 +102,10 @@ class TestProductoDetraccion(TransactionCase):
         self.assertEqual(p.l10n_pe_ne_detraccion_cod, '027')
         self.assertEqual(p.list_price, 999.0)
 
-    def test_import_columna_presente_celda_vacia_limpia_en_existente(self):
-        """Contracara del test anterior: acá la columna DETRACCIÓN SÍ viene en la plantilla
-        (está en `idx`), pero la celda para este CÓDIGO viene VACÍA — el usuario borró el
-        código a propósito. A diferencia de la columna AUSENTE (no se toca el campo), la
-        celda vacía CON columna presente sí debe limpiar el código de detracción ya guardado."""
+    def test_import_celda_vacia_mantiene_detraccion_en_existente(self):
+        """Re-import sobre un producto que YA tiene detracción, con la columna DETRACCIÓN presente
+        pero la celda VACÍA: NO se borra — 'vacío = mantener' (un re-import parcial, ej. solo para
+        subir el precio, no debe vaciar la detracción sin querer). Para quitarla se edita el producto."""
         import io, base64, xlsxwriter
 
         d = self.Move.l10n_pe_ne_create_producto({
@@ -118,9 +117,9 @@ class TestProductoDetraccion(TransactionCase):
         buf = io.BytesIO()
         wb = xlsxwriter.Workbook(buf, {"in_memory": True})
         ws = wb.add_worksheet("Productos")
-        # Columna DETRACCIÓN presente, celda vacía para el mismo CÓDIGO (DTR005).
+        # Columna DETRACCIÓN presente, celda vacía para el mismo CÓDIGO (DTR005) + precio nuevo.
         ws.write_row(0, 0, ["CÓDIGO", "NOMBRE", "UNIDAD", "PRECIO VENTA", "AFECTACIÓN", "DETRACCIÓN"])
-        ws.write_row(1, 0, ["DTR005", "ALQUILER DE ANDAMIOS", "UNIDAD", 300, "GRAVADO", ""])
+        ws.write_row(1, 0, ["DTR005", "ALQUILER DE ANDAMIOS", "UNIDAD", 999, "GRAVADO", ""])
         wb.close()
         res = self.Move.l10n_pe_ne_importar_productos({
             "contentB64": base64.b64encode(buf.getvalue()).decode(),
@@ -129,4 +128,5 @@ class TestProductoDetraccion(TransactionCase):
         self.assertFalse(res.get("errores"), res)
 
         p = self.env['product.product'].browse(d['id'])
-        self.assertFalse(p.l10n_pe_ne_detraccion_cod)
+        self.assertEqual(p.l10n_pe_ne_detraccion_cod, '022')  # se mantiene
+        self.assertEqual(p.list_price, 999.0)  # el precio sí se actualiza

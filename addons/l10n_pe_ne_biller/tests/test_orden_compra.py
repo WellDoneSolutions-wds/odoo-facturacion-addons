@@ -53,3 +53,26 @@ class TestOrdenCompra(TransactionCase):
         payload = self._move()._l10n_pe_build_invoice_request()
         rels = payload.get('relacionados', [])
         self.assertEqual([r for r in rels if r['indDocRelacionado'] == '3'], [])
+
+    def test_venta_estado_emite_4_propiedades_cat55(self):
+        # Ventas al Estado: las 4 propiedades cat-55 (5000-5003) como cac:AdditionalItemProperty,
+        # con codTipoVariable "-" para no disparar el descuento por ítem.
+        payload = self._move(
+            l10n_pe_ne_estado_expediente='EXP-1',
+            l10n_pe_ne_estado_unidad_ejecutora='UE-1',
+            l10n_pe_ne_estado_proceso_seleccion='PS-1',
+            l10n_pe_ne_estado_contrato='CTO-1')._l10n_pe_build_invoice_request()
+        props = [d for d in payload['adicionalDetalle'] if d.get('nomPropiedad', '-') != '-']
+        self.assertEqual(sorted(p['codPropiedad'] for p in props), ['5000', '5001', '5002', '5003'])
+        for p in props:
+            self.assertEqual(p['codTipoVariable'], '-')
+            self.assertEqual(p['idLinea'], '1')  # una sola línea de producto
+
+    def test_venta_estado_es_todo_o_nada(self):
+        # SUNAT 3146-3149 exige las 4 juntas: con 3 de 4 no se emite ninguna.
+        payload = self._move(
+            l10n_pe_ne_estado_expediente='EXP-1',
+            l10n_pe_ne_estado_unidad_ejecutora='UE-1',
+            l10n_pe_ne_estado_proceso_seleccion='PS-1')._l10n_pe_build_invoice_request()
+        props = [d for d in payload.get('adicionalDetalle', []) if d.get('nomPropiedad', '-') != '-']
+        self.assertEqual(props, [])

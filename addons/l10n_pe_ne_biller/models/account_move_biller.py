@@ -922,6 +922,21 @@ class AccountMove(models.Model):
         help="Número de orden de compra del cliente (opcional). Se emite como "
         "cac:OrderReference/cbc:ID (documento relacionado ind. 3), típico en ventas B2B.",
     )
+    # Ventas al Estado (proveedor del Estado): datos del proceso de contratación pública que
+    # SUNAT exige como cac:AdditionalItemProperty (catálogo 55, códigos 5000-5003) en CADA línea.
+    # Las reglas SUNAT 3146-3149 los validan como GRUPO: van los 4 juntos o ninguno.
+    l10n_pe_ne_estado_expediente = fields.Char(
+        string="N° de expediente (Estado)", copy=False,
+        help="Ventas al Estado: número de expediente (cat. 55 cód. 5000).")
+    l10n_pe_ne_estado_unidad_ejecutora = fields.Char(
+        string="Código de unidad ejecutora (Estado)", copy=False,
+        help="Ventas al Estado: código de unidad ejecutora (cat. 55 cód. 5001).")
+    l10n_pe_ne_estado_proceso_seleccion = fields.Char(
+        string="N° de proceso de selección (Estado)", copy=False,
+        help="Ventas al Estado: número de proceso de selección/licitación (cat. 55 cód. 5002).")
+    l10n_pe_ne_estado_contrato = fields.Char(
+        string="N° de contrato (Estado)", copy=False,
+        help="Ventas al Estado: número de contrato (cat. 55 cód. 5003).")
     # Proyecto/contrato (facturación por avance de obra): controla que la suma de las
     # valorizaciones no supere el valor total del contrato (QA-039).
     l10n_pe_ne_proyecto_id = fields.Many2one(
@@ -1695,6 +1710,34 @@ class AccountMove(models.Model):
                     "mtoBaseImpVariable": fmt(gross),
                 }
             )
+        # Ventas al Estado: 4 propiedades del proceso de contratación pública (cat. 55) por CADA
+        # línea, como cac:AdditionalItemProperty. SUNAT (reglas 3146-3149) las valida como GRUPO:
+        # van las 4 juntas o ninguna → solo se emiten si están las 4 completas.
+        estado = [
+            ("5000", "Numero de Expediente", self.l10n_pe_ne_estado_expediente),
+            ("5001", "Codigo de Unidad Ejecutora", self.l10n_pe_ne_estado_unidad_ejecutora),
+            ("5002", "Numero de Proceso de Seleccion", self.l10n_pe_ne_estado_proceso_seleccion),
+            ("5003", "Numero de Contrato", self.l10n_pe_ne_estado_contrato),
+        ]
+        if all((v or "").strip() for _c, _n, v in estado):
+            for li in range(1, idx + 1):  # idx = nº de líneas de producto contadas arriba
+                for cod, nom, val in estado:
+                    out.append(
+                        {
+                            "idLinea": str(li),
+                            # no es descuento/cargo: "-" salta el loop de AllowanceCharge por ítem
+                            "codTipoVariable": "-",
+                            # dispara el bloque cac:AdditionalItemProperty en el FTL
+                            "nomPropiedad": nom,
+                            "codPropiedad": cod,
+                            "valPropiedad": val.strip(),
+                            "codBienPropiedad": "-",
+                            "fecInicioPropiedad": "-",
+                            "horInicioPropiedad": "-",
+                            "fecFinPropiedad": "-",
+                            "numDiasPropiedad": "-",
+                        }
+                    )
         return out
 
     def _l10n_pe_build_note_request(self):
@@ -5644,6 +5687,13 @@ class AccountMove(models.Model):
         # Orden de compra del cliente (cac:OrderReference).
         if payload.get("ordenCompra"):
             move.l10n_pe_ne_orden_compra = str(payload["ordenCompra"]).strip()
+        # Ventas al Estado (proveedor del Estado): 4 datos del proceso de contratación pública.
+        ve = payload.get("ventaEstado") or {}
+        if ve:
+            move.l10n_pe_ne_estado_expediente = (ve.get("expediente") or "").strip()
+            move.l10n_pe_ne_estado_unidad_ejecutora = (ve.get("unidadEjecutora") or "").strip()
+            move.l10n_pe_ne_estado_proceso_seleccion = (ve.get("procesoSeleccion") or "").strip()
+            move.l10n_pe_ne_estado_contrato = (ve.get("contrato") or "").strip()
         # Guía de remisión referenciada (DespatchDocumentReference).
         if payload.get("guiaRef"):
             move.l10n_pe_ne_guia_ref = payload["guiaRef"]

@@ -41,9 +41,16 @@
         <field name="l10n_pe_ne_percepcion_rate" invisible="not l10n_pe_ne_percepcion"/>
         <field name="l10n_pe_ne_es_anticipo" invisible="move_type != 'out_invoice'"/>
         <field name="l10n_pe_ne_anticipo_saldo" invisible="not l10n_pe_ne_es_anticipo"/>
+        <!-- Forma de pago SUNAT (Contado/Crédito) y sus cuotas: se completan desde la app
+             (quick_emit/API), acá van solo lectura para consulta/auditoría del contador. El
+             vencimiento (cbc:DueDate) se ve en el campo nativo invoice_date_due de la cabecera:
+             al crédito lo fija la última cuota, al contado el plazo opcional del emisor. -->
+        <field name="l10n_pe_ne_forma_pago" readonly="1"
+               invisible="move_type not in ('out_invoice', 'out_refund')"/>
+        <field name="l10n_pe_ne_cuotas_display" readonly="1"
+               invisible="l10n_pe_ne_forma_pago != 'Credito'"/>
         <!-- l10n_pe_ne_anticipos (lista JSON de anticipos regularizados) no tiene widget de
-             edición de lista en el form de Odoo; se completa vía quick_emit/API (mismo patrón
-             que l10n_pe_ne_cuotas / l10n_pe_ne_medios_pago, tampoco expuestos aquí). -->
+             edición de lista en el form de Odoo; se completa vía quick_emit/API. -->
         <field name="l10n_pe_ne_baja_motivo" invisible="l10n_pe_biller_state not in ('enviado', 'anulado')"/>
         <field name="l10n_pe_ne_baja_doc" readonly="1" invisible="not l10n_pe_ne_baja_doc"/>
         <field name="l10n_pe_biller_xml" readonly="1" invisible="not l10n_pe_biller_xml"/>

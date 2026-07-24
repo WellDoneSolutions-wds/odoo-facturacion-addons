@@ -4828,11 +4828,11 @@ class AccountMove(models.Model):
         import base64
         import xlsxwriter
 
-        headers = ["CÓDIGO", "CÓDIGO DE BARRAS", "NOMBRE", "UNIDAD", "PRECIO VENTA", "COSTO", "AFECTACIÓN", "BOLSA", "DETRACCIÓN", "PERCEPCION %"]
+        headers = ["CÓDIGO", "CÓDIGO DE BARRAS", "NOMBRE", "UNIDAD", "PRECIO VENTA", "COSTO", "AFECTACIÓN", "BOLSA", "DETRACCIÓN"]
         ejemplos = [
-            ["PROD0001", "7751234000018", "CEMENTO SOL 42.5 KG", "UNIDAD", 33.90, 28.00, "GRAVADO", "NO", "", ""],
-            ["PROD0002", "7751234000025", "FIERRO CORRUGADO 1/2 PULG", "KILOGRAMO", 4.50, 3.20, "GRAVADO", "NO", "", ""],
-            ["PROD0004", "", "BOLSA PLÁSTICA", "UNIDAD", 0.50, 0.10, "GRAVADO", "SI", "", ""],
+            ["PROD0001", "7751234000018", "CEMENTO SOL 42.5 KG", "UNIDAD", 33.90, 28.00, "GRAVADO", "NO", ""],
+            ["PROD0002", "7751234000025", "FIERRO CORRUGADO 1/2 PULG", "KILOGRAMO", 4.50, 3.20, "GRAVADO", "NO", ""],
+            ["PROD0004", "", "BOLSA PLÁSTICA", "UNIDAD", 0.50, 0.10, "GRAVADO", "SI", ""],
         ]
         buf = io.BytesIO()
         wb = xlsxwriter.Workbook(buf, {"in_memory": True})
@@ -4867,9 +4867,6 @@ class AccountMove(models.Model):
         ws.write_comment(0, 8, (
             "Opcional. Código cat. 54 de SUNAT si el producto está sujeto a detracción "
             "(ej. 027 transporte de carga). Vacío = no sujeto."), note)
-        ws.write_comment(0, 9, (
-            "Opcional. % de percepción sugerido si el bien está en el Apéndice 1 "
-            "(2 general, 1 combustibles). Vacío = no sujeto."), note)
         # Desplegable (select) para UNIDAD, con ayuda al hacer clic en la celda.
         ws.data_validation(1, 3, 1000, 3, {
             "validate": "list", "source": [
@@ -4912,8 +4909,7 @@ class AccountMove(models.Model):
             "6. 'COSTO' es opcional (precio de compra, referencial). No afecta la facturación.",
             "7. 'BOLSA' = SI solo para bolsas plásticas (cobran ICBPER por unidad al venderlas). Para el resto: NO o vacío.",
             "8. 'DETRACCIÓN' es opcional: código cat. 54 de SUNAT (3 dígitos, ej. 027 transporte de carga) si el producto está sujeto a detracción. Vacío = no sujeto.",
-            "9. 'PERCEPCION %' es opcional: % de percepción sugerido si el bien está en el Apéndice 1 (2 general, 1 combustibles). Vacío = no sujeto.",
-            "10. Sube el archivo, revisa el resumen (nuevos / actualizados / errores) y recién ahí confirma.",
+            "9. Sube el archivo, revisa el resumen (nuevos / actualizados / errores) y recién ahí confirma.",
         ]):
             wi.write(r, 0, line)
         wb.close()
@@ -5071,20 +5067,6 @@ class AccountMove(models.Model):
             if detra_raw and not re.fullmatch(r"[0-9]{3}", detra_raw):
                 errores.append({"fila": n, "msg": "DETRACCIÓN debe ser el código de 3 dígitos del catálogo 54 (ej. 027) o vacío"})
                 continue
-            percep_raw = txt(cell(row, "percepcion %"))
-            # 0 = "no sujeto" (help del campo / percepTasa: 0 en la API): limpia el campo igual
-            # que la celda vacía, NO es un valor inválido. Solo <0, >10 o no-numérico son error
-            # de fila (y ahí sí se descarta la fila completa, incluido precio/nombre).
-            percep_val = False
-            if percep_raw:
-                try:
-                    percep_num = float(percep_raw.replace(",", "."))
-                except ValueError:
-                    percep_num = None
-                if percep_num is None or percep_num < 0 or percep_num > 10:
-                    errores.append({"fila": n, "msg": "PERCEPCION % debe ser un número mayor a 0 y hasta 10 (ej. 2), 0/vacío para no sujeto."})
-                    continue
-                percep_val = percep_num or False  # 0 limpia el campo, igual que vacío
             barcode = txt(cell(row, "codigo de barras"))
             bolsa = norm(cell(row, "bolsa")) in ("si", "s")  # ICBPER: SI/NO (vacío = NO)
 
@@ -5108,8 +5090,6 @@ class AccountMove(models.Model):
             # códigos de detracción ya guardados vía existing.write(vals).
             if "detraccion" in idx:
                 vals["l10n_pe_ne_detraccion_cod"] = detra_raw or False
-            if "percepcion %" in idx:
-                vals["l10n_pe_ne_percepcion_tasa"] = percep_val
             if precio is not None:
                 vals["list_price"] = precio
             if costo is not None:

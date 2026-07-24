@@ -45,12 +45,14 @@ class TestBillerAnticipo(TransactionCase):
         # valor 500 + IGV 90 = 590; anticipo 118 (valor 100 + IGV 18).
         payload = self._move(anticipo_total=118.0)._l10n_pe_build_invoice_request()
 
-        # 1) Descuento global código 04: monto = valor del anticipo, base = valor de venta completo.
+        # 1) Descuento global código 04 con FACTOR UNITARIO: base = monto = valor del anticipo, factor 1.
+        #    Así base × factor = monto exacto para cualquier importe → regla SUNAT 4322 pasa siempre
+        #    (antes: base = base de venta, factor = valor/base a 5 dec, que en base alta se desviaba > 1).
         vg = [v for v in payload['variablesGlobales'] if v['codTipoVariableGlobal'] == '04']
         self.assertEqual(len(vg), 1)
         self.assertEqual(vg[0]['mtoVariableGlobal'], '100.00')
-        self.assertEqual(vg[0]['mtoBaseImpVariableGlobal'], '500.00')
-        self.assertEqual(vg[0]['porVariableGlobal'], '0.20000')  # 5 decimales (SUNAT 3307)
+        self.assertEqual(vg[0]['mtoBaseImpVariableGlobal'], '100.00')  # base del descuento = el valor
+        self.assertEqual(vg[0]['porVariableGlobal'], '1.00000')
         self.assertEqual(vg[0]['tipVariableGlobal'], 'false')
 
         # 2) Tributo IGV de cabecera sobre la base reducida (500 − 100 = 400 → IGV 72).

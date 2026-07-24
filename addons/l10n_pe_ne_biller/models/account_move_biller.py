@@ -690,20 +690,22 @@ class AccountMove(models.Model):
         ant = self._l10n_pe_anticipo()
         if ant:
             valor, _igv, _total = ant
-            base = self.amount_untaxed or 0.0
+            # Descuento 04 con FACTOR UNITARIO: base = el propio valor del anticipo, factor 1.00000,
+            # monto = valor. Así base × factor = monto EXACTO para cualquier importe, y la regla SUNAT
+            # 4322 (|monto − base × factor| ≤ 1) pasa siempre. Antes se emitía base = base completa de la
+            # operación con el factor a 5 decimales (valor/base): en operaciones de base alta (≳ S/ 200.000)
+            # el redondeo del factor multiplicado por la base se desviaba > 1 sol y SUNAT rechazaba con
+            # 4322. El IGV/base de cabecera NO cambian: SUNAT reduce la base gravada con el `Amount`
+            # (mtoVariableGlobal = valor), no con el BaseAmount de este descuento.
             out.append(
                 {
                     "tipVariableGlobal": "false",
                     "codTipoVariableGlobal": "04",
-                    # Factor con 5 decimales: SUNAT valida mtoVariableGlobal ≈ base × por (tolerancia
-                    # ~±1, error 3307). Con solo 2 decimales, un anticipo parcial cuyo valor no es
-                    # fracción redonda de la base (p.ej. 254.24 sobre 1000 → 0.25) descuadra y se
-                    # rechaza; 5 decimales reconstruyen el monto dentro de la tolerancia.
-                    "porVariableGlobal": "%.5f" % (valor / base if base else 0.0),
+                    "porVariableGlobal": "1.00000",
                     "monMontoVariableGlobal": moneda,
                     "mtoVariableGlobal": fmt(valor),
                     "monBaseImponibleVariableGlobal": moneda,
-                    "mtoBaseImpVariableGlobal": fmt(base),
+                    "mtoBaseImpVariableGlobal": fmt(valor),
                 }
             )
         # Descuento global que NO afecta la base del IGV (código del facturador en

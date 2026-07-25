@@ -1770,7 +1770,12 @@ class AccountMove(models.Model):
                     )
         # Placa del vehículo (factura de combustible): cac:AdditionalItemProperty cat-55 código 7000
         # (Gastos Art. 37 Renta) en CADA línea. Solo factura (la deducción Art. 37 es factura-only).
-        if self.l10n_pe_ne_placa and (self.l10n_pe_ne_tipo_doc or "01") == "01":
+        # l10n_pe_ne_tipo_doc recién se congela al emitir (_l10n_pe_apply_emission_response /
+        # _l10n_pe_apply_signed): en la primera emisión, mientras se arma este payload, todavía
+        # está vacío. Usar `or "01"` aquí lo hacía SIEMPRE factura y filtraba la placa también
+        # en boletas. El idioma correcto (igual que en el resto del archivo) es
+        # `l10n_pe_ne_tipo_doc or _l10n_pe_document_type()`.
+        if self.l10n_pe_ne_placa and (self.l10n_pe_ne_tipo_doc or self._l10n_pe_document_type()) == "01":
             for li in range(1, idx + 1):
                 out.append({
                     "idLinea": str(li),

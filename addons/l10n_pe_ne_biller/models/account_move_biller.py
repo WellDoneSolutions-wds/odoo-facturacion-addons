@@ -937,6 +937,12 @@ class AccountMove(models.Model):
         help="Número de orden de compra del cliente (opcional). Se emite como "
         "cac:OrderReference/cbc:ID (documento relacionado ind. 3), típico en ventas B2B.",
     )
+    l10n_pe_ne_placa = fields.Char(
+        string="Placa del vehículo",
+        copy=False,
+        help="Solo factura de combustible: número de placa del vehículo. Se emite como "
+        "cac:AdditionalItemProperty (catálogo 55, código 7000 «Gastos Art. 37 Renta: Número de "
+        "Placa») en cada línea, para sustentar la deducción del gasto.")
     # Ventas al Estado (proveedor del Estado): datos del proceso de contratación pública que
     # SUNAT exige como cac:AdditionalItemProperty (catálogo 55, códigos 5000-5003) en CADA línea.
     # Las reglas SUNAT 3146-3149 los validan como GRUPO: van los 4 juntos o ninguno.
@@ -1762,6 +1768,22 @@ class AccountMove(models.Model):
                             "numDiasPropiedad": "-",
                         }
                     )
+        # Placa del vehículo (factura de combustible): cac:AdditionalItemProperty cat-55 código 7000
+        # (Gastos Art. 37 Renta) en CADA línea. Solo factura (la deducción Art. 37 es factura-only).
+        if self.l10n_pe_ne_placa and (self.l10n_pe_ne_tipo_doc or "01") == "01":
+            for li in range(1, idx + 1):
+                out.append({
+                    "idLinea": str(li),
+                    "codTipoVariable": "-",
+                    "nomPropiedad": "Numero de Placa",
+                    "codPropiedad": "7000",
+                    "valPropiedad": self.l10n_pe_ne_placa.strip(),
+                    "codBienPropiedad": "-",
+                    "fecInicioPropiedad": "-",
+                    "horInicioPropiedad": "-",
+                    "fecFinPropiedad": "-",
+                    "numDiasPropiedad": "-",
+                })
         return out
 
     def _l10n_pe_build_note_request(self):
@@ -5754,6 +5776,8 @@ class AccountMove(models.Model):
         # Orden de compra del cliente (cac:OrderReference).
         if payload.get("ordenCompra"):
             move.l10n_pe_ne_orden_compra = str(payload["ordenCompra"]).strip()
+        if payload.get("placa"):
+            move.l10n_pe_ne_placa = str(payload["placa"]).strip().upper()
         # Ventas al Estado (proveedor del Estado): 4 datos del proceso de contratación pública.
         ve = payload.get("ventaEstado") or {}
         if ve:

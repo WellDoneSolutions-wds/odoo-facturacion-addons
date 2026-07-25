@@ -2,3 +2,4 @@ from . import test_boto_reuse, test_install, test_mapper, test_send, test_docume
 from . import test_orden_compra
 from . import test_vencimiento
 from . import test_import_productos
+from . import test_placa

@@ -943,6 +943,12 @@ class AccountMove(models.Model):
         help="Solo factura de combustible: número de placa del vehículo. Se emite como "
         "cac:AdditionalItemProperty (catálogo 55, código 7000 «Gastos Art. 37 Renta: Número de "
         "Placa») en cada línea, para sustentar la deducción del gasto.")
+    l10n_pe_ne_cliente_nombre = fields.Char(
+        string="Nombre del cliente en el comprobante",
+        copy=False,
+        help="Override por-comprobante de la razón social del cliente (solo boleta ≤700: constancia "
+        "institucional). Si está seteado, se emite en rznSocialUsuario en vez del nombre del partner, "
+        "sin renombrar el partner del DNI.")
     # Ventas al Estado (proveedor del Estado): datos del proceso de contratación pública que
     # SUNAT exige como cac:AdditionalItemProperty (catálogo 55, códigos 5000-5003) en CADA línea.
     # Las reglas SUNAT 3146-3149 los validan como GRUPO: van los 4 juntos o ninguno.
@@ -1518,7 +1524,7 @@ class AccountMove(models.Model):
             "codLocalEmisor": (self.l10n_pe_ne_cod_establecimiento or "0000"),
             "tipDocUsuario": self._l10n_pe_cliente_doc()[0],
             "numDocUsuario": self._l10n_pe_cliente_doc()[1],
-            "rznSocialUsuario": partner.name or "",
+            "rznSocialUsuario": self.l10n_pe_ne_cliente_nombre or partner.name or "",
             "tipMoneda": self.currency_id.name or "PEN",
             # El IGV teórico del gratuito NO se cobra: NO entra en el total de tributos de cabecera
             # (regla 4301: el TaxAmount de cabecera excluye el 9996). El 9996 va solo como TaxSubtotal.
@@ -5781,6 +5787,12 @@ class AccountMove(models.Model):
         # Orden de compra del cliente (cac:OrderReference).
         if payload.get("ordenCompra"):
             move.l10n_pe_ne_orden_compra = str(payload["ordenCompra"]).strip()
+        # Razón social override por-comprobante: solo boleta (03), constancia institucional. NO renombra
+        # el partner (que ya existe con su nombre RENIEC al llegar acá; ver diseño).
+        if (payload.get("tipoDoc") or "01") == "03":
+            cn = ((payload.get("cliente") or {}).get("razonSocial") or "").strip()
+            if cn:
+                move.l10n_pe_ne_cliente_nombre = cn
         if payload.get("placa"):
             move.l10n_pe_ne_placa = str(payload["placa"]).strip().upper()
         # Ventas al Estado (proveedor del Estado): 4 datos del proceso de contratación pública.

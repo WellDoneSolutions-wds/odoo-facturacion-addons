@@ -3,3 +3,4 @@ from . import test_orden_compra
 from . import test_vencimiento
 from . import test_import_productos
 from . import test_placa
+from . import test_razon_social_boleta

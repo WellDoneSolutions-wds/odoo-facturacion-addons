@@ -1,3 +1,5 @@
+import json
+
 from odoo.tests import TransactionCase, tagged
 from odoo.exceptions import AccessError, UserError
 
@@ -104,3 +106,26 @@ class TestPasswordResetRoutes(HttpCase):
         r = self.url_open('/ne/api/change-password', data='{}',
                           headers={'Content-Type': 'application/json'})
         self.assertEqual(r.status_code, 401)
+
+    def test_change_password_rotates_token(self):
+        user = self.env['res.users'].create({
+            'name': 'Rot User', 'login': 'pr_rot_user', 'password': 'oldpass12',
+            'group_ids': [(4, self.env.ref('base.group_user').id)],
+        })
+        old_token = self.env['res.users.apikeys'].with_user(user).sudo()._generate('l10n_pe_ne', 'test', False)
+        r = self.url_open(
+            '/ne/api/change-password',
+            data=json.dumps({'current': 'oldpass12', 'new': 'nuevapass99'}),
+            headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ' + old_token},
+        )
+        self.assertEqual(r.status_code, 200)
+        d = r.json()
+        self.assertTrue(d.get('ok'))
+        self.assertTrue(d.get('token'), 'la respuesta debe traer el token rotado')
+        self.assertTrue(d.get('expires'))
+        self.assertNotEqual(d['token'], old_token)
+        # El token viejo quedó revocado; el rotado autentica.
+        r_old = self.url_open('/ne/api/whoami', headers={'Authorization': 'Bearer ' + old_token})
+        self.assertEqual(r_old.status_code, 401)
+        r_new = self.url_open('/ne/api/whoami', headers={'Authorization': 'Bearer ' + d['token']})
+        self.assertEqual(r_new.status_code, 200)

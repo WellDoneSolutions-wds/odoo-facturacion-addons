@@ -16,7 +16,7 @@ except ImportError:  # pragma: no cover
 
 from odoo import _, api, fields, models
 from odoo.exceptions import UserError
-from odoo.tools import float_round
+from odoo.tools import float_round, html2plaintext
 
 from ..tools.amount_to_words import leyenda_monto
 
@@ -6131,7 +6131,7 @@ class AccountMove(models.Model):
         """Observación general del comprobante para la representación impresa (ticket + A4).
         Print-only (NO va al XML firmado). Devuelve 'Observación: <texto>' o '' si no hay nota."""
         self.ensure_one()
-        nota = re.sub("<[^>]+>", " ", self.narration or "").strip()
+        nota = html2plaintext(self.narration or "").strip()
         return ("Observación: " + nota) if nota else ""
 
     def _l10n_pe_ne_ticket_adicional(self):

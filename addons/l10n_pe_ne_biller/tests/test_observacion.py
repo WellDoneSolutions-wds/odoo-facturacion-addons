@@ -37,6 +37,11 @@ class TestObservacion(TransactionCase):
         m = self._move(narration='<p>NOTA</p>')
         self.assertEqual(m._l10n_pe_ne_observacion_impresa(), 'Observación: NOTA')
 
+    def test_observacion_impresa_desescapa_entidades(self):
+        # Odoo fields.Html escapa los ampersands (&) como &amp;; html2plaintext debe desescapar.
+        m = self._move(narration='<p>A &amp; B</p>')
+        self.assertEqual(m._l10n_pe_ne_observacion_impresa(), 'Observación: A & B')
+
     def test_quick_flags_setea_narration(self):
         m = self._move()
         self.env['account.move']._l10n_pe_ne_quick_flags(m, {'observacion': 'PAGO EN 30 DIAS'})

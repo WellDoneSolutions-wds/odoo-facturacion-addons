@@ -16,7 +16,7 @@ except ImportError:  # pragma: no cover
 
 from odoo import _, api, fields, models
 from odoo.exceptions import UserError
-from odoo.tools import float_round
+from odoo.tools import float_round, html2plaintext
 
 from ..tools.amount_to_words import leyenda_monto
 
@@ -5787,6 +5787,10 @@ class AccountMove(models.Model):
         # Orden de compra del cliente (cac:OrderReference).
         if payload.get("ordenCompra"):
             move.l10n_pe_ne_orden_compra = str(payload["ordenCompra"]).strip()
+        # Observación general (print-only): va a narration y sale como "Observación: <texto>"
+        # en el ticket y el A4 (adicionalTxt). NO va al XML firmado.
+        if payload.get("observacion"):
+            move.narration = payload["observacion"]
         # Razón social override por-comprobante: solo boleta (03), constancia institucional. NO renombra
         # el partner (que ya existe con su nombre RENIEC al llegar acá; ver diseño).
         if (payload.get("tipoDoc") or "01") == "03":
@@ -6123,11 +6127,18 @@ class AccountMove(models.Model):
 
         return ", ".join(_txt(m) for m in medios if float(m.get("monto") or 0) > 0)
 
+    def _l10n_pe_ne_observacion_impresa(self):
+        """Observación general del comprobante para la representación impresa (ticket + A4).
+        Print-only (NO va al XML firmado). Devuelve 'Observación: <texto>' o '' si no hay nota."""
+        self.ensure_one()
+        nota = html2plaintext(self.narration or "").strip()
+        return ("Observación: " + nota) if nota else ""
+
     def _l10n_pe_ne_ticket_adicional(self):
         """Bloque de pago del ticket 80mm (se manda como `adicionalTxt`): medios de pago del
-        POS, vuelto, cajero y nota. Estos datos NO van al XML SUNAT (son internos del punto de
-        venta), pero sí a la representación impresa. Devuelve HTML simple (el textField usa
-        markup html) o "" si no hay nada que mostrar."""
+        POS, vuelto, cajero y observación. Estos datos NO van al XML SUNAT (son internos del
+        punto de venta), pero sí a la representación impresa. Devuelve HTML simple (el textField
+        usa markup html) o "" si no hay nada que mostrar."""
         self.ensure_one()
         partes = []
         medios = self.l10n_pe_ne_medios_pago or []
@@ -6147,9 +6158,9 @@ class AccountMove(models.Model):
                 partes.append("Vuelto: S/ %.2f" % vuelto)
         if self.invoice_user_id:
             partes.append("Atendido por: " + (self.invoice_user_id.name or ""))
-        nota = re.sub("<[^>]+>", " ", self.narration or "").strip()
-        if nota:
-            partes.append("Nota: " + nota)
+        obs = self._l10n_pe_ne_observacion_impresa()
+        if obs:
+            partes.append(obs)
         # El micro (sanitizarAdicional) escapa el HTML y traduce '\n' -> <br/>; se envía texto plano.
         return "\n".join(partes)
 
@@ -6223,6 +6234,11 @@ class AccountMove(models.Model):
             )
             if contacto:
                 payload["contactoEmisor"] = contacto
+        else:
+            # A4: solo la observación (no el bloque POS de pago/vuelto/cajero).
+            obs = self._l10n_pe_ne_observacion_impresa()
+            if obs:
+                payload["adicionalTxt"] = obs
         headers = {"X-Api-Key": self.company_id.sudo().l10n_pe_ne_api_key or ""}
         try:
             resp = requests.post(

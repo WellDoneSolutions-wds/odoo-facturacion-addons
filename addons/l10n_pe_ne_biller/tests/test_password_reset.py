@@ -64,6 +64,12 @@ class TestPasswordReset(TransactionCase):
         self.assertEqual(res, {'ok': True})
         self.assertFalse(self.user_a.l10n_pe_ne_must_change_password)
 
+    def test_change_own_revokes_apikeys(self):
+        self.env['res.users.apikeys'].with_user(self.user_a).sudo()._generate('l10n_pe_ne', 'test', False)
+        self.assertTrue(self.env['res.users.apikeys'].sudo().search([('user_id', '=', self.user_a.id)]))
+        self.env['res.users'].with_user(self.user_a).l10n_pe_ne_change_own_password('oldpass12', 'nuevapass56')
+        self.assertFalse(self.env['res.users.apikeys'].sudo().search([('user_id', '=', self.user_a.id)]))
+
     def test_list_users_non_admin_raises(self):
         with self.assertRaises(AccessError):
             self.env['res.users'].with_user(self.user_a).l10n_pe_ne_list_manageable_users()

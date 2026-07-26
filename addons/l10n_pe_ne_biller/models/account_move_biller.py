@@ -16,7 +16,7 @@ except ImportError:  # pragma: no cover
 
 from odoo import _, api, fields, models
 from odoo.exceptions import AccessError, UserError
-from odoo.tools import float_round
+from odoo.tools import float_round, html2plaintext
 
 from ..tools.amount_to_words import leyenda_monto
 
@@ -25,6 +25,14 @@ _logger = logging.getLogger(__name__)
 # Cache de clientes boto3 por (service, region) — ver _l10n_pe_boto_client.
 # Guarda (módulo_boto3, cliente) para invalidarse solo si boto3 fue parcheado.
 _BOTO_CLIENTS = {}
+
+# Descuento global que NO afecta la base imponible del IGV (AllowanceChargeReasonCode, cat. 53).
+# CONFIRMADO contra el validador SUNAT (ValidaExprRegFactura-2.0.1.xsl) y beta (spike 2026-07-21):
+# el código "03" es el que el validador cuenta en `descuentosGlobalesNOAfectaBI` (línea 335) y NO
+# resta de la base del IGV; el "02" cae en `MontoDescuentoAfectoBI` (SÍ afecta la base) → daba
+# error 3291 (esperaba el IGV sobre la base ya descontada). Con "03" el IGV queda sobre el precio
+# lleno y baja solo el MtoImpVenta.
+DESC_GLOBAL_NO_AFECTA_COD = "03"
 
 # Catálogo SUNAT de descripciones de motivo para Nota de Débito (08).
 ND_MOTIVO_DESC = {
@@ -116,12 +124,34 @@ AFECT_IMPORT = {
     "exportacion": "9995",
     "gratuito": "9996", "gratuita": "9996",
 }
+# Bien/servicio (tipo Odoo → stock) desde el Excel. Vacío = deducir de la unidad (ZZ → servicio).
+TIPO_IMPORT = {
+    "bien": "bien", "bienes": "bien", "producto": "bien", "b": "bien",
+    "servicio": "servicio", "servicios": "servicio", "serv": "servicio", "s": "servicio",
+}
 # Códigos cat.03 válidos (para aceptar el código directo en el Excel, ej. "KGM").
 _UNIDAD_CODES = set(UNIDAD_IMPORT.values())
 
 
+def _percep_float(v):
+    """float() de percepTasa que no revienta con un 500 críptico: tolera coma decimal (igual
+    que el import masivo) y, si no es numérico, da un UserError legible en vez de un
+    ValueError sin traducir. Vacío/None/False → 0.0 (limpia el campo, mismo criterio de
+    siempre)."""
+    if v in (None, "", False):
+        return 0.0
+    try:
+        return float(str(v).replace(",", "."))
+    except (TypeError, ValueError):
+        raise UserError(_("La percepción sugerida debe ser un número (ej. 2 o 1.5)."))
+
+
 class AccountMoveLine(models.Model):
     _inherit = "account.move.line"
+
+    # Cantidad con 3 decimales (SUNAT admite hasta 10 en ctdUnidadItem). Por defecto la precisión
+    # de UoM de Odoo es 2 y truncaba la venta al peso de balanza (18.375 kg -> 18.38). Ver QA-020.
+    quantity = fields.Float(digits=(16, 3))
 
     # Overrides SUNAT por línea para el flujo rápido (sin depender de la UoM/producto de Odoo,
     # evitando el problema de categorías de unidad de medida).
@@ -255,22 +285,13 @@ class AccountMove(models.Model):
     l10n_pe_ne_percepcion_rate = fields.Float(
         string="% Percepción", digits=(5, 2), default=2.0, copy=False
     )
-    l10n_pe_ne_anticipo_total = fields.Monetary(
-        string="Anticipo aplicado (total con IGV)",
+    l10n_pe_ne_anticipos = fields.Json(
+        string="Anticipos regularizados",
         copy=False,
-        help="Importe del anticipo (IGV incluido) ya facturado que se regulariza/deduce en esta factura.",
-    )
-    l10n_pe_ne_anticipo_doc = fields.Char(
-        string="Comprobante de anticipo",
-        copy=False,
-        help="Serie-correlativo de la factura de anticipo (ej. F001-00000100).",
-    )
-    l10n_pe_ne_anticipo_tipo = fields.Selection(
-        [("02", "Factura de anticipo"), ("03", "Boleta de anticipo")],
-        string="Tipo doc. anticipo",
-        default="02",
-        copy=False,
-        help="Tipo del comprobante de anticipo que se regulariza (cat. 12).",
+        help="Lista de anticipos (doc. A) que ESTA venta final regulariza/deduce. Cada elemento: "
+        "{doc: serie-correlativo, monto: importe con IGV, tipo: '02'/'03' (cat. 12), "
+        "origenId: id del anticipo local enlazado o null si se emitió por fuera}. SUNAT permite "
+        "varios (pagos escalonados): se emiten como N documentos relacionados con numIdeAnticipo 1..N.",
     )
     l10n_pe_ne_es_anticipo = fields.Boolean(
         string="Es pago anticipado",
@@ -280,15 +301,6 @@ class AccountMove(models.Model):
         "anticipado; su descripción lleva 'PAGO ANTICIPADO' y queda disponible para regularizarse "
         "luego en la factura de venta final. No confundir con el anticipo aplicado, que descuenta "
         "un anticipo ya emitido (doc. B).",
-    )
-    l10n_pe_ne_anticipo_origen_id = fields.Many2one(
-        "account.move",
-        string="Anticipo regularizado",
-        copy=False,
-        help="Comprobante de anticipo (doc. A) que ESTA venta final regulariza. Lo fija el "
-        "autocompletado del formulario al elegir un anticipo pendiente del cliente; enlaza la "
-        "regularización con el anticipo para llevar su saldo. Si el anticipo se emitió por fuera "
-        "(SEE-SOL), queda vacío y solo valen los campos serie/monto/tipo tecleados a mano.",
     )
     l10n_pe_ne_anticipo_aplicado = fields.Monetary(
         string="Anticipo ya aplicado",
@@ -301,27 +313,40 @@ class AccountMove(models.Model):
         help="Importe del anticipo aún disponible para regularizar = total − aplicado. Solo "
         "aplica a comprobantes marcados como pago anticipado (doc. A).",
     )
+    l10n_pe_ne_desc_no_afecta = fields.Monetary(
+        string="Descuento que no afecta el IGV",
+        copy=False,
+        help="Descuento (S/, CON IGV incluido en el sentido de que baja el total a pagar) que NO "
+        "afecta la base imponible del IGV (cat. 53 'no afecta'): la gravada y el IGV se calculan "
+        "sobre el precio lleno; este importe solo reduce el total (MtoImpVenta). Agrega el "
+        "descuento por ítem 'no afecta' y el descuento global 'no afecta' del comprobante.",
+    )
 
     @api.depends("l10n_pe_ne_es_anticipo", "amount_total")
     def _compute_l10n_pe_ne_anticipo_saldo(self):
         """Saldo por anticipo (doc. A) = total − regularizaciones vivas que lo aplican. Mismo
         criterio de 'vivo' que las NC (posteadas y no rechazadas/anuladas/con error; las en cola
-        cuentan, para que dos regularizaciones simultáneas no consuman más que el total)."""
+        cuentan, para que dos regularizaciones simultáneas no consuman más que el total).
+        El dato vive en una lista JSON (`l10n_pe_ne_anticipos`): no se puede agrupar por
+        contenido JSON con `_read_group`, así que se busca las regularizaciones vivas y se
+        agrega en Python sumando el `monto` de cada anticipo cuyo `origenId` matchee."""
         anticipos = self.filtered("l10n_pe_ne_es_anticipo")
-        aplicado = {}
+        aplicado = {a.id: 0.0 for a in anticipos}
         if anticipos:
-            grupos = self.env["account.move"]._read_group(
-                [
-                    ("l10n_pe_ne_anticipo_origen_id", "in", anticipos.ids),
-                    ("state", "=", "posted"),
-                    ("l10n_pe_biller_state", "not in", ("rechazado", "error", "anulado")),
-                ],
-                groupby=["l10n_pe_ne_anticipo_origen_id"],
-                aggregates=["l10n_pe_ne_anticipo_total:sum"],
-            )
-            aplicado = {origen.id: (total or 0.0) for origen, total in grupos}
+            # Nota de escala: search + loop Python sobre TODAS las regularizaciones vivas del
+            # sistema; para volúmenes altos se podría filtrar por partner/JSONB, pero YAGNI.
+            regs = self.env["account.move"].search([
+                ("l10n_pe_ne_anticipos", "!=", False),
+                ("state", "=", "posted"),
+                ("l10n_pe_biller_state", "not in", ("rechazado", "error", "anulado")),
+            ])
+            for reg in regs:
+                for a in reg._l10n_pe_ne_anticipos_list():
+                    oid = a["origenId"]
+                    if oid in aplicado:
+                        aplicado[oid] += a["monto"]
         for move in self:
-            ap = aplicado.get(move.id, 0.0) if move.l10n_pe_ne_es_anticipo else 0.0
+            ap = round(aplicado.get(move.id, 0.0), 2) if move.l10n_pe_ne_es_anticipo else 0.0
             move.l10n_pe_ne_anticipo_aplicado = ap
             move.l10n_pe_ne_anticipo_saldo = (
                 round(move.amount_total - ap, 2) if move.l10n_pe_ne_es_anticipo else 0.0
@@ -362,12 +387,14 @@ class AccountMove(models.Model):
         return out
 
     def _l10n_pe_importe_cobrar(self):
-        """Importe neto a cobrar = total − anticipo aplicado − bienes gratuitos (lo que el cliente paga)."""
+        """Importe neto a cobrar = total − anticipo aplicado − descuento que no afecta el IGV −
+        bienes gratuitos (lo que el cliente paga)."""
         self.ensure_one()
         ant = self._l10n_pe_anticipo()
         return round(
             self.amount_total
             - (ant[2] if ant else 0.0)
+            - self._l10n_pe_desc_no_afecta()
             - self._l10n_pe_gratuito_base(),
             2,
         )
@@ -406,21 +433,85 @@ class AccountMove(models.Model):
         )
         return cod_tri, tasa, None
 
-    def _l10n_pe_anticipo(self):
-        """(valor, igv, total) del anticipo aplicado, o None. El total trae el impuesto incluido; el
-        valor se separa con la tasa real de la operación gravada (1+tasa/100), no asumiendo 18%."""
+    def _l10n_pe_ne_anticipos_list(self):
+        """Lista normalizada de anticipos de esta factura: [{doc, monto, tipo, origenId}]. Vacía
+        si no aplica (no out_invoice, NC/ND o sin anticipos).
+        `origenId` se coerciona con seguridad (nunca explota con basura tipo "abc"): esta lista
+        la recorre también `_compute_l10n_pe_ne_anticipo_saldo` para TODAS las regularizaciones
+        vivas del sistema, así que una fila envenenada en OTRA factura no debe romper el
+        saldo/pendientes de todas las demás — se trata como sin origen local (None)."""
         self.ensure_one()
-        total = self.l10n_pe_ne_anticipo_total or 0.0
-        # El anticipo solo se regulariza en factura/boleta de venta, nunca en notas (NC/ND).
-        if total <= 0 or self.move_type != "out_invoice" or self.debit_origin_id:
-            return None
-        _cod, tasa, _motivo = self._l10n_pe_anticipo_gravado()
-        valor = round(total / (1.0 + (tasa or 0.0) / 100.0), 2)
-        return valor, round(total - valor, 2), round(total, 2)
+        if self.move_type != "out_invoice" or self.debit_origin_id:
+            return []
+        out = []
+        for a in (self.l10n_pe_ne_anticipos or []):
+            monto = round(float(a.get("monto") or 0.0), 2)
+            if monto <= 0:
+                continue
+            origen_raw = a.get("origenId")
+            try:
+                origen_id = int(origen_raw) if origen_raw not in (None, "", False) else None
+            except (TypeError, ValueError):
+                origen_id = None
+            out.append({
+                "doc": (a.get("doc") or "").strip(),
+                "monto": monto,
+                "tipo": a.get("tipo") or "02",
+                "origenId": origen_id,
+            })
+        return out
+
+    def _l10n_pe_anticipos_montos(self):
+        """(valor, igv, total) AGREGADO de los anticipos: (0.0, 0.0, 0.0) si no aplica (no
+        out_invoice, NC/ND o sin anticipos). El valor de CADA anticipo se separa con la tasa
+        gravada homogénea real de la factura (no asume 18%) y el agregado es la SUMA de los
+        valores/igv por anticipo (no el total dividido una sola vez), así que con montos que no
+        son fracción redonda de la base el agregado no arrastra un desvío de redondeo distinto al
+        que vería cada `AdditionalDocumentReference` individual — de ahí que el loop por ítem se
+        mantenga aunque solo se devuelva el agregado (nadie más consume el desglose por ítem)."""
+        self.ensure_one()
+        lst = self._l10n_pe_ne_anticipos_list()
+        if not lst:
+            return (0.0, 0.0, 0.0)
+        _cod, tasa, _m = self._l10n_pe_anticipo_gravado()
+        vt = it = tt = 0.0
+        for a in lst:
+            total = round(a["monto"], 2)
+            valor = round(total / (1.0 + (tasa or 0.0) / 100.0), 2)
+            igv = round(total - valor, 2)
+            vt += valor
+            it += igv
+            tt += total
+        return round(vt, 2), round(it, 2), round(tt, 2)
+
+    def _l10n_pe_anticipo(self):
+        """(valor, igv, total) AGREGADO de los anticipos, o None si no hay ninguno. Wrapper de
+        `_l10n_pe_anticipos_montos()` para no romper a los llamadores previos (percepción, importe
+        a cobrar, cabecera, tributos, variable global 04) que solo necesitan el agregado."""
+        self.ensure_one()
+        v, i, t = self._l10n_pe_anticipos_montos()
+        return (v, i, t) if t > 0 else None
+
+    def _l10n_pe_desc_no_afecta(self):
+        """Monto del descuento global que NO afecta la base del IGV, topeado para no dejar el total
+        negativo. Es un ajuste SOLO de emisión (como el anticipo): no agrega una línea a Odoo, así
+        que la gravada/IGV quedan sobre el precio lleno; solo baja el MtoImpVenta (total a pagar).
+        Devuelve 0.0 si no aplica (notas, o sin descuento)."""
+        self.ensure_one()
+        monto = self.l10n_pe_ne_desc_no_afecta or 0.0
+        if monto <= 0 or self.move_type not in ("out_invoice",) or self.debit_origin_id:
+            return 0.0
+        # Tope: no puede superar el total menos lo ya deducido por anticipo (dejaría MtoImpVenta < 0).
+        ant = self._l10n_pe_anticipo()
+        tope = round((self.amount_total or 0.0) - (ant[2] if ant else 0.0), 2)
+        return round(min(monto, max(0.0, tope)), 2)
 
     def _l10n_pe_check_anticipo(self):
-        """Valida que el anticipo sea representable (descuento global código 04) antes de emitir el XML.
-        Rechaza con un mensaje claro los casos no soportados, en vez de generar un comprobante inválido."""
+        """Valida que los anticipos sean representables (N documentos relacionados + un descuento
+        global código 04 AGREGADO) antes de emitir el XML. Rechaza con un mensaje claro los casos no
+        soportados, en vez de generar un comprobante inválido. Cada anticipo de la lista se valida
+        individualmente (doc, origen, partner, moneda y saldo propio); la SUMA se valida contra el
+        total de la factura."""
         self.ensure_one()
         if self.l10n_pe_ne_es_anticipo and self._l10n_pe_anticipo():
             raise UserError(
@@ -431,23 +522,49 @@ class AccountMove(models.Model):
             )
         if not self._l10n_pe_anticipo():
             return
-        if not (self.l10n_pe_ne_anticipo_doc or "").strip():
+        lst = self._l10n_pe_ne_anticipos_list()
+        total_aplicado = round(sum(a["monto"] for a in lst), 2)
+        if total_aplicado > self.amount_total + 0.01:
             raise UserError(
                 _(
-                    "Indique el comprobante de anticipo (serie-correlativo, ej. F001-00000100)."
+                    "El total de anticipos (%.2f) no puede exceder el total de la factura (%.2f)."
                 )
+                % (total_aplicado, self.amount_total)
             )
-        if round(self.l10n_pe_ne_anticipo_total, 2) > self.amount_total + 0.01:
-            raise UserError(
-                _(
-                    "El anticipo aplicado (%.2f) no puede exceder el total de la factura (%.2f)."
+        # Otras regularizaciones vivas que ya consumen anticipos (excluye esta factura). El dato vive
+        # en la lista JSON: se busca ampliamente UNA sola vez y se filtra/agrega en Python por origen
+        # (mismo patrón que `_compute_l10n_pe_ne_anticipo_saldo`).
+        otras = self.env["account.move"].search([
+            ("id", "!=", self.id),
+            ("l10n_pe_ne_anticipos", "!=", False),
+            ("state", "=", "posted"),
+            ("l10n_pe_biller_state", "not in", ("rechazado", "error", "anulado")),
+        ])
+        aplicado_en_esta = {}  # origenId -> suma de monto ya visto en ESTA factura (mismo origen 2x).
+        for idx, a in enumerate(lst, start=1):
+            if a["tipo"] not in ("02", "03"):
+                raise UserError(
+                    _(
+                        "Tipo de documento de anticipo inválido (debe ser 02 factura o 03 boleta)."
+                    )
                 )
-                % (self.l10n_pe_ne_anticipo_total, self.amount_total)
+            if not a["doc"]:
+                raise UserError(
+                    _(
+                        "Indique el comprobante del anticipo #%d (serie-correlativo, ej. F001-00000100)."
+                    )
+                    % idx
+                )
+            # Si la regularización enlaza un anticipo local (doc. A), valida moneda y saldo
+            # disponible: el importe aplicado no puede exceder lo que le queda al anticipo (evita
+            # doble consumo), sea desde otra factura o desde otra línea de esta misma lista.
+            origen = (
+                self.env["account.move"].browse(a["origenId"])
+                if a["origenId"]
+                else self.env["account.move"]
             )
-        # Si la regularización enlaza un anticipo local (doc. A), valida moneda y saldo disponible:
-        # el importe aplicado no puede exceder lo que le queda al anticipo (evita doble consumo).
-        origen = self.l10n_pe_ne_anticipo_origen_id
-        if origen:
+            if not origen:
+                continue
             if not origen.l10n_pe_ne_es_anticipo:
                 raise UserError(
                     _("El documento enlazado (%s) no está marcado como pago anticipado.")
@@ -466,25 +583,26 @@ class AccountMove(models.Model):
                     )
                     % origen.display_name
                 )
-            # Otras regularizaciones vivas que ya consumen este anticipo (excluye esta factura).
-            otras = self.env["account.move"].search(
-                [
-                    ("l10n_pe_ne_anticipo_origen_id", "=", origen.id),
-                    ("id", "!=", self.id),
-                    ("state", "=", "posted"),
-                    ("l10n_pe_biller_state", "not in", ("rechazado", "error", "anulado")),
-                ]
+            aplicado_otras = round(
+                sum(
+                    oa["monto"]
+                    for m in otras
+                    for oa in m._l10n_pe_ne_anticipos_list()
+                    if oa["origenId"] == origen.id
+                ),
+                2,
             )
-            disponible = round(
-                origen.amount_total - sum(otras.mapped("l10n_pe_ne_anticipo_total")), 2
+            aplicado_en_esta[origen.id] = round(
+                aplicado_en_esta.get(origen.id, 0.0) + a["monto"], 2
             )
-            if round(self.l10n_pe_ne_anticipo_total, 2) > disponible + 0.01:
+            disponible = round(origen.amount_total - aplicado_otras, 2)
+            if aplicado_en_esta[origen.id] > disponible + 0.01:
                 raise UserError(
                     _(
                         "El anticipo %s ya no tiene saldo suficiente: disponible %.2f, "
                         "intentas aplicar %.2f."
                     )
-                    % (origen.display_name, disponible, self.l10n_pe_ne_anticipo_total)
+                    % (origen.display_name, disponible, aplicado_en_esta[origen.id])
                 )
         _cod, _tasa, motivo = self._l10n_pe_anticipo_gravado()
         if motivo:
@@ -496,10 +614,44 @@ class AccountMove(models.Model):
                 )
             )
 
+    def _l10n_pe_check_lineas_impuesto(self):
+        """Ninguna línea con importe llega al XML sin su tax cat-05: `_l10n_pe_tax_info`
+        la clasificaría con el default 'gravado (1000)' a tasa 0 y SUNAT rechaza con 3111
+        (TaxableAmount>0 + TaxAmount=0.00), un mensaje críptico que además llega recién
+        del validador. Se corta aquí, con el dato que el usuario sí puede arreglar.
+        Las líneas de importe 0 (p.ej. NC de corrección de texto) no tienen base imponible
+        —no hay 3111 posible— y pasan."""
+        self.ensure_one()
+        for line in self._l10n_pe_product_lines():
+            if not line.price_subtotal:
+                continue
+            if not any(t.l10n_pe_edi_tax_code in TAX_CODE_MAP for t in line.tax_ids):
+                raise UserError(
+                    _(
+                        "La línea «%s» no tiene impuesto SUNAT asignado (IGV, exonerado, "
+                        "inafecto…). Asigna la afectación IGV en el producto o en la línea "
+                        "y vuelve a emitir."
+                    )
+                    % (line.name or line.product_id.display_name or "?")
+                )
+
     def _l10n_pe_relacionados(self):
         """Documentos relacionados de la factura: guía de remisión (indDocRelacionado 1,
         DespatchDocumentReference) y/o comprobante de anticipo (indDocRelacionado 2)."""
         rels = []
+        # Orden de compra (indDocRelacionado 3 → cac:OrderReference). VA PRIMERO: en el UBL Invoice
+        # el OrderReference precede a DespatchDocumentReference/AdditionalDocumentReference (orden de
+        # elementos que el XSD de SUNAT exige), y el FTL emite los relacionados en el orden de la lista.
+        oc = (self.l10n_pe_ne_orden_compra or "").strip()
+        if oc:
+            rels.append(
+                {
+                    "indDocRelacionado": "3",
+                    "numDocRelacionado": oc,
+                    "tipDocEmisor": "6",
+                    "numDocEmisor": self.company_id.vat or "",
+                }
+            )
         guia = (self.l10n_pe_ne_guia_ref or "").strip()
         if guia:
             rels.append(
@@ -511,15 +663,17 @@ class AccountMove(models.Model):
                     "numDocEmisor": self.company_id.vat or "",
                 }
             )
-        ant = self._l10n_pe_anticipo()
-        if ant:
+        # N AdditionalDocumentReference (uno por anticipo), numIdeAnticipo correlativo 1..N en el
+        # orden de la lista — así SUNAT liga cada PrepaidPayment con su propio documento relacionado.
+        lst = self._l10n_pe_ne_anticipos_list()
+        for idx, a in enumerate(lst, start=1):
             rels.append(
                 {
                     "indDocRelacionado": "2",
-                    "tipDocRelacionado": self.l10n_pe_ne_anticipo_tipo or "02",
-                    "numDocRelacionado": self.l10n_pe_ne_anticipo_doc or "",
-                    "numIdeAnticipo": "1",
-                    "mtoDocRelacionado": self._l10n_pe_fmt(ant[2]),
+                    "tipDocRelacionado": a["tipo"] or "02",
+                    "numDocRelacionado": a["doc"],
+                    "numIdeAnticipo": str(idx),
+                    "mtoDocRelacionado": self._l10n_pe_fmt(a["monto"]),
                     "tipDocEmisor": "6",
                     "numDocEmisor": self.company_id.vat or "",
                 }
@@ -529,8 +683,11 @@ class AccountMove(models.Model):
     def _l10n_pe_variables_globales(self):
         """Variables globales de la factura:
         - código 51: percepción (el agente percibe un % sobre la venta; el cliente paga total + percepción).
-        - código 04: descuento global por anticipo (regulariza un anticipo ya facturado; reduce la
-          base del IGV en el valor del anticipo). Exigido por SUNAT (regla 3287) cuando hay anticipo."""
+        - código 04: descuento global por anticipo (regulariza uno o más anticipos ya facturados;
+          reduce la base del IGV en el valor AGREGADO de todos los anticipos). Exigido por SUNAT
+          (regla 3287) cuando hay anticipo. Con N>1 anticipos se emite UN solo 04 con la suma —no uno
+          por anticipo—, en línea con los N documentos relacionados (`_l10n_pe_relacionados`) que sí
+          van uno por cada `AdditionalDocumentReference`/`numIdeAnticipo`."""
         fmt = self._l10n_pe_fmt
         moneda = self.currency_id.name or "PEN"
         out = []
@@ -551,18 +708,38 @@ class AccountMove(models.Model):
         ant = self._l10n_pe_anticipo()
         if ant:
             valor, _igv, _total = ant
-            base = self.amount_untaxed or 0.0
+            # Descuento 04 con FACTOR UNITARIO: base = el propio valor del anticipo, factor 1.00000,
+            # monto = valor. Así base × factor = monto EXACTO para cualquier importe, y la regla SUNAT
+            # 4322 (|monto − base × factor| ≤ 1) pasa siempre. Antes se emitía base = base completa de la
+            # operación con el factor a 5 decimales (valor/base): en operaciones de base alta (≳ S/ 200.000)
+            # el redondeo del factor multiplicado por la base se desviaba > 1 sol y SUNAT rechazaba con
+            # 4322. El IGV/base de cabecera NO cambian: SUNAT reduce la base gravada con el `Amount`
+            # (mtoVariableGlobal = valor), no con el BaseAmount de este descuento.
             out.append(
                 {
                     "tipVariableGlobal": "false",
                     "codTipoVariableGlobal": "04",
-                    # Factor con 5 decimales: SUNAT valida mtoVariableGlobal ≈ base × por (tolerancia
-                    # ~±1, error 3307). Con solo 2 decimales, un anticipo parcial cuyo valor no es
-                    # fracción redonda de la base (p.ej. 254.24 sobre 1000 → 0.25) descuadra y se
-                    # rechaza; 5 decimales reconstruyen el monto dentro de la tolerancia.
-                    "porVariableGlobal": "%.5f" % (valor / base if base else 0.0),
+                    "porVariableGlobal": "1.00000",
                     "monMontoVariableGlobal": moneda,
                     "mtoVariableGlobal": fmt(valor),
+                    "monBaseImponibleVariableGlobal": moneda,
+                    "mtoBaseImpVariableGlobal": fmt(valor),
+                }
+            )
+        # Descuento global que NO afecta la base del IGV (código del facturador en
+        # DESC_GLOBAL_NO_AFECTA_COD, pendiente de confirmar contra beta). La base es el precio de
+        # venta con IGV (amount_total): el descuento NO reduce gravada/IGV, solo el MtoImpVenta.
+        desc_na = self._l10n_pe_desc_no_afecta()
+        if desc_na > 0:
+            base = self.amount_total or 0.0
+            out.append(
+                {
+                    "tipVariableGlobal": "false",
+                    "codTipoVariableGlobal": DESC_GLOBAL_NO_AFECTA_COD,
+                    # 5 decimales: misma tolerancia SUNAT que el anticipo (mtoVariable ≈ base × por).
+                    "porVariableGlobal": "%.5f" % (desc_na / base if base else 0.0),
+                    "monMontoVariableGlobal": moneda,
+                    "mtoVariableGlobal": fmt(desc_na),
                     "monBaseImponibleVariableGlobal": moneda,
                     "mtoBaseImpVariableGlobal": fmt(base),
                 }
@@ -588,26 +765,36 @@ class AccountMove(models.Model):
                     serie = prefix + serie[1:]
             move.l10n_pe_serie = serie
 
+    def _l10n_pe_detraccion_base(self):
+        """Base de la detracción (SPOT) = importe de la operación = total − descuento que NO
+        afecta la base del IGV (cat. 53 cód. 03). Ese descuento reduce el MtoImpVenta que paga
+        el adquirente, así que también reduce la base sobre la que se detrae — de lo contrario
+        se detrae de más y la base no coincide con el total que muestra el front ni con el
+        PayableAmount del XML. NO se descuenta el anticipo: la base es la de la operación."""
+        self.ensure_one()
+        return round((self.amount_total or 0.0) - self._l10n_pe_desc_no_afecta(), 2)
+
     def _l10n_pe_detraccion_monto(self):
         self.ensure_one()
         # SUNAT (SPOT): el monto de la detracción se redondea al ENTERO más próximo
         # (sin decimales), medio hacia arriba. Ej.: 12% de 25 386.52 = 3046.38 -> 3046.
         return float_round(
-            self.amount_total * (self.l10n_pe_ne_detraccion_rate or 0.0) / 100.0,
+            self._l10n_pe_detraccion_base() * (self.l10n_pe_ne_detraccion_rate or 0.0) / 100.0,
             precision_digits=0,
             rounding_method="HALF-UP",
         )
 
     def _l10n_pe_neto_pendiente(self):
-        """Neto pendiente de pago = total − detracción (si aplica). Con detracción el
-        cliente solo paga el neto; el monto detraído se deposita en el Banco de la Nación,
-        así que el pendiente/cuotas van sobre el neto, no sobre el total."""
+        """Neto pendiente de pago = base de la operación − detracción (si aplica). Con detracción
+        el cliente solo paga el neto; el monto detraído se deposita en el Banco de la Nación,
+        así que el pendiente/cuotas van sobre el neto, no sobre el total. La base ya resta el
+        descuento que no afecta el IGV (mismo criterio que la base de detracción y el front)."""
         self.ensure_one()
         det = self._l10n_pe_detraccion_monto() if self.l10n_pe_ne_detraccion else 0.0
         # Venta con inicial al contado: el saldo a crédito (lo que suman las cuotas) es el total
         # menos la detracción y menos la inicial ya pagada.
         inicial = self.l10n_pe_ne_inicial_contado or 0.0
-        return round((self.amount_total or 0.0) - det - inicial, 2)
+        return round(self._l10n_pe_detraccion_base() - det - inicial, 2)
 
     def _l10n_pe_adicional_cabecera(self):
         """Bloque adicional de la cabecera: detracción y/o total a cobrar de la percepción."""
@@ -630,6 +817,13 @@ class AccountMove(models.Model):
             block["mtoTotPercepcion"] = fmt(
                 self._l10n_pe_importe_cobrar() + self._l10n_pe_percepcion_monto()
             )
+        # Exportación (tipOperacion 0200): el adquirente es no domiciliado. SUNAT pide el país del
+        # cliente (cat. país, ISO 3166 alpha-2 = el mismo code de res.country). El biller lo mapea a
+        # codPaisCliente del AdditionalHeader. Se omite si el partner no tiene país (evita "" inútil).
+        if self._l10n_pe_tipo_operacion() == "0200":
+            pais = (self.partner_id.country_id.code or "").strip().upper()
+            if pais:
+                block["codPaisCliente"] = pais
         return block or None
 
     def _l10n_pe_dato_pago(self):
@@ -708,6 +902,15 @@ class AccountMove(models.Model):
             ]
         return out
 
+    @api.depends("l10n_pe_ne_cuotas")
+    def _compute_l10n_pe_ne_cuotas_display(self):
+        """Texto legible de las cuotas para el form de Odoo (fields.Json no tiene widget)."""
+        for m in self:
+            cuotas = m.l10n_pe_ne_cuotas or []
+            m.l10n_pe_ne_cuotas_display = " · ".join(
+                "%s @ %s" % (c.get("monto"), c.get("fecha")) for c in cuotas
+            ) or False
+
     # Establecimiento anexo emisor (código SUNAT de 4 dígitos). Va como codLocalEmisor en el XML;
     # "0000" = domicilio fiscal. Para negocios con sucursales, cada comprobante declara su local.
     l10n_pe_ne_cod_establecimiento = fields.Char(
@@ -728,6 +931,39 @@ class AccountMove(models.Model):
         string="Tipo de guía referenciada",
         default="09",
     )
+    l10n_pe_ne_orden_compra = fields.Char(
+        string="Orden de compra",
+        copy=False,
+        help="Número de orden de compra del cliente (opcional). Se emite como "
+        "cac:OrderReference/cbc:ID (documento relacionado ind. 3), típico en ventas B2B.",
+    )
+    l10n_pe_ne_placa = fields.Char(
+        string="Placa del vehículo",
+        copy=False,
+        help="Solo factura de combustible: número de placa del vehículo. Se emite como "
+        "cac:AdditionalItemProperty (catálogo 55, código 7000 «Gastos Art. 37 Renta: Número de "
+        "Placa») en cada línea, para sustentar la deducción del gasto.")
+    l10n_pe_ne_cliente_nombre = fields.Char(
+        string="Nombre del cliente en el comprobante",
+        copy=False,
+        help="Override por-comprobante de la razón social del cliente (solo boleta ≤700: constancia "
+        "institucional). Si está seteado, se emite en rznSocialUsuario en vez del nombre del partner, "
+        "sin renombrar el partner del DNI.")
+    # Ventas al Estado (proveedor del Estado): datos del proceso de contratación pública que
+    # SUNAT exige como cac:AdditionalItemProperty (catálogo 55, códigos 5000-5003) en CADA línea.
+    # Las reglas SUNAT 3146-3149 los validan como GRUPO: van los 4 juntos o ninguno.
+    l10n_pe_ne_estado_expediente = fields.Char(
+        string="N° de expediente (Estado)", copy=False,
+        help="Ventas al Estado: número de expediente (cat. 55 cód. 5000).")
+    l10n_pe_ne_estado_unidad_ejecutora = fields.Char(
+        string="Código de unidad ejecutora (Estado)", copy=False,
+        help="Ventas al Estado: código de unidad ejecutora (cat. 55 cód. 5001).")
+    l10n_pe_ne_estado_proceso_seleccion = fields.Char(
+        string="N° de proceso de selección (Estado)", copy=False,
+        help="Ventas al Estado: número de proceso de selección/licitación (cat. 55 cód. 5002).")
+    l10n_pe_ne_estado_contrato = fields.Char(
+        string="N° de contrato (Estado)", copy=False,
+        help="Ventas al Estado: número de contrato (cat. 55 cód. 5003).")
     # Proyecto/contrato (facturación por avance de obra): controla que la suma de las
     # valorizaciones no supere el valor total del contrato (QA-039).
     l10n_pe_ne_proyecto_id = fields.Many2one(
@@ -745,6 +981,12 @@ class AccountMove(models.Model):
     l10n_pe_ne_cuotas = fields.Json(
         string="Cuotas de crédito", copy=False
     )  # [{'fecha','monto'}]
+    # Versión legible de las cuotas para el form de Odoo: fields.Json no tiene un widget de
+    # form limpio, así que el contador ve las cuotas como texto "monto @ fecha" (solo lectura).
+    l10n_pe_ne_cuotas_display = fields.Char(
+        string="Cuotas de crédito",
+        compute="_compute_l10n_pe_ne_cuotas_display",
+    )
     # Forma de pago MIXTA: parte pagada al contado (inicial) + saldo a crédito en cuotas. El neto
     # pendiente (y por ende las cuotas y el mtoNetoPendientePago SUNAT) se reduce en esta inicial.
     l10n_pe_ne_inicial_contado = fields.Monetary(
@@ -756,6 +998,16 @@ class AccountMove(models.Model):
     l10n_pe_ne_medios_pago = fields.Json(
         string="Medios de pago (POS)", copy=False
     )  # [{'medio','monto'}]
+    # Redondeo de efectivo (Ley 29571 + retiro de monedas < S/ 0.10): ajuste ≤ 0 a favor del
+    # consumidor sobre el total a cobrar EN EFECTIVO. NO va al XML/comprobante (amount_total sigue
+    # exacto); es un dato de caja: el arqueo espera 'amount_total + redondeo' de efectivo, y el
+    # ticket muestra 'A pagar efectivo'. Ver _l10n_pe_ne_ticket_adicional y l10n_pe_ne_caja.
+    l10n_pe_ne_redondeo = fields.Monetary(
+        string="Redondeo efectivo",
+        copy=False,
+        help="Ajuste (≤ 0) del importe cobrado en efectivo por redondeo al décimo. No altera el "
+        "comprobante ni las bases/IGV; solo el efectivo cobrado y el arqueo de caja.",
+    )
 
     l10n_pe_motivo_code = fields.Char(
         string="Cód. motivo NC/ND",
@@ -807,6 +1059,16 @@ class AccountMove(models.Model):
     # ----------------------------------------------------------------- helpers
     def _l10n_pe_fmt(self, amount):
         return "%.2f" % (amount or 0.0)
+
+    def _l10n_pe_fmt_cant(self, qty):
+        """Cantidad para SUNAT (ctdUnidadItem): hasta 3 decimales, sin ceros de relleno más allá
+        de 2. Conserva la venta al peso de balanza (18.375) sin ensuciar los conteos (2 -> 2.00).
+        SUNAT admite hasta 10 decimales; `_l10n_pe_fmt` (2 dec) es solo para montos."""
+        entero, _p, dec = ("%.3f" % (qty or 0.0)).partition(".")
+        dec = dec.rstrip("0")
+        if len(dec) < 2:
+            dec = (dec + "00")[:2]
+        return "%s.%s" % (entero, dec)
 
     def _l10n_pe_document_type(self):
         """Código SUNAT del comprobante: 01 Factura, 03 Boleta, 07 NC, 08 ND."""
@@ -867,6 +1129,42 @@ class AccountMove(models.Model):
                 )
                 % {"serie": serie, "doc": docname, "prefix": prefix}
             )
+        # QA-074: la serie debe estar HABILITADA para el emisor. Una serie inventada (p.ej. F099
+        # tecleada a mano) la acepta la beta de SUNAT pero en producción se rechaza; se corta aquí.
+        habilitadas = self._l10n_pe_ne_series_habilitadas()
+        if (serie or "").upper() not in habilitadas:
+            raise UserError(
+                _(
+                    "La serie '%(serie)s' no está habilitada para %(ruc)s. Configúrala en un "
+                    "diario de venta (campo Serie) o usa una serie registrada: %(lista)s."
+                )
+                % {
+                    "serie": serie,
+                    "ruc": self.company_id.vat or self.company_id.display_name or "",
+                    "lista": ", ".join(sorted(habilitadas)),
+                }
+            )
+
+    def _l10n_pe_ne_series_habilitadas(self):
+        """Series válidas del emisor (QA-074): las configuradas en sus diarios de venta
+        (l10n_pe_ne_serie) con su variante de familia (F↔B), más los defaults que genera el
+        sistema (F001/B001 y las notas FC01/FD01/BC01/BD01). No se usa el histórico de series
+        ya emitidas a propósito: una serie inventada usada por error no debe volverse 'válida'."""
+        self.ensure_one()
+        validas = {"F001", "B001", "FC01", "FD01", "BC01", "BD01"}
+        journals = self.env["account.journal"].sudo().search(
+            [
+                ("company_id", "=", self.company_id.id),
+                ("type", "=", "sale"),
+                ("l10n_pe_ne_serie", "!=", False),
+            ]
+        )
+        for j in journals:
+            base = (j.l10n_pe_ne_serie or "").upper().strip()
+            if len(base) >= 2 and base[0] in ("F", "B"):
+                validas.add("F" + base[1:])
+                validas.add("B" + base[1:])
+        return validas
 
     def _l10n_pe_product_lines(self):
         return self.invoice_line_ids.filtered(
@@ -977,7 +1275,7 @@ class AccountMove(models.Model):
                 "codProducto": line.product_id.default_code or "-",
                 "codProductoSUNAT": line.l10n_pe_ne_cod_producto_sunat or "-",
                 "codUnidadMedida": self._l10n_pe_unit_code(line),
-                "ctdUnidadItem": fmt(qty),
+                "ctdUnidadItem": self._l10n_pe_fmt_cant(qty),
                 "desItem": self._l10n_pe_des_item(line),
                 "mtoValorUnitario": fmt(gross / qty if qty else 0.0),
                 "mtoValorVentaItem": fmt(base),
@@ -1197,6 +1495,10 @@ class AccountMove(models.Model):
         # incluye: la regla 4301 suma únicamente los tributos 1000/1016/7152/9999/2000 (no el 9996),
         # y la referencia SUNAT aceptada consigna sumTotTributos = IGV real, sin el 18% gratuito.
         grat_base = self._l10n_pe_gratuito_base()
+        # Descuento global que NO afecta la base del IGV: baja el importe a cobrar (MtoImpVenta) y va
+        # como AllowanceCharge global (sumDescTotal), SIN tocar la base gravada ni el IGV. Mismo estilo
+        # de ajuste solo-de-emisión que el anticipo (no agrega línea a Odoo).
+        desc_no_afecta = self._l10n_pe_desc_no_afecta()
         cabecera = {
             "tipOperacion": self._l10n_pe_tipo_operacion(),
             "fecEmision": self.invoice_date.strftime("%Y-%m-%d")
@@ -1207,13 +1509,22 @@ class AccountMove(models.Model):
             "horEmision": pytz.utc.localize(fields.Datetime.now())
             .astimezone(pytz.timezone("America/Lima"))
             .strftime("%H:%M:%S"),
-            "fecVencimiento": self.invoice_date_due.strftime("%Y-%m-%d")
-            if self.invoice_date_due
+            # Vencimiento AUTOMÁTICO (no editable), siempre presente:
+            #  - Crédito → la última cuota (invoice_date_due la fija quick_flags desde las cuotas).
+            #  - Contado → la propia fecha de EMISIÓN (pago inmediato: vence el mismo día).
+            # Se usa invoice_date explícito para el contado porque Odoo autopobla invoice_date_due con
+            # la fecha contable/HOY, que no siempre coincide con la de emisión (facturas con fecha atrás).
+            "fecVencimiento": (
+                self.invoice_date_due
+                if (self.l10n_pe_ne_forma_pago == "Credito" and self.invoice_date_due)
+                else self.invoice_date
+            ).strftime("%Y-%m-%d")
+            if self.invoice_date
             else "",
             "codLocalEmisor": (self.l10n_pe_ne_cod_establecimiento or "0000"),
             "tipDocUsuario": self._l10n_pe_cliente_doc()[0],
             "numDocUsuario": self._l10n_pe_cliente_doc()[1],
-            "rznSocialUsuario": partner.name or "",
+            "rznSocialUsuario": self.l10n_pe_ne_cliente_nombre or partner.name or "",
             "tipMoneda": self.currency_id.name or "PEN",
             # El IGV teórico del gratuito NO se cobra: NO entra en el total de tributos de cabecera
             # (regla 4301: el TaxAmount de cabecera excluye el 9996). El 9996 va solo como TaxSubtotal.
@@ -1223,8 +1534,10 @@ class AccountMove(models.Model):
             # TaxInclusive − anticipo, ambos con el ICBPER). Excluirlo de aquí pero incluirlo en
             # sumImpVenta desbalancea el comprobante → SUNAT Client.3280.
             "sumPrecioVenta": fmt(self.amount_total - grat_base),
-            "sumImpVenta": fmt(self.amount_total - anticipo_total - grat_base),
-            "sumDescTotal": "0.00",
+            "sumImpVenta": fmt(
+                self.amount_total - anticipo_total - grat_base - desc_no_afecta
+            ),
+            "sumDescTotal": fmt(desc_no_afecta),
             "sumOtrosCargos": "0.00",
             "sumTotalAnticipos": fmt(anticipo_total),
             "ublVersionId": "2.1",
@@ -1238,16 +1551,86 @@ class AccountMove(models.Model):
         return cabecera
 
     def _l10n_pe_serie_correlativo(self):
-        """Serie y correlativo del comprobante. La serie viene del campo del move (por defecto la del
-        diario). El correlativo: el manual si se fijó; si no, el folio (parte numérica final) del
-        número del asiento, que Odoo auto-incrementa por diario; si no hay, '1'."""
+        """Serie y correlativo del comprobante. Una vez emitido, la identidad fiscal es
+        inmutable: se devuelve la serie/correlativo CONGELADOS (l10n_pe_ne_serie/corr_emit),
+        que ahora salen de una secuencia POR SERIE (ver _l10n_pe_ne_assign_numero). Para un
+        move aún no emitido (previsualización) se cae al comportamiento anterior: el manual si
+        se fijó; si no, el folio (parte numérica final) del número del asiento; si no hay, '1'."""
         self.ensure_one()
+        # Retrocompatible: en los comprobantes históricos corr_emit == folio, así que esto
+        # devuelve el mismo valor de antes; solo las emisiones nuevas usan la secuencia por serie.
+        if self.l10n_pe_ne_serie_emit and self.l10n_pe_ne_corr_emit:
+            try:
+                return self.l10n_pe_ne_serie_emit, str(int(self.l10n_pe_ne_corr_emit))
+            except (TypeError, ValueError):
+                return self.l10n_pe_ne_serie_emit, self.l10n_pe_ne_corr_emit
         name = (self.name or "").replace(" ", "")
         matches = list(re.finditer(r"\d+", name))
         folio = matches[-1].group() if matches else None
         serie = self.l10n_pe_serie or self.journal_id.l10n_pe_ne_serie or "F001"
         correlativo = self.l10n_pe_correlativo or folio or "1"
         return serie, correlativo
+
+    def _l10n_pe_ne_next_correlativo(self, company, serie):
+        """Correlativo por (compañía, serie): SUNAT exige numeración correlativa POR SERIE y por
+        RUC. Con un contador global (el folio del diario) la serie F001 se saltaba números cuando
+        una boleta B001 o una nota FC01 tomaban el correlativo intermedio (hueco por serie → riesgo
+        de observación en el RVIE). Crea una ir.sequence 'no_gap' al primer uso, sembrada tras el
+        correlativo más alto ya emitido en esa serie (migración transparente desde el folio global).
+        Mismo patrón, ya probado, que las Guías de Remisión (l10n_pe_ne_guia_remision)."""
+        code = "l10n_pe.ne.cpe.%s" % serie
+        # Lock consultivo: serializa el primer uso de una (serie, compañía) para no crear la
+        # secuencia dos veces en concurrencia; después la unicidad la garantiza 'no_gap' (que
+        # bloquea la fila de ir_sequence en cada next_by_id → dos cajas no obtienen el mismo nº).
+        self.env.cr.execute(
+            "SELECT pg_advisory_xact_lock(hashtext(%s))",
+            ("%s/%s" % (code, company.id),),
+        )
+        Seq = self.env["ir.sequence"].sudo()
+        seq = Seq.search(
+            [("code", "=", code), ("company_id", "=", company.id)], limit=1
+        )
+        if not seq:
+            ultimo = 0
+            for m in self.sudo().search(
+                [
+                    ("company_id", "=", company.id),
+                    ("l10n_pe_ne_serie_emit", "=", serie),
+                    ("l10n_pe_ne_corr_emit", "!=", False),
+                ]
+            ):
+                try:
+                    ultimo = max(ultimo, int(m.l10n_pe_ne_corr_emit or 0))
+                except (TypeError, ValueError):
+                    pass
+            seq = Seq.create(
+                {
+                    "name": "CPE %s (%s)" % (serie, company.display_name),
+                    "code": code,
+                    "company_id": company.id,
+                    "padding": 1,
+                    "number_increment": 1,
+                    "implementation": "no_gap",
+                    "number_next": ultimo + 1,
+                }
+            )
+        return str(seq.next_by_id())
+
+    def _l10n_pe_ne_assign_numero(self):
+        """Fija (una sola vez) la serie+correlativo FISCAL antes de construir el payload/firmar.
+        Idempotente: si ya está asignado no hace nada. Respeta un correlativo manual si se fijó;
+        si no, lo toma de la secuencia POR SERIE. A partir de aquí _l10n_pe_serie_correlativo()
+        devuelve estos valores congelados en todo el flujo (payload, XML, QR, PDF, baja)."""
+        self.ensure_one()
+        if self.l10n_pe_ne_corr_emit:
+            return
+        serie = self.l10n_pe_serie or self.journal_id.l10n_pe_ne_serie or "F001"
+        if self.l10n_pe_correlativo:
+            corr = str(self.l10n_pe_correlativo).strip()
+        else:
+            corr = self._l10n_pe_ne_next_correlativo(self.company_id, serie)
+        self.l10n_pe_ne_serie_emit = serie
+        self.l10n_pe_ne_corr_emit = corr.zfill(8)
 
     def _l10n_pe_id_block(self, with_document_type=True):
         serie, correlativo = self._l10n_pe_serie_correlativo()
@@ -1297,6 +1680,7 @@ class AccountMove(models.Model):
         )
         _logger.info("---------------------------------------- Invoice request ------------------------------------------------")
         self.ensure_one()
+        self._l10n_pe_check_lineas_impuesto()
         self._l10n_pe_check_anticipo()
         # Boleta > S/700 exige el documento de identidad del cliente (SUNAT la rechaza sin él en prod).
         _logger.info("Product lines: %s", len(self._l10n_pe_product_lines()))
@@ -1362,11 +1746,61 @@ class AccountMove(models.Model):
                     "mtoBaseImpVariable": fmt(gross),
                 }
             )
+        # Ventas al Estado: 4 propiedades del proceso de contratación pública (cat. 55) por CADA
+        # línea, como cac:AdditionalItemProperty. SUNAT (reglas 3146-3149) las valida como GRUPO:
+        # van las 4 juntas o ninguna → solo se emiten si están las 4 completas.
+        estado = [
+            ("5000", "Numero de Expediente", self.l10n_pe_ne_estado_expediente),
+            ("5001", "Codigo de Unidad Ejecutora", self.l10n_pe_ne_estado_unidad_ejecutora),
+            ("5002", "Numero de Proceso de Seleccion", self.l10n_pe_ne_estado_proceso_seleccion),
+            ("5003", "Numero de Contrato", self.l10n_pe_ne_estado_contrato),
+        ]
+        if all((v or "").strip() for _c, _n, v in estado):
+            for li in range(1, idx + 1):  # idx = nº de líneas de producto contadas arriba
+                for cod, nom, val in estado:
+                    out.append(
+                        {
+                            "idLinea": str(li),
+                            # no es descuento/cargo: "-" salta el loop de AllowanceCharge por ítem
+                            "codTipoVariable": "-",
+                            # dispara el bloque cac:AdditionalItemProperty en el FTL
+                            "nomPropiedad": nom,
+                            "codPropiedad": cod,
+                            "valPropiedad": val.strip(),
+                            "codBienPropiedad": "-",
+                            "fecInicioPropiedad": "-",
+                            "horInicioPropiedad": "-",
+                            "fecFinPropiedad": "-",
+                            "numDiasPropiedad": "-",
+                        }
+                    )
+        # Placa del vehículo (factura de combustible): cac:AdditionalItemProperty cat-55 código 7000
+        # (Gastos Art. 37 Renta) en CADA línea. Solo factura (la deducción Art. 37 es factura-only).
+        # l10n_pe_ne_tipo_doc recién se congela al emitir (_l10n_pe_apply_emission_response /
+        # _l10n_pe_apply_signed): en la primera emisión, mientras se arma este payload, todavía
+        # está vacío. Usar `or "01"` aquí lo hacía SIEMPRE factura y filtraba la placa también
+        # en boletas. El idioma correcto (igual que en el resto del archivo) es
+        # `l10n_pe_ne_tipo_doc or _l10n_pe_document_type()`.
+        if self.l10n_pe_ne_placa and (self.l10n_pe_ne_tipo_doc or self._l10n_pe_document_type()) == "01":
+            for li in range(1, idx + 1):
+                out.append({
+                    "idLinea": str(li),
+                    "codTipoVariable": "-",
+                    "nomPropiedad": "Numero de Placa",
+                    "codPropiedad": "7000",
+                    "valPropiedad": self.l10n_pe_ne_placa.strip(),
+                    "codBienPropiedad": "-",
+                    "fecInicioPropiedad": "-",
+                    "horInicioPropiedad": "-",
+                    "fecFinPropiedad": "-",
+                    "numDiasPropiedad": "-",
+                })
         return out
 
     def _l10n_pe_build_note_request(self):
         """Nota de Crédito (07) / Débito (08) — referencia al documento afectado."""
         self.ensure_one()
+        self._l10n_pe_check_lineas_impuesto()
         dt = self._l10n_pe_document_type()
         origin = self.reversed_entry_id if dt == "07" else self.debit_origin_id
         cabecera = self._l10n_pe_cabecera()
@@ -2091,6 +2525,14 @@ class AccountMove(models.Model):
                     "El cliente %s está exceptuado del régimen de percepciones; no corresponde "
                     "aplicarle percepción. Desactivá la percepción para emitir este comprobante."
                 ) % (move.partner_id.display_name or ""))
+            # Valida la serie (familia correcta + habilitada, QA-074) ANTES de asignar el
+            # correlativo, para no consumir un número si la serie se rechaza.
+            move._l10n_pe_check_serie()
+            # Fija la serie+correlativo fiscal ANTES de construir el payload/firmar, desde la
+            # secuencia POR SERIE (no el folio del diario). A partir de aquí el número es estable
+            # e igual en payload, XML firmado, QR, PDF y una eventual baja. Va DESPUÉS del guard
+            # para no consumir un correlativo en un comprobante que se bloquea.
+            move._l10n_pe_ne_assign_numero()
             if use_async:
                 move._l10n_pe_enqueue_emission(icp)
                 continue
@@ -2198,6 +2640,21 @@ class AccountMove(models.Model):
         lines = []
         for ln in payload.get("lineas") or []:
             tax = self._l10n_pe_ne_tax_by_code(ln.get("taxCode"))
+            # Sin tax resuelta la línea saldría en el XML como 'gravada con IGV 0.00'
+            # (rechazo SUNAT 3111): mejor cortar aquí con el dato accionable.
+            if not tax:
+                raise UserError(
+                    _(
+                        "No hay un impuesto de venta con código SUNAT %(code)s configurado "
+                        "para la compañía (línea «%(linea)s»). Configura el IGV en "
+                        "Contabilidad → Impuestos (o ejecuta el setup de la compañía) y "
+                        "vuelve a emitir."
+                    )
+                    % {
+                        "code": ln.get("taxCode") or "1000",
+                        "linea": (ln.get("descripcion") or "").strip() or "ITEM",
+                    }
+                )
             taxes = tax
             if ln.get("icbper"):
                 # Bolsa plástica: el ICBPER (monto fijo por unidad) se SUMA al IGV de la línea.
@@ -2615,6 +3072,13 @@ class AccountMove(models.Model):
                 vals["street"] = dire
             if urb:
                 vals["street2"] = urb
+            # País del adquirente (exportación / no domiciliado): alimenta codPaisCliente en la
+            # cabecera 0200. Solo al crear (la emisión no reescribe un partner ya existente).
+            pais = (c.get("pais") or "").strip().upper()
+            if pais:
+                country = self.env["res.country"].search([("code", "=", pais)], limit=1)
+                if country:
+                    vals["country_id"] = country.id
             found = Partner.create(vals)
         # Dirección faltante → la completamos (sin pisar una ya guardada). Primero lo que
         # mandó el front; si no vino, el domicilio fiscal del padrón. Así la representación
@@ -2627,16 +3091,46 @@ class AccountMove(models.Model):
             found.street2 = urb
         return found
 
+    # Afectaciones de tasa 0% (cat-05) que se auto-crean si el plan no las trae. El IGV (1000)
+    # y el IVAP (1016) NO están aquí a propósito: su tasa es una decisión contable y crearlos
+    # con una tasa adivinada emitiría montos fiscales incorrectos — si faltan, la emisión corta
+    # con un error accionable (ver quick_emit).
+    _L10N_PE_NE_TAXES_CERO = {
+        "9997": "Exonerado",
+        "9998": "Inafecto",
+        "9995": "Exportación",
+        "9996": "Gratuito",
+    }
+
     def _l10n_pe_ne_tax_by_code(self, code):
-        """account.tax de venta por código cat-05 (l10n_pe_edi_tax_code); default 1000 (IGV gravado)."""
+        """account.tax de venta por código cat-05 (l10n_pe_edi_tax_code); default 1000 (IGV gravado).
+
+        Las taxes 0% (exonerado/inafecto/exportación/gratuito) se crean si faltan, como
+        ICBPER/ISC: una BD recién configurada suele traer solo el IGV, y sin esto la línea
+        quedaba SIN impuesto → `_l10n_pe_tax_info` la clasificaba con su default 'gravado
+        (1000)' a tasa 0 → XML con TaxableAmount>0 y TaxAmount=0.00 → rechazo SUNAT 3111."""
+        code = code or "1000"
         tax = self.env["account.tax"].search(
             [
                 ("company_id", "=", self.env.company.id),
                 ("type_tax_use", "=", "sale"),
-                ("l10n_pe_edi_tax_code", "=", code or "1000"),
+                ("l10n_pe_edi_tax_code", "=", code),
             ],
             limit=1,
         )
+        if not tax and code in self._L10N_PE_NE_TAXES_CERO:
+            label = self._L10N_PE_NE_TAXES_CERO[code]
+            tax = self.env["account.tax"].sudo().create(
+                {
+                    "name": "%s (0%%)" % label,
+                    "amount_type": "percent",
+                    "amount": 0.0,
+                    "type_tax_use": "sale",
+                    "l10n_pe_edi_tax_code": code,
+                    "company_id": self.env.company.id,
+                    "description": label,
+                }
+            )
         return self._l10n_pe_ne_normalize_tax_excluded(tax)
 
     @api.model
@@ -2727,7 +3221,18 @@ class AccountMove(models.Model):
         return {
             "igv": 18.0,
             "icbperRate": self._l10n_pe_ne_ensure_icbper_tax().amount,
+            "agentePercepcion": bool(self.env.company.l10n_pe_ne_agente_percepcion),
+            # Redondeo de efectivo: el POS lo aplica en vivo con estos parámetros (ver lib/redondeo.ts).
+            "redondeoActivo": bool(self.env.company.l10n_pe_ne_redondeo_activo),
+            "redondeoModo": self.env.company.l10n_pe_ne_redondeo_modo or "favor",
         }
+
+    @api.model
+    def l10n_pe_ne_paises(self):
+        """Catálogo de países (ISO 3166 alpha-2) para el selector del cliente extranjero en la
+        factura de exportación. Perú primero (default habitual) y el resto por nombre."""
+        paises = self.env["res.country"].search([("code", "!=", False)], order="name")
+        return [{"code": c.code, "name": c.name} for c in paises]
 
     @api.model
     def l10n_pe_ne_series(self, limit=None, offset=None):
@@ -2811,6 +3316,9 @@ class AccountMove(models.Model):
             "departamento": p.state_id.name or "",
             "datosPago": company.l10n_pe_ne_datos_pago or "",
             "hasLogo": bool(company.logo),
+            "agentePercepcion": bool(company.l10n_pe_ne_agente_percepcion),
+            "redondeoActivo": bool(company.l10n_pe_ne_redondeo_activo),
+            "redondeoModo": company.l10n_pe_ne_redondeo_modo or "favor",
         }
 
     def l10n_pe_ne_get_logo(self):
@@ -2905,6 +3413,12 @@ class AccountMove(models.Model):
             p.write(pvals)
         if "datosPago" in vals:
             company.l10n_pe_ne_datos_pago = (vals.get("datosPago") or "").strip() or False
+        if "agentePercepcion" in vals:
+            company.l10n_pe_ne_agente_percepcion = bool(vals.get("agentePercepcion"))
+        if "redondeoActivo" in vals:
+            company.l10n_pe_ne_redondeo_activo = bool(vals.get("redondeoActivo"))
+        if vals.get("redondeoModo") in ("favor", "cercano"):
+            company.l10n_pe_ne_redondeo_modo = vals["redondeoModo"]
         if "logo" in vals:
             self._l10n_pe_ne_set_logo(company, vals.get("logo"))
         return self.l10n_pe_ne_negocio()
@@ -4156,6 +4670,10 @@ class AccountMove(models.Model):
         cs = (ln.get("codSunat") or "").strip()
         if cs:
             vals["l10n_pe_ne_cod_producto_sunat"] = cs
+        if ln.get("detraCod"):
+            vals["l10n_pe_ne_detraccion_cod"] = str(ln["detraCod"]).strip()
+        if ln.get("percepTasa"):
+            vals["l10n_pe_ne_percepcion_tasa"] = _percep_float(ln["percepTasa"])
         if uni:
             vals["l10n_pe_ne_unit_code"] = uni
         if tax:
@@ -4174,6 +4692,8 @@ class AccountMove(models.Model):
             "codigo": p.default_code or "",
             "barcode": p.barcode or "",
             "codSunat": p.l10n_pe_ne_cod_producto_sunat or "",
+            "detraCod": p.l10n_pe_ne_detraccion_cod or "",
+            "percepTasa": p.l10n_pe_ne_percepcion_tasa or 0.0,
             "precio": p.list_price,
             "taxCode": (tax.l10n_pe_edi_tax_code or "1000") if tax else "1000",
             "unidad": p.l10n_pe_ne_unit_code or "",
@@ -4208,6 +4728,7 @@ class AccountMove(models.Model):
             "email": p.email or "",
             "telefono": p.phone or "",
             "direccion": p.street or "",
+            "pais": p.country_id.code or "",
             "exceptuadoPercepcion": p.l10n_pe_ne_exceptuado_percepcion,
             "parteVinculada": p.l10n_pe_ne_parte_vinculada,
         }
@@ -4228,6 +4749,12 @@ class AccountMove(models.Model):
             t = self._l10n_pe_ne_ident_type(c["tipoDoc"])
             if t:
                 vals["l10n_latam_identification_type_id"] = t.id
+        # País del adquirente (exportación / no domiciliado): ISO 3166 alpha-2 = res.country.code.
+        # Alimenta codPaisCliente en la cabecera 0200. "" limpia el país.
+        if "pais" in c:
+            code = (c.get("pais") or "").strip().upper()
+            country = self.env["res.country"].search([("code", "=", code)], limit=1) if code else False
+            vals["country_id"] = country.id if country else False
         for key, field in (
             ("email", "email"),
             ("telefono", "phone"),
@@ -4352,6 +4879,8 @@ class AccountMove(models.Model):
                 "productCod": producto.get("codigo"),
                 "barcode": producto.get("barcode"),
                 "codSunat": producto.get("codSunat"),
+                "detraCod": producto.get("detraCod"),
+                "percepTasa": producto.get("percepTasa"),
                 "precioUnitario": producto.get("precio"),
                 "unidad": producto.get("unidad"),
                 "tipo": producto.get("tipo"),
@@ -4382,6 +4911,10 @@ class AccountMove(models.Model):
             vals["barcode"] = (producto.get("barcode") or "").strip() or False
         if "codSunat" in producto:
             vals["l10n_pe_ne_cod_producto_sunat"] = (producto.get("codSunat") or "").strip() or False
+        if "detraCod" in producto:
+            vals["l10n_pe_ne_detraccion_cod"] = (producto.get("detraCod") or "").strip() or False
+        if producto.get("percepTasa") is not None:
+            vals["l10n_pe_ne_percepcion_tasa"] = _percep_float(producto.get("percepTasa"))
         if "unidad" in producto:
             vals["l10n_pe_ne_unit_code"] = (producto.get("unidad") or "").strip() or False
         if producto.get("tipo"):
@@ -4430,11 +4963,12 @@ class AccountMove(models.Model):
         import base64
         import xlsxwriter
 
-        headers = ["CÓDIGO", "CÓDIGO DE BARRAS", "NOMBRE", "UNIDAD", "PRECIO VENTA", "COSTO", "AFECTACIÓN", "BOLSA"]
+        headers = ["CÓDIGO", "CÓDIGO DE BARRAS", "NOMBRE", "TIPO", "UNIDAD", "PRECIO VENTA", "COSTO", "AFECTACIÓN", "BOLSA", "DETRACCIÓN"]
         ejemplos = [
-            ["PROD0001", "7751234000018", "CEMENTO SOL 42.5 KG", "UNIDAD", 33.90, 28.00, "GRAVADO", "NO"],
-            ["PROD0002", "7751234000025", "FIERRO CORRUGADO 1/2 PULG", "KILOGRAMO", 4.50, 3.20, "GRAVADO", "NO"],
-            ["PROD0004", "", "BOLSA PLÁSTICA", "UNIDAD", 0.50, 0.10, "GRAVADO", "SI"],
+            ["PROD0001", "7751234000018", "CEMENTO SOL 42.5 KG", "BIEN", "UNIDAD", 33.90, 28.00, "GRAVADO", "NO", ""],
+            ["PROD0002", "7751234000025", "FIERRO CORRUGADO 1/2 PULG", "BIEN", "KILOGRAMO", 4.50, 3.20, "GRAVADO", "NO", ""],
+            ["SERV0001", "", "SERVICIO DE CONSULTORÍA", "SERVICIO", "", 150.00, "", "GRAVADO", "NO", ""],
+            ["PROD0004", "", "BOLSA PLÁSTICA", "BIEN", "UNIDAD", 0.50, 0.10, "GRAVADO", "SI", ""],
         ]
         buf = io.BytesIO()
         wb = xlsxwriter.Workbook(buf, {"in_memory": True})
@@ -4445,7 +4979,9 @@ class AccountMove(models.Model):
         txtfmt = wb.add_format({"num_format": "@"})
         for c, h in enumerate(headers):
             ws.write(0, c, h, head)
-            ws.set_column(c, c, max(16, len(h) + 4), txtfmt if c == 1 else None)
+            # DETRACCIÓN también va como TEXTO: sus códigos (027, 019, 022...) empiezan con
+            # cero y Excel se lo comería si la celda quedara en formato numérico.
+            ws.set_column(c, c, max(16, len(h) + 4), txtfmt if c in (1, 9) else None)
         for r, row in enumerate(ejemplos, 1):
             ws.write_row(r, 0, row)
         # Comentarios de ayuda al pasar el mouse por la cabecera (el triangulito rojo).
@@ -4453,26 +4989,40 @@ class AccountMove(models.Model):
         ws.write_comment(0, 1, (
             "Opcional. El código de barras (EAN) que trae el producto, para escanearlo "
             "en el POS. Déjalo vacío si el producto no tiene."), note)
-        ws.write_comment(0, 4, "Precio final CON IGV incluido (lo que paga el cliente).", note)
-        ws.write_comment(0, 5, "Opcional. Precio de compra referencial. NO afecta la facturación.", note)
-        ws.write_comment(0, 6, (
+        ws.write_comment(0, 3, (
+            "BIEN o SERVICIO. Un SERVICIO no lleva stock en Odoo y va con unidad ZZ a SUNAT.\n"
+            "Si lo dejas vacío se deduce de la UNIDAD (SERVICIO/ZZ → servicio; el resto → bien)."), note)
+        ws.write_comment(0, 5, "Precio final CON IGV incluido (lo que paga el cliente).", note)
+        ws.write_comment(0, 6, "Opcional. Precio de compra referencial. NO afecta la facturación.", note)
+        ws.write_comment(0, 7, (
             "Tipo de afectación de IGV. Elígelo del desplegable.\n"
             "• GRAVADO = con IGV 18% (lo normal)\n"
             "• EXONERADO / INAFECTO = sin IGV\n"
             "• EXPORTACION / GRATUITO = casos especiales\n"
             "Si lo dejas vacío se asume GRAVADO."), note)
-        ws.write_comment(0, 7, (
+        ws.write_comment(0, 8, (
             "SI / NO. Márcalo SI solo si el producto es una BOLSA PLÁSTICA: "
             "cobra el ICBPER (monto fijo por unidad) al venderlo. Vacío = NO."), note)
-        # Desplegable (select) para UNIDAD, con ayuda al hacer clic en la celda.
+        ws.write_comment(0, 9, (
+            "Opcional. Código cat. 54 de SUNAT si el producto está sujeto a detracción "
+            "(ej. 027 transporte de carga). Vacío = no sujeto."), note)
+        # Desplegable (select) BIEN/SERVICIO para TIPO.
         ws.data_validation(1, 3, 1000, 3, {
+            "validate": "list", "source": ["BIEN", "SERVICIO"],
+            "input_title": "Bien o servicio",
+            "input_message": (
+                "SERVICIO no lleva stock (va con unidad ZZ a SUNAT); BIEN sí puede llevar.\n"
+                "Vacío = se deduce de la UNIDAD.")})
+        # Desplegable (select) para UNIDAD, con ayuda al hacer clic en la celda. (El bien/servicio va
+        # en la columna TIPO; acá es solo la unidad de medida.)
+        ws.data_validation(1, 4, 1000, 4, {
             "validate": "list", "source": [
-                "UNIDAD", "SERVICIO", "KILOGRAMO", "GRAMO", "LITRO", "GALON", "CAJA",
-                "METRO", "METRO CUADRADO", "METRO CUBICO", "MILLAR", "DOCENA"],
+                "UNIDAD", "KILOGRAMO", "GRAMO", "LITRO", "GALON", "CAJA",
+                "METRO", "METRO CUADRADO", "METRO CUBICO", "MILLAR", "DOCENA", "HORA", "DIA"],
             "input_title": "Unidad de medida",
             "input_message": "Elige de la lista o escribe el código SUNAT (NIU, KGM…). Vacío = UNIDAD."})
         # Desplegable (select) para AFECTACIÓN, con ayuda + alerta suave si no es de la lista.
-        ws.data_validation(1, 6, 1000, 6, {
+        ws.data_validation(1, 7, 1000, 7, {
             "validate": "list", "source": [
                 "GRAVADO", "EXONERADO", "INAFECTO", "EXPORTACION", "GRATUITO"],
             "input_title": "Afectación de IGV",
@@ -4484,7 +5034,7 @@ class AccountMove(models.Model):
             "error_title": "Valor sugerido",
             "error_message": "Usa: GRAVADO, EXONERADO, INAFECTO, EXPORTACION o GRATUITO."})
         # Desplegable (select) SI/NO para BOLSA (ICBPER).
-        ws.data_validation(1, 7, 1000, 7, {
+        ws.data_validation(1, 8, 1000, 8, {
             "validate": "list", "source": ["SI", "NO"],
             "input_title": "Bolsa plástica (ICBPER)",
             "input_message": (
@@ -4497,15 +5047,19 @@ class AccountMove(models.Model):
             "CHASKIFACT — Plantilla de importación de productos",
             "",
             "1. Una fila = un producto. 'CÓDIGO' es la clave: si ya existe, se ACTUALIZA; si no, se CREA.",
+            "   Al ACTUALIZAR, una celda VACÍA MANTIENE el valor actual del producto (no lo borra ni lo resetea).",
             "2. 'CÓDIGO DE BARRAS' es opcional: el EAN del producto para escanearlo en el POS. No puede repetirse entre productos.",
             "3. 'NOMBRE' es obligatorio. 'PRECIO VENTA' es el precio final CON IGV incluido.",
-            "4. 'UNIDAD': puedes escribir el nombre (UNIDAD, KILOGRAMO, CAJA…) o el código SUNAT (NIU, KGM, BX…). Vacío = UNIDAD (NIU).",
-            "5. 'AFECTACIÓN' (elígela del desplegable de la celda): define el IGV del producto.",
+            "4. 'TIPO' (elígelo del desplegable): BIEN o SERVICIO. Un servicio no lleva stock y va con unidad ZZ a SUNAT.",
+            "     Si lo dejas vacío se deduce de la UNIDAD (SERVICIO/ZZ → servicio; el resto → bien).",
+            "5. 'UNIDAD': el nombre (UNIDAD, KILOGRAMO, HORA…) o el código SUNAT (NIU, KGM…). Vacío = UNIDAD (NIU), o ZZ si el TIPO es SERVICIO.",
+            "6. 'AFECTACIÓN' (elígela del desplegable de la celda): define el IGV del producto.",
             "     • GRAVADO = lleva IGV 18% (la mayoría de productos).  • EXONERADO / INAFECTO = sin IGV.",
             "     • EXPORTACION / GRATUITO = casos especiales.  Si la dejas vacía se asume GRAVADO.",
-            "6. 'COSTO' es opcional (precio de compra, referencial). No afecta la facturación.",
-            "7. 'BOLSA' = SI solo para bolsas plásticas (cobran ICBPER por unidad al venderlas). Para el resto: NO o vacío.",
-            "8. Sube el archivo, revisa el resumen (nuevos / actualizados / errores) y recién ahí confirma.",
+            "7. 'COSTO' es opcional (precio de compra, referencial). No afecta la facturación.",
+            "8. 'BOLSA' = SI solo para bolsas plásticas (cobran ICBPER por unidad al venderlas). Para el resto: NO o vacío.",
+            "9. 'DETRACCIÓN' es opcional: código cat. 54 de SUNAT (3 dígitos, ej. 027 transporte de carga) si el producto está sujeto a detracción. Vacío = no sujeto.",
+            "10. Sube el archivo, revisa el resumen (nuevos / actualizados / errores) y recién ahí confirma.",
         ]):
             wi.write(r, 0, line)
         wb.close()
@@ -4628,9 +5182,28 @@ class AccountMove(models.Model):
                 return "ERROR"
 
         Product = self.env["product.product"]
+        icbper_tax = self._l10n_pe_ne_ensure_icbper_tax()
+
+        def afe_bolsa_actuales(product):
+            """(código de afectación, ¿tiene ICBPER?) de un producto ya existente. Afectación y
+            bolsa viven en el MISMO campo (taxes_id); esto permite pisar solo la que el usuario trajo
+            en el Excel sin borrar la otra (ver 'vacío = mantener')."""
+            sale = product.taxes_id.filtered(lambda t: t.type_tax_use == "sale")
+            tiene_icbper = bool(sale.filtered(lambda t: t.l10n_pe_edi_tax_code == "7152"))
+            afe = sale.filtered(lambda t: t.l10n_pe_edi_tax_code and t.l10n_pe_edi_tax_code != "7152")[:1]
+            return (afe.l10n_pe_edi_tax_code or "1000"), tiene_icbper
+
+        def tax_ids_de(afe_code, bolsa):
+            tax = self._l10n_pe_ne_tax_by_code(afe_code)
+            ids = list(tax.ids) if tax else []
+            if bolsa:  # bolsa plástica → suma la tax ICBPER (monto fijo por unidad)
+                ids += icbper_tax.ids
+            return ids
+
         creados = actualizados = 0
         errores = []
         avisos = []
+        vistos = {}  # CÓDIGO → fila donde apareció por primera vez (duplicados dentro del archivo)
         for n, row in enumerate(rows[1:], start=2):
             if row is None or all(c is None or str(c).strip() == "" for c in row):
                 continue
@@ -4647,9 +5220,13 @@ class AccountMove(models.Model):
             if precio == "ERROR" or costo == "ERROR":
                 errores.append({"fila": n, "msg": "PRECIO o COSTO no es un número válido"})
                 continue
+            # UNIDAD (código SUNAT cat. 03). Vacía = NO se toca al actualizar; al CREAR, el default
+            # se alinea al tipo: servicio → ZZ, si no → NIU (así Odoo y SUNAT no se contradicen).
+            tipo = TIPO_IMPORT.get(norm(cell(row, "tipo")), "")  # "" | "bien" | "servicio"
             uni_raw = norm(cell(row, "unidad"))
+            uni_provisto = bool(uni_raw)
             if not uni_raw:
-                unidad = "NIU"
+                unidad = "ZZ" if tipo == "servicio" else "NIU"
             elif uni_raw in UNIDAD_IMPORT:
                 unidad = UNIDAD_IMPORT[uni_raw]
             elif uni_raw.upper() in _UNIDAD_CODES:
@@ -4658,9 +5235,19 @@ class AccountMove(models.Model):
                 unidad = "NIU"
                 avisos.append({"fila": n, "msg": "Unidad '%s' no reconocida, se usó UNIDAD (NIU)" % txt(cell(row, "unidad"))})
             afe_raw = norm(cell(row, "afectacion"))
-            tax_code = AFECT_IMPORT.get(afe_raw, "1000") if afe_raw else "1000"
+            afe_provisto = bool(afe_raw)
+            if afe_provisto and afe_raw not in AFECT_IMPORT:
+                avisos.append({"fila": n, "msg": "Afectación '%s' no reconocida, se usó GRAVADO" % txt(cell(row, "afectacion"))})
+            afe_code = AFECT_IMPORT.get(afe_raw, "1000")
+            bolsa_raw = norm(cell(row, "bolsa"))
+            bolsa_provisto = bool(bolsa_raw)
+            bolsa = bolsa_raw in ("si", "s")  # ICBPER: SI/NO
+            detra_raw = txt(cell(row, "detraccion"))
+            detra_provisto = bool(detra_raw)
+            if detra_provisto and not re.fullmatch(r"[0-9]{3}", detra_raw):
+                errores.append({"fila": n, "msg": "DETRACCIÓN debe ser el código de 3 dígitos del catálogo 54 (ej. 027) o vacío"})
+                continue
             barcode = txt(cell(row, "codigo de barras"))
-            bolsa = norm(cell(row, "bolsa")) in ("si", "s")  # ICBPER: SI/NO (vacío = NO)
 
             existing = Product.search([("default_code", "=", cod)], limit=1)
             # El código de barras no puede pertenecer a OTRO producto (Odoo lo exige único).
@@ -4669,35 +5256,60 @@ class AccountMove(models.Model):
                 if dup and dup.id != existing.id:
                     errores.append({"fila": n, "msg": "El código de barras '%s' ya pertenece a otro producto" % barcode})
                     continue
-            if not commit:
-                if existing:
-                    actualizados += 1
-                else:
-                    creados += 1
-                continue
-            vals = {"name": nombre, "l10n_pe_ne_unit_code": unidad}
-            if precio is not None:
-                vals["list_price"] = precio
-            if costo is not None:
-                vals["standard_price"] = costo
-            if barcode:
-                vals["barcode"] = barcode
-            tax = self._l10n_pe_ne_tax_by_code(tax_code)
-            tax_ids = list(tax.ids) if tax else []
-            if bolsa:  # bolsa plástica → suma la tax ICBPER (monto fijo por unidad)
-                tax_ids += self._l10n_pe_ne_ensure_icbper_tax().ids
-            vals["taxes_id"] = [(6, 0, tax_ids)]
-            if existing:
-                existing.write(vals)
-                actualizados += 1
+            # CÓDIGO repetido dentro del MISMO archivo: la última fila manda (se aplica igual), pero
+            # se avisa y NO se cuenta dos veces (el preview marcaría 2 'nuevos' para un solo producto).
+            repetido = cod in vistos
+            if repetido:
+                avisos.append({"fila": n, "msg": "CÓDIGO '%s' repetido (ya venía en la fila %d); vale la última fila" % (cod, vistos[cod])})
             else:
-                # Tipo deducido de la unidad de la fila (ZZ → servicio, resto → bien): el
-                # Excel no trae columna de tipo y la unidad es la señal que sí trae.
-                vals.update({"default_code": cod,
-                             "type": self._l10n_pe_ne_tipo_producto(unidad=unidad),
-                             "sale_ok": True, "company_id": self.env.company.id})
+                vistos[cod] = n
+            if not commit:
+                if not repetido:
+                    actualizados += 1 if existing else 0
+                    creados += 0 if existing else 1
+                continue
+            if existing:
+                # Actualización: "vacío = mantener". Solo se pisa lo que el usuario TRAJO con valor;
+                # afectación y bolsa comparten campo, así que la que no venga se lee del producto.
+                vals = {"name": nombre}
+                if uni_provisto:
+                    vals["l10n_pe_ne_unit_code"] = unidad
+                if tipo:
+                    vals["type"] = self._l10n_pe_ne_tipo_producto(tipo)
+                if detra_provisto:
+                    vals["l10n_pe_ne_detraccion_cod"] = detra_raw
+                if precio is not None:
+                    vals["list_price"] = precio
+                if costo is not None:
+                    vals["standard_price"] = costo
+                if barcode:
+                    vals["barcode"] = barcode
+                if afe_provisto or bolsa_provisto:
+                    cur_afe, cur_bolsa = afe_bolsa_actuales(existing)
+                    vals["taxes_id"] = [(6, 0, tax_ids_de(
+                        afe_code if afe_provisto else cur_afe,
+                        bolsa if bolsa_provisto else cur_bolsa))]
+                existing.write(vals)
+                if not repetido:
+                    actualizados += 1
+            else:
+                # Alta: se aplican los defaults. El tipo lo manda la columna TIPO si vino; si no, se
+                # deduce de la unidad (ZZ → servicio, resto → bien), la señal que sí trae la fila.
+                vals = {"name": nombre, "default_code": cod, "l10n_pe_ne_unit_code": unidad,
+                        "type": self._l10n_pe_ne_tipo_producto(tipo or None, unidad),
+                        "taxes_id": [(6, 0, tax_ids_de(afe_code, bolsa))],
+                        "sale_ok": True, "company_id": self.env.company.id}
+                if precio is not None:
+                    vals["list_price"] = precio
+                if costo is not None:
+                    vals["standard_price"] = costo
+                if detra_provisto:
+                    vals["l10n_pe_ne_detraccion_cod"] = detra_raw
+                if barcode:
+                    vals["barcode"] = barcode
                 Product.create(vals)
-                creados += 1
+                if not repetido:
+                    creados += 1
         return {"commit": commit, "creados": creados, "actualizados": actualizados,
                 "errores": errores, "avisos": avisos,
                 "totalOk": creados + actualizados, "totalError": len(errores)}
@@ -5156,20 +5768,60 @@ class AccountMove(models.Model):
             move.l10n_pe_ne_percepcion_rate = float(p.get("tasa") or 2)
         if payload.get("esAnticipo"):
             move.l10n_pe_ne_es_anticipo = True
-        a = payload.get("anticipo")
-        if a:
-            move.l10n_pe_ne_anticipo_total = float(a.get("total") or 0)
-            move.l10n_pe_ne_anticipo_doc = a.get("doc") or ""
-            if a.get("tipo"):
-                move.l10n_pe_ne_anticipo_tipo = a["tipo"]
-            # Enlace al anticipo local (doc. A) elegido en el autocompletado, para llevar su saldo.
-            if a.get("origenId"):
-                move.l10n_pe_ne_anticipo_origen_id = int(a["origenId"])
+        # Descuento que NO afecta la base del IGV: el por ítem (descNoAfecta de cada línea) + el global
+        # (descuentoGlobalNoAfecta) se agregan en un solo importe. NO reduce gravada/IGV: el emisor lo
+        # aplica como AllowanceCharge global que solo baja el total (ver _l10n_pe_desc_no_afecta).
+        desc_no_afecta = round(
+            sum(float(ln.get("descNoAfecta") or 0) for ln in (payload.get("lineas") or []))
+            + float(payload.get("descuentoGlobalNoAfecta") or 0),
+            2,
+        )
+        if desc_no_afecta > 0:
+            move.l10n_pe_ne_desc_no_afecta = desc_no_afecta
+        # Anticipos regularizados: lista JSON (varios anticipos / pagos escalonados). Retrocompat
+        # con el payload viejo de un solo anticipo (objeto): se envuelve en lista de 1.
+        anticipos = payload.get("anticipos")
+        if anticipos is None and payload.get("anticipo"):
+            anticipos = [payload["anticipo"]]
+        if anticipos:
+            move.l10n_pe_ne_anticipos = [
+                {
+                    "doc": a.get("doc"),
+                    "monto": float(a.get("monto") or a.get("total") or 0),
+                    "tipo": a.get("tipo") or "02",
+                    # Enlace al anticipo local (doc. A) elegido en el autocompletado, para
+                    # llevar su saldo.
+                    "origenId": a.get("origenId"),
+                }
+                for a in anticipos
+            ]
         # Forma de pago: Crédito (con cuotas) emite cac:PaymentTerms; medios de pago
         # (efectivo/Yape/…) se guardan como dato interno del POS (no van al XML SUNAT).
         # Establecimiento emisor (sucursal): código de local anexo SUNAT del comprobante.
         if payload.get("codEstablecimiento"):
             move.l10n_pe_ne_cod_establecimiento = payload["codEstablecimiento"]
+        # Orden de compra del cliente (cac:OrderReference).
+        if payload.get("ordenCompra"):
+            move.l10n_pe_ne_orden_compra = str(payload["ordenCompra"]).strip()
+        # Observación general (print-only): va a narration y sale como "Observación: <texto>"
+        # en el ticket y el A4 (adicionalTxt). NO va al XML firmado.
+        if payload.get("observacion"):
+            move.narration = payload["observacion"]
+        # Razón social override por-comprobante: solo boleta (03), constancia institucional. NO renombra
+        # el partner (que ya existe con su nombre RENIEC al llegar acá; ver diseño).
+        if (payload.get("tipoDoc") or "01") == "03":
+            cn = ((payload.get("cliente") or {}).get("razonSocial") or "").strip()
+            if cn:
+                move.l10n_pe_ne_cliente_nombre = cn
+        if payload.get("placa"):
+            move.l10n_pe_ne_placa = str(payload["placa"]).strip().upper()
+        # Ventas al Estado (proveedor del Estado): 4 datos del proceso de contratación pública.
+        ve = payload.get("ventaEstado") or {}
+        if ve:
+            move.l10n_pe_ne_estado_expediente = (ve.get("expediente") or "").strip()
+            move.l10n_pe_ne_estado_unidad_ejecutora = (ve.get("unidadEjecutora") or "").strip()
+            move.l10n_pe_ne_estado_proceso_seleccion = (ve.get("procesoSeleccion") or "").strip()
+            move.l10n_pe_ne_estado_contrato = (ve.get("contrato") or "").strip()
         # Guía de remisión referenciada (DespatchDocumentReference).
         if payload.get("guiaRef"):
             move.l10n_pe_ne_guia_ref = payload["guiaRef"]
@@ -5190,6 +5842,24 @@ class AccountMove(models.Model):
                 move.invoice_date_due = venc
         if fp.get("medios"):
             move.l10n_pe_ne_medios_pago = fp.get("medios")
+        # El vencimiento (cbc:DueDate) es AUTOMÁTICO, no lo decide el emisor: al crédito la fija la
+        # última cuota (arriba); al contado la cabecera usa la fecha de emisión (vence el mismo día).
+        # Por eso ya no se recibe una fechaVencimiento manual desde el front.
+        # Redondeo de efectivo (dato de caja, no del XML): el POS lo calcula en vivo (≤ 0). Se
+        # persiste solo si el pago es efectivo y el flag de la compañía está activo; ausente/0 = sin
+        # redondeo. El importe entregado en efectivo = amount_total + redondeo.
+        red = payload.get("redondeo")
+        if red and move.company_id.l10n_pe_ne_redondeo_activo and self._l10n_pe_ne_solo_efectivo(fp.get("medios")):
+            move.l10n_pe_ne_redondeo = float(red)
+
+    @staticmethod
+    def _l10n_pe_ne_solo_efectivo(medios):
+        """¿el pago es 100% efectivo? Sin medios detallados el POS asume efectivo (True). Un solo
+        medio no-efectivo o mezcla desactiva el redondeo (espeja lib/redondeo.ts:esSoloEfectivo)."""
+        con_monto = [m for m in (medios or []) if float(m.get("monto") or 0) > 0]
+        if not con_monto:
+            return True
+        return all((m.get("medio") or "Efectivo").strip() == "Efectivo" for m in con_monto)
 
     def l10n_pe_ne_quick_result(self):
         self.ensure_one()
@@ -5298,6 +5968,11 @@ class AccountMove(models.Model):
                 "fechaEmision": m.invoice_date.strftime("%Y-%m-%d")
                 if m.invoice_date
                 else "",
+                # Fecha de vencimiento (cbc:DueDate): al crédito = última cuota; al contado, el
+                # plazo opcional que fijó el emisor. Vacío si el comprobante no tiene vencimiento.
+                "vencimiento": m.invoice_date_due.strftime("%Y-%m-%d")
+                if m.invoice_date_due
+                else "",
                 # Hora de creación del comprobante (≈ emisión), en tz local (Lima).
                 "hora": fields.Datetime.context_timestamp(m, m.create_date).strftime("%H:%M")
                 if m.create_date
@@ -5369,13 +6044,19 @@ class AccountMove(models.Model):
             "fecha": self.invoice_date.strftime("%Y-%m-%d")
             if self.invoice_date
             else "",
+            # Vencimiento (cbc:DueDate) y cuotas del crédito, para mostrarlos en el detalle.
+            "vencimiento": self.invoice_date_due.strftime("%Y-%m-%d")
+            if self.invoice_date_due
+            else "",
             "cliente": self.partner_id.name or "",
             "clienteDoc": self.partner_id.vat or "",
             "moneda": self.currency_id.name or "PEN",
             "estado": self.l10n_pe_biller_state or "",
             "mensaje": self.l10n_pe_biller_message or "",
             "formaPago": self.l10n_pe_ne_forma_pago or "Contado",
+            "cuotas": self.l10n_pe_ne_cuotas or [],
             "docOrigen": ("%s %s-%s" % (ot, os_, on)) if on else "",
+            "anticipos": self._l10n_pe_ne_anticipos_list(),
             "lineas": lineas,
             "notasCredito": [
                 {
@@ -5462,26 +6143,40 @@ class AccountMove(models.Model):
 
         return ", ".join(_txt(m) for m in medios if float(m.get("monto") or 0) > 0)
 
+    def _l10n_pe_ne_observacion_impresa(self):
+        """Observación general del comprobante para la representación impresa (ticket + A4).
+        Print-only (NO va al XML firmado). Devuelve 'Observación: <texto>' o '' si no hay nota."""
+        self.ensure_one()
+        nota = html2plaintext(self.narration or "").strip()
+        return ("Observación: " + nota) if nota else ""
+
     def _l10n_pe_ne_ticket_adicional(self):
         """Bloque de pago del ticket 80mm (se manda como `adicionalTxt`): medios de pago del
-        POS, vuelto, cajero y nota. Estos datos NO van al XML SUNAT (son internos del punto de
-        venta), pero sí a la representación impresa. Devuelve HTML simple (el textField usa
-        markup html) o "" si no hay nada que mostrar."""
+        POS, vuelto, cajero y observación. Estos datos NO van al XML SUNAT (son internos del
+        punto de venta), pero sí a la representación impresa. Devuelve HTML simple (el textField
+        usa markup html) o "" si no hay nada que mostrar."""
         self.ensure_one()
         partes = []
         medios = self.l10n_pe_ne_medios_pago or []
         det = self._l10n_pe_ne_medios_pago_texto()
         if det:
             partes.append("Pago: " + det)
+            # Redondeo de efectivo (≤ 0): el comprobante mantiene amount_total, pero en efectivo se
+            # cobra 'a pagar' = amount_total + redondeo. El vuelto se calcula contra ese importe.
+            redondeo = self.l10n_pe_ne_redondeo or 0.0
+            a_pagar = round((self.amount_total or 0.0) + redondeo, 2)
+            if redondeo:
+                partes.append("Redondeo: S/ %.2f" % redondeo)
+                partes.append("A pagar efectivo: S/ %.2f" % a_pagar)
             pagado = sum(float(m.get("monto") or 0) for m in medios)
-            vuelto = round(pagado - (self.amount_total or 0.0), 2)
+            vuelto = round(pagado - a_pagar, 2)
             if vuelto > 0:
                 partes.append("Vuelto: S/ %.2f" % vuelto)
         if self.invoice_user_id:
             partes.append("Atendido por: " + (self.invoice_user_id.name or ""))
-        nota = re.sub("<[^>]+>", " ", self.narration or "").strip()
-        if nota:
-            partes.append("Nota: " + nota)
+        obs = self._l10n_pe_ne_observacion_impresa()
+        if obs:
+            partes.append(obs)
         # El micro (sanitizarAdicional) escapa el HTML y traduce '\n' -> <br/>; se envía texto plano.
         return "\n".join(partes)
 
@@ -5555,6 +6250,11 @@ class AccountMove(models.Model):
             )
             if contacto:
                 payload["contactoEmisor"] = contacto
+        else:
+            # A4: solo la observación (no el bloque POS de pago/vuelto/cajero).
+            obs = self._l10n_pe_ne_observacion_impresa()
+            if obs:
+                payload["adicionalTxt"] = obs
         headers = {"X-Api-Key": self.company_id.sudo().l10n_pe_ne_api_key or ""}
         try:
             resp = requests.post(

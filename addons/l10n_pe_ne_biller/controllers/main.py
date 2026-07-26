@@ -473,6 +473,16 @@ class L10nPeNeApi(http.Controller):
         except Exception as e:  # noqa: BLE001
             return self._fail(e)
 
+    @http.route("/ne/api/paises", **_GET)
+    def paises(self, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        try:
+            return self._json(self._move(uid).l10n_pe_ne_paises())
+        except Exception as e:  # noqa: BLE001
+            return self._fail(e)
+
     @http.route("/ne/api/tipo-cambio", **_GET)
     def tipo_cambio(self, fecha=None, **kw):
         """TC SUNAT (venta) para la fecha dada o la de hoy. {tc, fecha, fuente}."""
@@ -1292,6 +1302,23 @@ class L10nPeNeApi(http.Controller):
         return self._run(
             lambda: self._guia(uid).browse(int(rec_id)).l10n_pe_ne_consultar_ticket()
         )
+
+    @http.route("/ne/api/guias/<int:rec_id>/reemplazar", **_POST)
+    def reemplazar_guia(self, rec_id, **kw):
+        # Baja RS 123-2022: crea el borrador de reemplazo de una guía aceptada y devuelve
+        # su detalle (la SPA lo abre en el formulario). La emisión va por /emitir normal.
+        # Mismo gate que /ne/api/anular: dar de baja (reemplazar+emitir deja la original
+        # 'anulado' ante SUNAT) es tan irreversible como la baja de un comprobante — un
+        # cajero del grupo Emisor no debe poder hacerlo.
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        if not self._puede_anular(uid):
+            return self._err(
+                "No tienes permiso para dar de baja guías. Pídelo a un administrador.",
+                status=403,
+            )
+        return self._run(lambda: self._guia(uid).l10n_pe_ne_reemplazar_guia(int(rec_id)))
 
     @http.route("/ne/api/comprobantes/<int:rec_id>/guia-prefill", **_GET)
     def guia_prefill(self, rec_id, **kw):

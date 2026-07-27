@@ -16,7 +16,7 @@ except ImportError:  # pragma: no cover
 
 from odoo import _, api, fields, models
 from odoo.exceptions import UserError
-from odoo.tools import float_round
+from odoo.tools import float_round, html2plaintext
 
 from ..tools.amount_to_words import leyenda_monto
 
@@ -950,6 +950,18 @@ class AccountMove(models.Model):
         "Opcional y editable después de emitir: aduanas la numera tras el comprobante. No se "
         "envía a SUNAT en el XML de la factura; queda como referencia en el ERP.",
     )
+    l10n_pe_ne_placa = fields.Char(
+        string="Placa del vehículo",
+        copy=False,
+        help="Solo factura de combustible: número de placa del vehículo. Se emite como "
+        "cac:AdditionalItemProperty (catálogo 55, código 7000 «Gastos Art. 37 Renta: Número de "
+        "Placa») en cada línea, para sustentar la deducción del gasto.")
+    l10n_pe_ne_cliente_nombre = fields.Char(
+        string="Nombre del cliente en el comprobante",
+        copy=False,
+        help="Override por-comprobante de la razón social del cliente (solo boleta ≤700: constancia "
+        "institucional). Si está seteado, se emite en rznSocialUsuario en vez del nombre del partner, "
+        "sin renombrar el partner del DNI.")
     # Ventas al Estado (proveedor del Estado): datos del proceso de contratación pública que
     # SUNAT exige como cac:AdditionalItemProperty (catálogo 55, códigos 5000-5003) en CADA línea.
     # Las reglas SUNAT 3146-3149 los validan como GRUPO: van los 4 juntos o ninguno.
@@ -1525,7 +1537,7 @@ class AccountMove(models.Model):
             "codLocalEmisor": (self.l10n_pe_ne_cod_establecimiento or "0000"),
             "tipDocUsuario": self._l10n_pe_cliente_doc()[0],
             "numDocUsuario": self._l10n_pe_cliente_doc()[1],
-            "rznSocialUsuario": partner.name or "",
+            "rznSocialUsuario": self.l10n_pe_ne_cliente_nombre or partner.name or "",
             "tipMoneda": self.currency_id.name or "PEN",
             # El IGV teórico del gratuito NO se cobra: NO entra en el total de tributos de cabecera
             # (regla 4301: el TaxAmount de cabecera excluye el 9996). El 9996 va solo como TaxSubtotal.
@@ -1775,6 +1787,27 @@ class AccountMove(models.Model):
                             "numDiasPropiedad": "-",
                         }
                     )
+        # Placa del vehículo (factura de combustible): cac:AdditionalItemProperty cat-55 código 7000
+        # (Gastos Art. 37 Renta) en CADA línea. Solo factura (la deducción Art. 37 es factura-only).
+        # l10n_pe_ne_tipo_doc recién se congela al emitir (_l10n_pe_apply_emission_response /
+        # _l10n_pe_apply_signed): en la primera emisión, mientras se arma este payload, todavía
+        # está vacío. Usar `or "01"` aquí lo hacía SIEMPRE factura y filtraba la placa también
+        # en boletas. El idioma correcto (igual que en el resto del archivo) es
+        # `l10n_pe_ne_tipo_doc or _l10n_pe_document_type()`.
+        if self.l10n_pe_ne_placa and (self.l10n_pe_ne_tipo_doc or self._l10n_pe_document_type()) == "01":
+            for li in range(1, idx + 1):
+                out.append({
+                    "idLinea": str(li),
+                    "codTipoVariable": "-",
+                    "nomPropiedad": "Numero de Placa",
+                    "codPropiedad": "7000",
+                    "valPropiedad": self.l10n_pe_ne_placa.strip(),
+                    "codBienPropiedad": "-",
+                    "fecInicioPropiedad": "-",
+                    "horInicioPropiedad": "-",
+                    "fecFinPropiedad": "-",
+                    "numDiasPropiedad": "-",
+                })
         return out
 
     def _l10n_pe_build_note_request(self):
@@ -5767,6 +5800,18 @@ class AccountMove(models.Model):
         # Orden de compra del cliente (cac:OrderReference).
         if payload.get("ordenCompra"):
             move.l10n_pe_ne_orden_compra = str(payload["ordenCompra"]).strip()
+        # Observación general (print-only): va a narration y sale como "Observación: <texto>"
+        # en el ticket y el A4 (adicionalTxt). NO va al XML firmado.
+        if payload.get("observacion"):
+            move.narration = payload["observacion"]
+        # Razón social override por-comprobante: solo boleta (03), constancia institucional. NO renombra
+        # el partner (que ya existe con su nombre RENIEC al llegar acá; ver diseño).
+        if (payload.get("tipoDoc") or "01") == "03":
+            cn = ((payload.get("cliente") or {}).get("razonSocial") or "").strip()
+            if cn:
+                move.l10n_pe_ne_cliente_nombre = cn
+        if payload.get("placa"):
+            move.l10n_pe_ne_placa = str(payload["placa"]).strip().upper()
         # Ventas al Estado (proveedor del Estado): 4 datos del proceso de contratación pública.
         ve = payload.get("ventaEstado") or {}
         if ve:
@@ -6102,11 +6147,18 @@ class AccountMove(models.Model):
 
         return ", ".join(_txt(m) for m in medios if float(m.get("monto") or 0) > 0)
 
+    def _l10n_pe_ne_observacion_impresa(self):
+        """Observación general del comprobante para la representación impresa (ticket + A4).
+        Print-only (NO va al XML firmado). Devuelve 'Observación: <texto>' o '' si no hay nota."""
+        self.ensure_one()
+        nota = html2plaintext(self.narration or "").strip()
+        return ("Observación: " + nota) if nota else ""
+
     def _l10n_pe_ne_ticket_adicional(self):
         """Bloque de pago del ticket 80mm (se manda como `adicionalTxt`): medios de pago del
-        POS, vuelto, cajero y nota. Estos datos NO van al XML SUNAT (son internos del punto de
-        venta), pero sí a la representación impresa. Devuelve HTML simple (el textField usa
-        markup html) o "" si no hay nada que mostrar."""
+        POS, vuelto, cajero y observación. Estos datos NO van al XML SUNAT (son internos del
+        punto de venta), pero sí a la representación impresa. Devuelve HTML simple (el textField
+        usa markup html) o "" si no hay nada que mostrar."""
         self.ensure_one()
         partes = []
         medios = self.l10n_pe_ne_medios_pago or []
@@ -6126,9 +6178,9 @@ class AccountMove(models.Model):
                 partes.append("Vuelto: S/ %.2f" % vuelto)
         if self.invoice_user_id:
             partes.append("Atendido por: " + (self.invoice_user_id.name or ""))
-        nota = re.sub("<[^>]+>", " ", self.narration or "").strip()
-        if nota:
-            partes.append("Nota: " + nota)
+        obs = self._l10n_pe_ne_observacion_impresa()
+        if obs:
+            partes.append(obs)
         # El micro (sanitizarAdicional) escapa el HTML y traduce '\n' -> <br/>; se envía texto plano.
         return "\n".join(partes)
 
@@ -6202,6 +6254,11 @@ class AccountMove(models.Model):
             )
             if contacto:
                 payload["contactoEmisor"] = contacto
+        else:
+            # A4: solo la observación (no el bloque POS de pago/vuelto/cajero).
+            obs = self._l10n_pe_ne_observacion_impresa()
+            if obs:
+                payload["adicionalTxt"] = obs
         headers = {"X-Api-Key": self.company_id.sudo().l10n_pe_ne_api_key or ""}
         try:
             resp = requests.post(

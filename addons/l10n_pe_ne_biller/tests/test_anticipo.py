@@ -30,9 +30,12 @@ class TestBillerAnticipo(TransactionCase):
             'l10n_pe_serie': 'F001', 'l10n_pe_correlativo': '9',
             'invoice_line_ids': [(0, 0, {'product_id': self.product.id, 'quantity': 1.0,
                                          'price_unit': 500.0, 'tax_ids': [(6, 0, self.igv.ids)]})]}
+        # 'l10n_pe_ne_anticipo_origen_id' es el nombre viejo (campo escalar retirado); se sigue
+        # aceptando como kwarg del helper y se traduce a la lista JSON `l10n_pe_ne_anticipos`.
+        origen_id = vals.pop('l10n_pe_ne_anticipo_origen_id', None)
         if anticipo_total:
-            base.update({'l10n_pe_ne_anticipo_total': anticipo_total,
-                         'l10n_pe_ne_anticipo_doc': 'F001-00000100'})
+            base['l10n_pe_ne_anticipos'] = [{'doc': 'F001-00000100', 'monto': anticipo_total,
+                                              'tipo': '02', 'origenId': origen_id}]
         base.update(vals)
         move = self.env['account.move'].create(base)
         move.action_post()
@@ -42,12 +45,14 @@ class TestBillerAnticipo(TransactionCase):
         # valor 500 + IGV 90 = 590; anticipo 118 (valor 100 + IGV 18).
         payload = self._move(anticipo_total=118.0)._l10n_pe_build_invoice_request()
 
-        # 1) Descuento global código 04: monto = valor del anticipo, base = valor de venta completo.
+        # 1) Descuento global código 04 con FACTOR UNITARIO: base = monto = valor del anticipo, factor 1.
+        #    Así base × factor = monto exacto para cualquier importe → regla SUNAT 4322 pasa siempre
+        #    (antes: base = base de venta, factor = valor/base a 5 dec, que en base alta se desviaba > 1).
         vg = [v for v in payload['variablesGlobales'] if v['codTipoVariableGlobal'] == '04']
         self.assertEqual(len(vg), 1)
         self.assertEqual(vg[0]['mtoVariableGlobal'], '100.00')
-        self.assertEqual(vg[0]['mtoBaseImpVariableGlobal'], '500.00')
-        self.assertEqual(vg[0]['porVariableGlobal'], '0.20000')  # 5 decimales (SUNAT 3307)
+        self.assertEqual(vg[0]['mtoBaseImpVariableGlobal'], '100.00')  # base del descuento = el valor
+        self.assertEqual(vg[0]['porVariableGlobal'], '1.00000')
         self.assertEqual(vg[0]['tipVariableGlobal'], 'false')
 
         # 2) Tributo IGV de cabecera sobre la base reducida (500 − 100 = 400 → IGV 72).
@@ -96,11 +101,12 @@ class TestBillerAnticipo(TransactionCase):
     def test_anticipo_sin_doc_rechaza(self):
         move = self.env['account.move'].create({
             'move_type': 'out_invoice', 'partner_id': self.partner.id, 'invoice_date': '2026-06-20',
-            'l10n_pe_serie': 'F001', 'l10n_pe_correlativo': '9', 'l10n_pe_ne_anticipo_total': 118.0,
+            'l10n_pe_serie': 'F001', 'l10n_pe_correlativo': '9',
+            'l10n_pe_ne_anticipos': [{'monto': 118.0}],   # sin 'doc'
             'invoice_line_ids': [(0, 0, {'product_id': self.product.id, 'quantity': 1.0,
                                          'price_unit': 500.0, 'tax_ids': [(6, 0, self.igv.ids)]})]})
         move.action_post()
-        with self.assertRaises(UserError):   # falta l10n_pe_ne_anticipo_doc
+        with self.assertRaises(UserError):   # falta el doc del anticipo
             move._l10n_pe_build_invoice_request()
 
     def test_anticipo_exonerado_rechaza(self):
@@ -112,7 +118,7 @@ class TestBillerAnticipo(TransactionCase):
         move = self.env['account.move'].create({
             'move_type': 'out_invoice', 'partner_id': self.partner.id, 'invoice_date': '2026-06-20',
             'l10n_pe_serie': 'F001', 'l10n_pe_correlativo': '9',
-            'l10n_pe_ne_anticipo_total': 100.0, 'l10n_pe_ne_anticipo_doc': 'F001-00000100',
+            'l10n_pe_ne_anticipos': [{'doc': 'F001-00000100', 'monto': 100.0}],
             'invoice_line_ids': [(0, 0, {'product_id': self.product.id, 'quantity': 1.0,
                                          'price_unit': 500.0, 'tax_ids': [(6, 0, exo.ids)]})]})
         move.action_post()

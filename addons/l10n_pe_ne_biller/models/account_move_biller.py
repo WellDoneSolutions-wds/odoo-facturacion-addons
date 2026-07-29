@@ -635,6 +635,94 @@ class AccountMove(models.Model):
                     % (line.name or line.product_id.display_name or "?")
                 )
 
+    # ==================================================== L1 · validación pre-emisión
+    # Motor de reglas SUNAT: valida el comprobante ANTES de enviarlo y devuelve findings
+    # accionables (nivel 'error' | 'aviso'). Reemplaza el faultCode críptico (p.ej. 3265)
+    # por un mensaje que el emisor sí puede arreglar. Fuente única para (a) el guard duro de
+    # la emisión y (b) un futuro pre-flight de la SPA. Cada regla es un método _regla_*; sumar
+    # una regla = agregarla a la tupla de _l10n_pe_ne_validaciones.
+    def _l10n_pe_ne_validaciones(self):
+        """[{'code','campo','nivel','mensaje'}]. 'error' bloquea la emisión; 'aviso' informa
+        (lo consume el pre-flight de la SPA) y no bloquea."""
+        self.ensure_one()
+        findings = []
+        for regla in (
+            self._l10n_pe_ne_regla_neto_pendiente,   # SUNAT 3265
+            self._l10n_pe_ne_regla_cuotas_suma,
+            self._l10n_pe_ne_regla_estado_grupo,     # SUNAT 3146-3149
+        ):
+            findings += regla() or []
+        return findings
+
+    def _l10n_pe_ne_regla_neto_pendiente(self):
+        """SUNAT 3265: el neto pendiente de pago a crédito no puede superar el importe a cobrar
+        del comprobante (que ya excluye gratuitos, anticipo y descuento que no afecta el IGV).
+        Invariante del modelo de dinero: si se viola, SUNAT rechaza con 3265."""
+        if self.l10n_pe_ne_forma_pago != "Credito":
+            return []
+        neto = self._l10n_pe_credito_pendiente()
+        cobrar = self._l10n_pe_importe_cobrar()
+        if neto > cobrar + 0.005:
+            return [{
+                "code": "3265", "campo": "datoPago/mtoNetoPendientePago", "nivel": "error",
+                "mensaje": _(
+                    "El monto neto pendiente de pago a crédito (S/ %(neto).2f) supera el "
+                    "importe a cobrar del comprobante (S/ %(cobrar).2f). Revisa las cuotas, la "
+                    "inicial al contado o los ítems gratuitos."
+                ) % {"neto": neto, "cobrar": cobrar},
+            }]
+        return []
+
+    def _l10n_pe_ne_regla_cuotas_suma(self):
+        """Aviso: las cuotas tecleadas no suman el neto a cobrar; se ajustarán a este al emitir."""
+        if self.l10n_pe_ne_forma_pago != "Credito":
+            return []
+        cuotas = [c for c in (self.l10n_pe_ne_cuotas or []) if (c or {}).get("monto")]
+        if not cuotas:
+            return []
+        suma = round(sum(float(c["monto"]) for c in cuotas), 2)
+        neto = self._l10n_pe_credito_pendiente()
+        if abs(suma - neto) > 0.01:
+            return [{
+                "code": "cuotas-suma", "campo": "cuotas", "nivel": "aviso",
+                "mensaje": _(
+                    "Las cuotas suman S/ %(suma).2f pero el neto a cobrar es S/ %(neto).2f; se "
+                    "ajustarán a este último al emitir."
+                ) % {"suma": suma, "neto": neto},
+            }]
+        return []
+
+    def _l10n_pe_ne_regla_estado_grupo(self):
+        """SUNAT 3146-3149: los 4 datos de Ventas al Estado (cat. 55) van como GRUPO. Si están
+        algunos pero no los 4, la emisión los OMITE todos → aviso para no perder el dato en
+        silencio."""
+        datos = [
+            self.l10n_pe_ne_estado_expediente, self.l10n_pe_ne_estado_unidad_ejecutora,
+            self.l10n_pe_ne_estado_proceso_seleccion, self.l10n_pe_ne_estado_contrato,
+        ]
+        llenos = [bool((v or "").strip()) for v in datos]
+        if any(llenos) and not all(llenos):
+            return [{
+                "code": "3146", "campo": "AdditionalItemProperty (Estado)", "nivel": "aviso",
+                "mensaje": _(
+                    "Ventas al Estado: llenaste %(n)d de 4 datos del proceso (expediente, "
+                    "unidad ejecutora, proceso de selección y contrato). SUNAT los exige como "
+                    "grupo, así que se omitirán TODOS. Complétalos o déjalos vacíos."
+                ) % {"n": sum(llenos)},
+            }]
+        return []
+
+    def _l10n_pe_ne_asegurar_valido(self):
+        """Guard de emisión: corta con los errores accionables ANTES de enviar a SUNAT. Los
+        avisos no bloquean (los consume el pre-flight de la SPA)."""
+        self.ensure_one()
+        errores = [f for f in self._l10n_pe_ne_validaciones() if f["nivel"] == "error"]
+        if errores:
+            detalle = "\n".join("• [%s] %s" % (e["code"], e["mensaje"]) for e in errores)
+            raise UserError(
+                _("El comprobante no cumple una regla de SUNAT:\n%s") % detalle
+            )
+
     def _l10n_pe_relacionados(self):
         """Documentos relacionados de la factura: guía de remisión (indDocRelacionado 1,
         DespatchDocumentReference) y/o comprobante de anticipo (indDocRelacionado 2)."""
@@ -1708,6 +1796,7 @@ class AccountMove(models.Model):
         self.ensure_one()
         self._l10n_pe_check_lineas_impuesto()
         self._l10n_pe_check_anticipo()
+        self._l10n_pe_ne_asegurar_valido()   # L1: reglas SUNAT (3265, …) antes de enviar
         # Boleta > S/700 exige el documento de identidad del cliente (SUNAT la rechaza sin él en prod).
         _logger.info("Product lines: %s", len(self._l10n_pe_product_lines()))
         if (

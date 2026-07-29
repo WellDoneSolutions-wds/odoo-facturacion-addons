@@ -152,6 +152,10 @@ class L10nPeNeGuiaRemision(models.Model):
     # el emisor es el carrier y el remitente es un tercero al que el carrier hace referencia.
     # En la GRE remitente (09) el emisor ES el remitente y este campo queda vacío.
     remitente_id = fields.Many2one('res.partner', string='Remitente (quien envía)')
+    # Obra (C5): contrato/proyecto al que pertenece este traslado de materiales, para asociar las
+    # guías al avance de obra. Opcional; no cambia el XML de la guía.
+    l10n_pe_ne_proyecto_id = fields.Many2one(
+        'l10n_pe_ne.proyecto', string='Proyecto / obra', copy=False, index=True)
 
     # Datos del traslado.
     motivo_traslado = fields.Selection(MOTIVOS_TRASLADO, string='Motivo de traslado',
@@ -1199,6 +1203,9 @@ class L10nPeNeGuiaRemision(models.Model):
             'modalidad': dict(MODALIDADES_TRASLADO).get(self.modalidad_traslado, ''),
             'items': len(self.line_ids),
             'mensaje': self.l10n_pe_biller_message or '',
+            # Obra (C5): proyecto/contrato vinculado, si el traslado es de materiales a una obra.
+            'proyectoId': self.l10n_pe_ne_proyecto_id.id or None,
+            'proyecto': self.l10n_pe_ne_proyecto_id.name or '',
         }
         _logger.info("----------------------- Guia %s ---------------------", self.name)
         _logger.info('guia_dict: %s', resp)
@@ -1420,6 +1427,9 @@ class L10nPeNeGuiaRemision(models.Model):
             vals['fecha_entrega_transportista'] = payload.get('fechaEntregaTransportista') or False
         if 'transportistaId' in payload:
             vals['transportista_id'] = int(payload['transportistaId']) if payload.get('transportistaId') else False
+        # Obra: vincular la guía (traslado de materiales) al contrato/proyecto (C5).
+        if 'proyectoId' in payload:
+            vals['l10n_pe_ne_proyecto_id'] = int(payload['proyectoId']) if payload.get('proyectoId') else False
         if 'proveedorId' in payload:
             vals['proveedor_id'] = int(payload['proveedorId']) if payload.get('proveedorId') else False
         if 'remitenteId' in payload:

@@ -55,12 +55,14 @@ class L10nPeNeProyecto(models.Model):
         self.invalidate_recordset(
             ["facturado", "saldo", "avance", "valorizaciones", "retencion_acumulada",
              "adelanto_amortizado", "adelanto_saldo"])
+        guias = self.env["l10n_pe_ne.guia_remision"].sudo().search_count(
+            [("l10n_pe_ne_proyecto_id", "=", self.id)])
         return {"id": self.id, "name": self.name, "valorTotal": self.valor_total,
                 "facturado": self.facturado, "saldo": self.saldo,
                 "avance": self.avance, "valorizaciones": self.valorizaciones,
                 "retencionAcumulada": self.retencion_acumulada,
                 "adelanto": self.adelanto, "adelantoAmortizado": self.adelanto_amortizado,
-                "adelantoSaldo": self.adelanto_saldo}
+                "adelantoSaldo": self.adelanto_saldo, "guias": guias}
 
     @api.model
     def l10n_pe_ne_list(self):

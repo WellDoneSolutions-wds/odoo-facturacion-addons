@@ -1,3 +1,5 @@
+import json
+
 from odoo.tests import TransactionCase, tagged
 from odoo.exceptions import AccessError, UserError
 
@@ -64,6 +66,21 @@ class TestPasswordReset(TransactionCase):
         self.assertEqual(res, {'ok': True})
         self.assertFalse(self.user_a.l10n_pe_ne_must_change_password)
 
+    def test_change_own_revokes_apikeys(self):
+        self.env['res.users.apikeys'].with_user(self.user_a).sudo()._generate('l10n_pe_ne', 'test', False)
+        self.assertTrue(self.env['res.users.apikeys'].sudo().search([('user_id', '=', self.user_a.id)]))
+        self.env['res.users'].with_user(self.user_a).l10n_pe_ne_change_own_password('oldpass12', 'nuevapass56')
+        self.assertFalse(self.env['res.users.apikeys'].sudo().search([('user_id', '=', self.user_a.id)]))
+
+    def test_confirm_reset_revokes_apikeys(self):
+        self.env['res.users.apikeys'].with_user(self.user_a).sudo()._generate('l10n_pe_ne', 'test', False)
+        partner = self.user_a.partner_id
+        partner.signup_prepare(signup_type='reset')
+        token = partner._generate_signup_token()
+        res = self.env['res.users'].l10n_pe_ne_confirm_password_reset(token, 'clavenueva99')
+        self.assertEqual(res, {'ok': True})
+        self.assertFalse(self.env['res.users.apikeys'].sudo().search([('user_id', '=', self.user_a.id)]))
+
     def test_list_users_non_admin_raises(self):
         with self.assertRaises(AccessError):
             self.env['res.users'].with_user(self.user_a).l10n_pe_ne_list_manageable_users()
@@ -89,3 +106,26 @@ class TestPasswordResetRoutes(HttpCase):
         r = self.url_open('/ne/api/change-password', data='{}',
                           headers={'Content-Type': 'application/json'})
         self.assertEqual(r.status_code, 401)
+
+    def test_change_password_rotates_token(self):
+        user = self.env['res.users'].create({
+            'name': 'Rot User', 'login': 'pr_rot_user', 'password': 'oldpass12',
+            'group_ids': [(4, self.env.ref('base.group_user').id)],
+        })
+        old_token = self.env['res.users.apikeys'].with_user(user).sudo()._generate('l10n_pe_ne', 'test', False)
+        r = self.url_open(
+            '/ne/api/change-password',
+            data=json.dumps({'current': 'oldpass12', 'new': 'nuevapass99'}),
+            headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ' + old_token},
+        )
+        self.assertEqual(r.status_code, 200)
+        d = r.json()
+        self.assertTrue(d.get('ok'))
+        self.assertTrue(d.get('token'), 'la respuesta debe traer el token rotado')
+        self.assertTrue(d.get('expires'))
+        self.assertNotEqual(d['token'], old_token)
+        # El token viejo quedó revocado; el rotado autentica.
+        r_old = self.url_open('/ne/api/whoami', headers={'Authorization': 'Bearer ' + old_token})
+        self.assertEqual(r_old.status_code, 401)
+        r_new = self.url_open('/ne/api/whoami', headers={'Authorization': 'Bearer ' + d['token']})
+        self.assertEqual(r_new.status_code, 200)

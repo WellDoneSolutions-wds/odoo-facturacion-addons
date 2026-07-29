@@ -435,16 +435,28 @@ class L10nPeNeApi(http.Controller):
 
     @http.route("/ne/api/change-password", **_POST)
     def change_password(self, **kw):
-        """El usuario logueado cambia su propia contraseña."""
+        """El usuario logueado cambia su propia contraseña. El modelo revoca TODAS
+        sus API keys (cierra las demás sesiones); aquí se mintea un token rotado
+        para que ESTA sesión continúe sin re-login."""
         uid = self._identify()
         if not uid:
             return self._unauth()
         body = self._body()
-        return self._run(
-            lambda: request.env["res.users"]
-            .with_user(uid)
-            .l10n_pe_ne_change_own_password(body.get("current") or "", body.get("new") or "")
-        )
+
+        def op():
+            res = request.env["res.users"].with_user(uid).l10n_pe_ne_change_own_password(
+                body.get("current") or "", body.get("new") or ""
+            )
+            exp = datetime.datetime.now() + datetime.timedelta(hours=self._ttl_hours())
+            token = (
+                request.env["res.users.apikeys"]
+                .with_user(uid)
+                .sudo()
+                ._generate(_SCOPE, f"{_KEY_NAME} ({exp:%Y-%m-%d %H:%M})", exp)
+            )
+            return {**res, "token": token, "expires": exp.isoformat()}
+
+        return self._run(op)
 
     # -------------------------------------------------- reset self-service (Fase 2)
     @http.route("/ne/api/reset/request", **_POST)

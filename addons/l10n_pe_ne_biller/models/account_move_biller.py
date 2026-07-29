@@ -1195,6 +1195,11 @@ class AccountMove(models.Model):
         help="Contrato al que pertenece esta valorización. El total facturado no puede superar "
         "el valor del contrato.",
     )
+    # N° de valorización dentro del contrato (1ª, 2ª, …). Se fija al emitir desde la valorización;
+    # 0 = el comprobante no es una valorización de obra.
+    l10n_pe_ne_valorizacion_nro = fields.Integer(
+        string="N° de valorización", copy=False, default=0,
+        help="Orden de esta valorización dentro del contrato (facturación por avance de obra).")
     l10n_pe_ne_forma_pago = fields.Selection(
         [("Contado", "Contado"), ("Credito", "Crédito")],
         default="Contado",
@@ -3060,7 +3065,8 @@ class AccountMove(models.Model):
         proj = move.l10n_pe_ne_proyecto_id
         if proj:
             otras = move.amount_total or 0.0  # esta valorización
-            if round(proj.facturado + otras, 2) > round(proj.valor_total or 0.0, 2) + 0.01:
+            total = round(proj.valor_total or 0.0, 2)
+            if round(proj.facturado + otras, 2) > total + 0.01:
                 raise UserError(_(
                     "Esta valorización (%s) haría que lo facturado del contrato «%s» supere su "
                     "valor total. Facturado: %s · Contrato: %s · Esta: %s."
@@ -3069,6 +3075,19 @@ class AccountMove(models.Model):
                     self._l10n_pe_fmt(proj.facturado), self._l10n_pe_fmt(proj.valor_total),
                     self._l10n_pe_fmt(otras),
                 ))
+            # Emitir DESDE la valorización: se numera (las previas del contrato + 1; esta aún no
+            # está enviada, no cuenta) y, si el emisor no puso observación propia, se compone la
+            # glosa con el avance acumulado del contrato para que el comprobante lo declare.
+            move.l10n_pe_ne_valorizacion_nro = self.env["account.move"].sudo().search_count([
+                ("l10n_pe_ne_proyecto_id", "=", proj.id),
+                ("l10n_pe_biller_state", "in", ("enviado", "en_proceso")),
+            ]) + 1
+            pct = round((proj.facturado + otras) / total * 100.0, 2) if total else 0.0
+            if not (move.narration or "").strip():
+                move.narration = _(
+                    "Valorización N° %(n)s — avance acumulado %(pct)s%% del contrato «%(c)s»"
+                ) % {"n": move.l10n_pe_ne_valorizacion_nro,
+                     "pct": self._l10n_pe_fmt(pct), "c": proj.name}
         if not enviar:
             # Pre-flight: el comprobante quedó armado y posteado pero NO se envía a SUNAT.
             # El llamador (l10n_pe_ne_preflight) valida y revierte la transacción.
@@ -6329,6 +6348,11 @@ class AccountMove(models.Model):
             # DUA/DAM de exportación (QA-023): referencia del ERP para el detalle. Vacía mientras
             # aduanas no la haya numerado (se emite sin ella, QA-024).
             "dua": self.l10n_pe_ne_dua or "",
+            # Avance de obra: N° de valorización de este comprobante y el estado del contrato
+            # (avance acumulado y saldo) para mostrarlo en el detalle. None si no es valorización.
+            "valorizacionNro": self.l10n_pe_ne_valorizacion_nro or None,
+            "proyecto": self.l10n_pe_ne_proyecto_id._l10n_pe_ne_dict()
+            if self.l10n_pe_ne_proyecto_id else None,
             "anticipos": self._l10n_pe_ne_anticipos_list(),
             "lineas": lineas,
             "notasCredito": [

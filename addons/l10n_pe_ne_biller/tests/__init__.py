@@ -12,3 +12,4 @@ from . import test_validacion_preemision
 from . import test_harness_verticales
 from . import test_modelo_dinero
 from . import test_vencido
+from . import test_valorizacion

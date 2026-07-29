@@ -3,9 +3,11 @@ from unittest.mock import patch
 from odoo.exceptions import UserError
 from odoo.tests import TransactionCase, tagged
 
+from .common import L10nPeSeedMixin
+
 
 @tagged('post_install', '-at_install')
-class TestValidacionPreEmision(TransactionCase):
+class TestValidacionPreEmision(L10nPeSeedMixin, TransactionCase):
     """L1 · Motor de validación pre-emisión.
 
     Valida el comprobante contra las reglas SUNAT ANTES de enviarlo y devuelve findings
@@ -14,16 +16,8 @@ class TestValidacionPreEmision(TransactionCase):
     """
 
     def setUp(self):
-        super().setUp()
+        super().setUp()  # L10nPeSeedMixin siembra RUC + IGV (self.igv)
         self.company = self.env.company
-        Tax = self.env['account.tax'].sudo()
-        self.igv = Tax.search([
-            ('company_id', '=', self.company.id), ('type_tax_use', '=', 'sale'),
-            ('l10n_pe_edi_tax_code', '=', '1000')], limit=1)
-        if not self.igv:
-            self.igv = Tax.create({'name': 'IGV 18% (test)', 'amount_type': 'percent',
-                                   'amount': 18.0, 'type_tax_use': 'sale',
-                                   'l10n_pe_edi_tax_code': '1000', 'company_id': self.company.id})
         self.gratuito = self.env['account.move']._l10n_pe_ne_tax_by_code('9996')
         ruc_type = self.env['l10n_latam.identification.type'].search(
             [('l10n_pe_vat_code', '=', '6')], limit=1)

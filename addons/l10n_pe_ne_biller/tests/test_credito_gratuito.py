@@ -1,8 +1,10 @@
 from odoo.tests import TransactionCase, tagged
 
+from .common import L10nPeSeedMixin
+
 
 @tagged('post_install', '-at_install')
-class TestCreditoGratuito(TransactionCase):
+class TestCreditoGratuito(L10nPeSeedMixin, TransactionCase):
     """Venta al CRÉDITO con una línea GRATUITA (cat. 05 = 9996).
 
     Caso real (F001-247, rechazo SUNAT 3265): total 2950 con un ítem gratuito de 790. El
@@ -15,18 +17,8 @@ class TestCreditoGratuito(TransactionCase):
     """
 
     def setUp(self):
-        super().setUp()
+        super().setUp()  # L10nPeSeedMixin siembra RUC + IGV (self.igv)
         self.company = self.env.company
-        Tax = self.env['account.tax'].sudo()
-        # El IGV (1000) lo aporta el plan contable l10n_pe; lo aseguramos para que el test sea
-        # hermético (no dependa del plan cargado en la BD).
-        self.igv = Tax.search([
-            ('company_id', '=', self.company.id), ('type_tax_use', '=', 'sale'),
-            ('l10n_pe_edi_tax_code', '=', '1000')], limit=1)
-        if not self.igv:
-            self.igv = Tax.create({'name': 'IGV 18% (test)', 'amount_type': 'percent',
-                                   'amount': 18.0, 'type_tax_use': 'sale',
-                                   'l10n_pe_edi_tax_code': '1000', 'company_id': self.company.id})
         # La tax gratuita (9996) se auto-crea si el plan no la trae (mismo helper de producción).
         self.gratuito = self.env['account.move']._l10n_pe_ne_tax_by_code('9996')
         ruc_type = self.env['l10n_latam.identification.type'].search(

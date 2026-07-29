@@ -147,3 +147,25 @@ class TestValidacionPreEmision(TransactionCase):
             [{'descripcion': 'ITEM', 'cantidad': 1, 'precioUnitario': 500, 'taxCode': '1000'}],
             formaPago={'tipo': 'Credito', 'cuotas': [{'fecha': '2026-09-29', 'monto': 1000}]}))
         self.assertIn('cuotas-suma', {f['code'] for f in findings})
+
+    # -- detracción (SPOT): reglas de rechazo garantizado --------------------------------
+    def test_detraccion_sin_cuenta_bloquea(self):
+        self.company.sudo().l10n_pe_ne_cuenta_detraccion = False  # ni en la empresa
+        move = self._move(l10n_pe_ne_detraccion=True, l10n_pe_ne_detraccion_code='037',
+                          l10n_pe_ne_detraccion_rate=12.0)  # sin cuenta en el comprobante
+        codes = self._codes(move)
+        self.assertIn('detraccion-cuenta', codes, 'detracción sin cuenta BN debe bloquear')
+        self.assertNotIn('detraccion-monto', codes, 'el monto sí es > 0 (base 590 × 12%)')
+
+    def test_detraccion_monto_cero_bloquea(self):
+        move = self._move(l10n_pe_ne_detraccion=True, l10n_pe_ne_detraccion_code='028',
+                          l10n_pe_ne_detraccion_rate=0.0,  # tasa 0 → monto 0
+                          l10n_pe_ne_detraccion_cuenta='00-123-456789')
+        self.assertIn('detraccion-monto', self._codes(move))
+
+    def test_detraccion_completa_no_bloquea(self):
+        move = self._move(l10n_pe_ne_detraccion=True, l10n_pe_ne_detraccion_code='037',
+                          l10n_pe_ne_detraccion_rate=12.0,
+                          l10n_pe_ne_detraccion_cuenta='00-123-456789')
+        errores = [f for f in move._l10n_pe_ne_validaciones() if f['nivel'] == 'error']
+        self.assertFalse(errores, 'detracción con cuenta y tasa válida no debe bloquear')

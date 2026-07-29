@@ -647,9 +647,11 @@ class AccountMove(models.Model):
         self.ensure_one()
         findings = []
         for regla in (
-            self._l10n_pe_ne_regla_neto_pendiente,   # SUNAT 3265
+            self._l10n_pe_ne_regla_neto_pendiente,      # SUNAT 3265
             self._l10n_pe_ne_regla_cuotas_suma,
-            self._l10n_pe_ne_regla_estado_grupo,     # SUNAT 3146-3149
+            self._l10n_pe_ne_regla_estado_grupo,        # SUNAT 3146-3149
+            self._l10n_pe_ne_regla_detraccion_cuenta,   # SPOT: cta. Banco de la Nación
+            self._l10n_pe_ne_regla_detraccion_monto,    # SPOT: mtoDetraccion > 0
         ):
             findings += regla() or []
         return findings
@@ -709,6 +711,43 @@ class AccountMove(models.Model):
                     "unidad ejecutora, proceso de selección y contrato). SUNAT los exige como "
                     "grupo, así que se omitirán TODOS. Complétalos o déjalos vacíos."
                 ) % {"n": sum(llenos)},
+            }]
+        return []
+
+    def _l10n_pe_ne_regla_detraccion_cuenta(self):
+        """SPOT: si el comprobante está sujeto a detracción, la cuenta del Banco de la Nación es
+        obligatoria (cbc:ID de cac:PaymentMeans → ctaBancoNacionDetraccion). Va la del comprobante
+        o, si no, la de la compañía; vacía = SUNAT rechaza el depósito de detracción."""
+        if not self.l10n_pe_ne_detraccion:
+            return []
+        cuenta = (
+            self.l10n_pe_ne_detraccion_cuenta
+            or self.company_id.l10n_pe_ne_cuenta_detraccion
+            or ""
+        ).strip()
+        if not cuenta:
+            return [{
+                "code": "detraccion-cuenta", "campo": "ctaBancoNacionDetraccion", "nivel": "error",
+                "mensaje": _(
+                    "La operación está sujeta a detracción pero no tiene número de cuenta del "
+                    "Banco de la Nación. Cárgala en el comprobante o en los datos de la empresa."
+                ),
+            }]
+        return []
+
+    def _l10n_pe_ne_regla_detraccion_monto(self):
+        """SPOT: el monto de la detracción debe ser mayor a 0. Si la tasa es 0 (o el código no
+        lleva tasa, p.ej. transporte de pasajeros 028) o el importe es tan chico que redondea a 0,
+        el mtoDetraccion sale en 0 y SUNAT rechaza."""
+        if not self.l10n_pe_ne_detraccion:
+            return []
+        if self._l10n_pe_detraccion_monto() <= 0:
+            return [{
+                "code": "detraccion-monto", "campo": "mtoDetraccion", "nivel": "error",
+                "mensaje": _(
+                    "La detracción da un monto de S/ 0.00. Revisa la tasa (%(tasa)s%%) o el "
+                    "importe de la operación: el monto de la detracción debe ser mayor a 0."
+                ) % {"tasa": self._l10n_pe_fmt(self.l10n_pe_ne_detraccion_rate or 0.0)},
             }]
         return []
 

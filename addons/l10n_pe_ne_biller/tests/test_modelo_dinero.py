@@ -26,7 +26,8 @@ class TestModeloDinero(L10nPeSeedMixin, TransactionCase):
             'l10n_latam_identification_type_id': ruc_type.id})
         self.product = self.env['product.product'].create({'name': 'ITEM', 'default_code': 'I1'})
 
-    def _build(self, gravado=None, gratuito=None, detraccion=False, credito_cuotas=None, inicial=0.0):
+    def _build(self, gravado=None, gratuito=None, detraccion=False, credito_cuotas=None,
+               inicial=0.0, retencion=0.0):
         lines = []
         if gravado:
             lines.append((0, 0, {'product_id': self.product.id, 'quantity': 1.0,
@@ -46,6 +47,8 @@ class TestModeloDinero(L10nPeSeedMixin, TransactionCase):
             vals.update({'l10n_pe_ne_forma_pago': 'Credito', 'l10n_pe_ne_cuotas': credito_cuotas})
         if inicial:
             vals['l10n_pe_ne_inicial_contado'] = inicial
+        if retencion:
+            vals['l10n_pe_ne_retencion_garantia_rate'] = retencion
         move = self.env['account.move'].create(vals)
         move.action_post()
         return move
@@ -82,6 +85,12 @@ class TestModeloDinero(L10nPeSeedMixin, TransactionCase):
                                                credito_cuotas=[{'fecha': '2026-12-31', 'monto': 900}])),
             ('crédito con cuotas descuadradas (se escalan al neto)',
              dict(gravado=500, credito_cuotas=[{'fecha': '2026-12-31', 'monto': 9999}])),
+            ('obra con retención de garantía 10%',
+             dict(gravado=10000, retencion=10.0,
+                  credito_cuotas=[{'fecha': '2026-12-31', 'monto': 10000}])),
+            ('obra con detracción + retención de garantía',
+             dict(gravado=10000, detraccion=True, retencion=10.0,
+                  credito_cuotas=[{'fecha': '2026-12-31', 'monto': 8000}])),
         ]
         for nombre, kw in casos:
             with self.subTest(caso=nombre):

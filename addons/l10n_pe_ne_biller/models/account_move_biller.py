@@ -63,6 +63,22 @@ TAX_CODE_MAP = {
 }
 DEFAULT_TAX_CODE = "1000"  # Sin tax reconocida -> gravado IGV (caso más común).
 
+# Tasas OFICIALES de detracción (SPOT) por código de bien/servicio (cat. 54). Guard autoritativo
+# del backend: el front (detracciones.ts) las valida al capturar, pero esto cubre masiva/API/bypass.
+# Ej.: contratos de CONSTRUCCIÓN = 030 (4%), NO 037 (12% "demás servicios"). Código 028 (transporte
+# de pasajeros) no lleva tasa fija → se omite. Regulatorio: cambia por resolución SUNAT (mantener en
+# sync con el front). Un código fuera de esta tabla no dispara el aviso.
+DETRACCION_TASAS = {
+    # Servicios (Anexo 3)
+    "012": 12.0, "019": 10.0, "020": 12.0, "021": 10.0, "022": 12.0, "024": 10.0,
+    "025": 10.0, "026": 10.0, "027": 4.0, "030": 4.0, "037": 12.0, "099": 8.0,
+    # Bienes (Anexo 2)
+    "001": 10.0, "002": 4.0, "003": 4.0, "004": 4.0, "005": 4.0, "007": 10.0,
+    "008": 4.0, "009": 10.0, "010": 15.0, "011": 10.0, "014": 4.0, "016": 10.0,
+    "017": 4.0, "023": 4.0, "031": 10.0, "032": 10.0, "034": 10.0, "035": 1.0,
+    "036": 1.0, "039": 10.0, "040": 4.0, "041": 15.0,
+}
+
 # Código de unidad de medida de SUNAT (cat. 03 / UN-ECE Rec. 20) por XMLID de la unidad estándar
 # de Odoo. Mapeo replicado de l10n_pe_edi (enterprise). Se resuelve en runtime porque las UoM base
 # son `noupdate` y un data file de otro módulo no las actualiza; para unidades personalizadas, el
@@ -667,6 +683,7 @@ class AccountMove(models.Model):
             self._l10n_pe_ne_regla_estado_grupo,        # SUNAT 3146-3149
             self._l10n_pe_ne_regla_detraccion_cuenta,   # SPOT: cta. Banco de la Nación
             self._l10n_pe_ne_regla_detraccion_monto,    # SPOT: mtoDetraccion > 0
+            self._l10n_pe_ne_regla_detraccion_tasa,     # SPOT: tasa oficial del código
             self._l10n_pe_ne_regla_exportacion_pais,    # 0200: país del no domiciliado
             self._l10n_pe_ne_regla_boleta_doc,          # boleta > S/700 con documento
             self._l10n_pe_ne_regla_vencidos,            # farma/perecibles: lote vencido
@@ -766,6 +783,27 @@ class AccountMove(models.Model):
                     "La detracción da un monto de S/ 0.00. Revisa la tasa (%(tasa)s%%) o el "
                     "importe de la operación: el monto de la detracción debe ser mayor a 0."
                 ) % {"tasa": self._l10n_pe_fmt(self.l10n_pe_ne_detraccion_rate or 0.0)},
+            }]
+        return []
+
+    def _l10n_pe_ne_regla_detraccion_tasa(self):
+        """SPOT: avisa si la tasa de detracción no coincide con la OFICIAL del código (cat. 54).
+        Ej.: contratos de construcción (030) = 4%, no 12%. Es un AVISO —la tabla cambia por
+        resolución SUNAT y el contador confirma la tasa—; un código fuera de la tabla no dispara."""
+        if not self.l10n_pe_ne_detraccion:
+            return []
+        code = (self.l10n_pe_ne_detraccion_code or "").strip()
+        oficial = DETRACCION_TASAS.get(code)
+        if oficial is None:
+            return []
+        if abs((self.l10n_pe_ne_detraccion_rate or 0.0) - oficial) > 0.01:
+            return [{
+                "code": "detraccion-tasa", "campo": "porDetraccion", "nivel": "aviso",
+                "mensaje": _(
+                    "La tasa de detracción (%(tasa)s%%) no coincide con la oficial del código "
+                    "%(code)s (%(of)s%%). Verifícala antes de emitir."
+                ) % {"tasa": self._l10n_pe_fmt(self.l10n_pe_ne_detraccion_rate or 0.0),
+                     "code": code, "of": self._l10n_pe_fmt(oficial)},
             }]
         return []
 

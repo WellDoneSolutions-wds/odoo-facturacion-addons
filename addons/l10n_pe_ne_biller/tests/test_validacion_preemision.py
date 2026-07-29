@@ -164,6 +164,27 @@ class TestValidacionPreEmision(L10nPeSeedMixin, TransactionCase):
         errores = [f for f in move._l10n_pe_ne_validaciones() if f['nivel'] == 'error']
         self.assertFalse(errores, 'detracción con cuenta y tasa válida no debe bloquear')
 
+    def test_detraccion_tasa_no_oficial_avisa(self):
+        # Construcción es código 030 al 4%; si va con 12% (el default genérico), avisa.
+        move = self._move(l10n_pe_ne_detraccion=True, l10n_pe_ne_detraccion_code='030',
+                          l10n_pe_ne_detraccion_rate=12.0,
+                          l10n_pe_ne_detraccion_cuenta='00-123-456789')
+        avisos = [f for f in move._l10n_pe_ne_validaciones() if f['code'] == 'detraccion-tasa']
+        self.assertTrue(avisos, 'tasa que no cuadra con el código debe avisar')
+        self.assertEqual(avisos[0]['nivel'], 'aviso')
+
+    def test_detraccion_construccion_030_4pct_ok(self):
+        move = self._move(l10n_pe_ne_detraccion=True, l10n_pe_ne_detraccion_code='030',
+                          l10n_pe_ne_detraccion_rate=4.0,
+                          l10n_pe_ne_detraccion_cuenta='00-123-456789')
+        self.assertNotIn('detraccion-tasa', self._codes(move))
+
+    def test_detraccion_codigo_desconocido_no_avisa(self):
+        move = self._move(l10n_pe_ne_detraccion=True, l10n_pe_ne_detraccion_code='999',
+                          l10n_pe_ne_detraccion_rate=7.0,
+                          l10n_pe_ne_detraccion_cuenta='00-123-456789')
+        self.assertNotIn('detraccion-tasa', self._codes(move))
+
     # -- exportación (tipOperacion 0200): país del adquirente no domiciliado --------------
     def _export_move(self, pais=None):
         exp = self.env['account.move']._l10n_pe_ne_tax_by_code('9995')  # afectación exportación

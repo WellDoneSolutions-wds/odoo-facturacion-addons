@@ -635,6 +635,94 @@ class AccountMove(models.Model):
                     % (line.name or line.product_id.display_name or "?")
                 )
 
+    # ==================================================== L1 · validación pre-emisión
+    # Motor de reglas SUNAT: valida el comprobante ANTES de enviarlo y devuelve findings
+    # accionables (nivel 'error' | 'aviso'). Reemplaza el faultCode críptico (p.ej. 3265)
+    # por un mensaje que el emisor sí puede arreglar. Fuente única para (a) el guard duro de
+    # la emisión y (b) un futuro pre-flight de la SPA. Cada regla es un método _regla_*; sumar
+    # una regla = agregarla a la tupla de _l10n_pe_ne_validaciones.
+    def _l10n_pe_ne_validaciones(self):
+        """[{'code','campo','nivel','mensaje'}]. 'error' bloquea la emisión; 'aviso' informa
+        (lo consume el pre-flight de la SPA) y no bloquea."""
+        self.ensure_one()
+        findings = []
+        for regla in (
+            self._l10n_pe_ne_regla_neto_pendiente,   # SUNAT 3265
+            self._l10n_pe_ne_regla_cuotas_suma,
+            self._l10n_pe_ne_regla_estado_grupo,     # SUNAT 3146-3149
+        ):
+            findings += regla() or []
+        return findings
+
+    def _l10n_pe_ne_regla_neto_pendiente(self):
+        """SUNAT 3265: el neto pendiente de pago a crédito no puede superar el importe a cobrar
+        del comprobante (que ya excluye gratuitos, anticipo y descuento que no afecta el IGV).
+        Invariante del modelo de dinero: si se viola, SUNAT rechaza con 3265."""
+        if self.l10n_pe_ne_forma_pago != "Credito":
+            return []
+        neto = self._l10n_pe_credito_pendiente()
+        cobrar = self._l10n_pe_importe_cobrar()
+        if neto > cobrar + 0.005:
+            return [{
+                "code": "3265", "campo": "datoPago/mtoNetoPendientePago", "nivel": "error",
+                "mensaje": _(
+                    "El monto neto pendiente de pago a crédito (S/ %(neto).2f) supera el "
+                    "importe a cobrar del comprobante (S/ %(cobrar).2f). Revisa las cuotas, la "
+                    "inicial al contado o los ítems gratuitos."
+                ) % {"neto": neto, "cobrar": cobrar},
+            }]
+        return []
+
+    def _l10n_pe_ne_regla_cuotas_suma(self):
+        """Aviso: las cuotas tecleadas no suman el neto a cobrar; se ajustarán a este al emitir."""
+        if self.l10n_pe_ne_forma_pago != "Credito":
+            return []
+        cuotas = [c for c in (self.l10n_pe_ne_cuotas or []) if (c or {}).get("monto")]
+        if not cuotas:
+            return []
+        suma = round(sum(float(c["monto"]) for c in cuotas), 2)
+        neto = self._l10n_pe_credito_pendiente()
+        if abs(suma - neto) > 0.01:
+            return [{
+                "code": "cuotas-suma", "campo": "cuotas", "nivel": "aviso",
+                "mensaje": _(
+                    "Las cuotas suman S/ %(suma).2f pero el neto a cobrar es S/ %(neto).2f; se "
+                    "ajustarán a este último al emitir."
+                ) % {"suma": suma, "neto": neto},
+            }]
+        return []
+
+    def _l10n_pe_ne_regla_estado_grupo(self):
+        """SUNAT 3146-3149: los 4 datos de Ventas al Estado (cat. 55) van como GRUPO. Si están
+        algunos pero no los 4, la emisión los OMITE todos → aviso para no perder el dato en
+        silencio."""
+        datos = [
+            self.l10n_pe_ne_estado_expediente, self.l10n_pe_ne_estado_unidad_ejecutora,
+            self.l10n_pe_ne_estado_proceso_seleccion, self.l10n_pe_ne_estado_contrato,
+        ]
+        llenos = [bool((v or "").strip()) for v in datos]
+        if any(llenos) and not all(llenos):
+            return [{
+                "code": "3146", "campo": "AdditionalItemProperty (Estado)", "nivel": "aviso",
+                "mensaje": _(
+                    "Ventas al Estado: llenaste %(n)d de 4 datos del proceso (expediente, "
+                    "unidad ejecutora, proceso de selección y contrato). SUNAT los exige como "
+                    "grupo, así que se omitirán TODOS. Complétalos o déjalos vacíos."
+                ) % {"n": sum(llenos)},
+            }]
+        return []
+
+    def _l10n_pe_ne_asegurar_valido(self):
+        """Guard de emisión: corta con los errores accionables ANTES de enviar a SUNAT. Los
+        avisos no bloquean (los consume el pre-flight de la SPA)."""
+        self.ensure_one()
+        errores = [f for f in self._l10n_pe_ne_validaciones() if f["nivel"] == "error"]
+        if errores:
+            detalle = "\n".join("• [%s] %s" % (e["code"], e["mensaje"]) for e in errores)
+            raise UserError(
+                _("El comprobante no cumple una regla de SUNAT:\n%s") % detalle
+            )
+
     def _l10n_pe_relacionados(self):
         """Documentos relacionados de la factura: guía de remisión (indDocRelacionado 1,
         DespatchDocumentReference) y/o comprobante de anticipo (indDocRelacionado 2)."""
@@ -785,16 +873,19 @@ class AccountMove(models.Model):
         )
 
     def _l10n_pe_neto_pendiente(self):
-        """Neto pendiente de pago = base de la operación − detracción (si aplica). Con detracción
-        el cliente solo paga el neto; el monto detraído se deposita en el Banco de la Nación,
-        así que el pendiente/cuotas van sobre el neto, no sobre el total. La base ya resta el
-        descuento que no afecta el IGV (mismo criterio que la base de detracción y el front)."""
+        """Neto pendiente de pago = lo que el cliente REALMENTE paga a crédito. Parte del importe
+        a cobrar (que ya excluye los bienes GRATUITOS, el anticipo aplicado y el descuento que no
+        afecta el IGV), menos la detracción (va al Banco de la Nación) y menos la inicial ya pagada
+        al contado. Base ≠ base de detracción: aquella es el importe de la operación (con gratuitos
+        y sin restar anticipo); usarla aquí hacía mtoNetoPendientePago > mtoImpVenta cuando había una
+        línea gratuita (p.ej. total 2950 con gratuito 790 → neto 2950 > payable 2160) → rechazo SUNAT
+        3265 ('El Monto neto pendiente de pago debe ser menor o igual al Importe total del comprobante')."""
         self.ensure_one()
         det = self._l10n_pe_detraccion_monto() if self.l10n_pe_ne_detraccion else 0.0
-        # Venta con inicial al contado: el saldo a crédito (lo que suman las cuotas) es el total
-        # menos la detracción y menos la inicial ya pagada.
+        # Venta con inicial al contado: el saldo a crédito (lo que suman las cuotas) es el importe
+        # a cobrar menos la detracción y menos la inicial ya pagada.
         inicial = self.l10n_pe_ne_inicial_contado or 0.0
-        return round(self._l10n_pe_detraccion_base() - det - inicial, 2)
+        return round(self._l10n_pe_importe_cobrar() - det - inicial, 2)
 
     def _l10n_pe_adicional_cabecera(self):
         """Bloque adicional de la cabecera: detracción y/o total a cobrar de la percepción."""
@@ -1194,6 +1285,16 @@ class AccountMove(models.Model):
                 return TAX_CODE_MAP[tax.l10n_pe_edi_tax_code], tax.amount
         return TAX_CODE_MAP[DEFAULT_TAX_CODE], 0.0
 
+    @staticmethod
+    def _l10n_pe_ne_bolsas(qty):
+        """Nº de bolsas para el ICBPER. SUNAT cuenta la bolsa como unidad DISCRETA
+        (ctdBolsasTriIcbperItem es entero; no existe fracción de bolsa), así que la cantidad
+        se lleva al entero. Redondeo comercial (mitad hacia arriba) para coincidir con el
+        front (Math.round) y que el total del carrito == el total emitido. Fuente ÚNICA del
+        conteo de bolsas: base, IGV, ICBPER por ítem y ctdBolsas salen todos de aquí."""
+        n = float(qty or 0.0)
+        return int(n + 0.5) if n >= 0 else -int(-n + 0.5)
+
     def _l10n_pe_icbper_tax(self, line):
         """La tax ICBPER (impuesto a las bolsas, cat. 05 = 7152) de la línea, si la trae. Es una
         tax de monto fijo (amount_type='fixed') = soles por bolsa."""
@@ -1215,7 +1316,7 @@ class AccountMove(models.Model):
         total_tax = line.price_total - line.price_subtotal
         icbper_tax = self._l10n_pe_icbper_tax(line)
         icbper = (
-            round(int(round(line.quantity or 0)) * icbper_tax.amount, 2)
+            round(self._l10n_pe_ne_bolsas(line.quantity) * icbper_tax.amount, 2)
             if icbper_tax
             else 0.0
         )
@@ -1348,7 +1449,7 @@ class AccountMove(models.Model):
                         "codTriIcbper": "7152",
                         "nomTributoIcbperItem": "ICBPER",
                         "codTipTributoIcbperItem": "OTH",
-                        "ctdBolsasTriIcbperItem": str(int(round(qty))),
+                        "ctdBolsasTriIcbperItem": str(self._l10n_pe_ne_bolsas(qty)),
                         "mtoTriIcbperUnidad": fmt(icbper_tax.amount),
                         "mtoTriIcbperItem": fmt(icbper),
                     }
@@ -1695,6 +1796,7 @@ class AccountMove(models.Model):
         self.ensure_one()
         self._l10n_pe_check_lineas_impuesto()
         self._l10n_pe_check_anticipo()
+        self._l10n_pe_ne_asegurar_valido()   # L1: reglas SUNAT (3265, …) antes de enviar
         # Boleta > S/700 exige el documento de identidad del cliente (SUNAT la rechaza sin él en prod).
         _logger.info("Product lines: %s", len(self._l10n_pe_product_lines()))
         if (
@@ -2684,9 +2786,16 @@ class AccountMove(models.Model):
             )
             d = float(ln.get("descuento") or 0)
             disc = round(100.0 * (1 - (1 - d / 100.0) * (1 - g / 100.0)), 6) if g else d
+            qty = float(ln.get("cantidad") or 1)
+            if ln.get("icbper"):
+                # La bolsa es unidad discreta: normalizar la cantidad al entero DESDE EL ORIGEN.
+                # Así Odoo computa la base y la tax fija del ICBPER (nº bolsas × monto) sobre el
+                # MISMO conteo entero que va al XML, y el reparto IGV/ICBPER del ítem no se
+                # descuadra cuando llega una cantidad con decimales (SUNAT valida por ítem).
+                qty = float(self._l10n_pe_ne_bolsas(qty))
             lvals = {
                 "name": ln.get("descripcion") or (prod.name if prod else "ITEM"),
-                "quantity": float(ln.get("cantidad") or 1),
+                "quantity": qty,
                 # Motivo 03: importe 0 (solo se corrige la descripción, no el monto).
                 "price_unit": 0.0 if es_correccion else float(ln.get("precioUnitario") or 0),
                 "discount": 0.0 if es_correccion else disc,
@@ -6096,7 +6205,11 @@ class AccountMove(models.Model):
                 "inafecta": round(b["inafecto"], 2),
                 "igv": round(b["igv"], 2),
                 "icbper": round(b["icbper"], 2),
-                "total": round(b["total"], 2),
+                # Total = importe a COBRAR (lo que paga el cliente), no amount_total: excluye los
+                # bienes gratuitos, el anticipo aplicado y el descuento que no afecta el IGV. Así el
+                # "Total" del detalle == la suma de su propio desglose (gravada+exo+ina+IGV+ICBPER) y
+                # no confunde con un total inflado por una línea gratuita (== el mtoImpVenta emitido).
+                "total": round(self._l10n_pe_importe_cobrar(), 2),
             },
         }
 

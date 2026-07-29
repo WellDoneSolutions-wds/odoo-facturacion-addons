@@ -6,3 +6,4 @@ from . import test_import_productos
 from . import test_placa
 from . import test_razon_social_boleta
 from . import test_observacion
+from . import test_icbper_cantidad

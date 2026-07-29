@@ -1194,6 +1194,16 @@ class AccountMove(models.Model):
                 return TAX_CODE_MAP[tax.l10n_pe_edi_tax_code], tax.amount
         return TAX_CODE_MAP[DEFAULT_TAX_CODE], 0.0
 
+    @staticmethod
+    def _l10n_pe_ne_bolsas(qty):
+        """Nº de bolsas para el ICBPER. SUNAT cuenta la bolsa como unidad DISCRETA
+        (ctdBolsasTriIcbperItem es entero; no existe fracción de bolsa), así que la cantidad
+        se lleva al entero. Redondeo comercial (mitad hacia arriba) para coincidir con el
+        front (Math.round) y que el total del carrito == el total emitido. Fuente ÚNICA del
+        conteo de bolsas: base, IGV, ICBPER por ítem y ctdBolsas salen todos de aquí."""
+        n = float(qty or 0.0)
+        return int(n + 0.5) if n >= 0 else -int(-n + 0.5)
+
     def _l10n_pe_icbper_tax(self, line):
         """La tax ICBPER (impuesto a las bolsas, cat. 05 = 7152) de la línea, si la trae. Es una
         tax de monto fijo (amount_type='fixed') = soles por bolsa."""
@@ -1215,7 +1225,7 @@ class AccountMove(models.Model):
         total_tax = line.price_total - line.price_subtotal
         icbper_tax = self._l10n_pe_icbper_tax(line)
         icbper = (
-            round(int(round(line.quantity or 0)) * icbper_tax.amount, 2)
+            round(self._l10n_pe_ne_bolsas(line.quantity) * icbper_tax.amount, 2)
             if icbper_tax
             else 0.0
         )
@@ -1348,7 +1358,7 @@ class AccountMove(models.Model):
                         "codTriIcbper": "7152",
                         "nomTributoIcbperItem": "ICBPER",
                         "codTipTributoIcbperItem": "OTH",
-                        "ctdBolsasTriIcbperItem": str(int(round(qty))),
+                        "ctdBolsasTriIcbperItem": str(self._l10n_pe_ne_bolsas(qty)),
                         "mtoTriIcbperUnidad": fmt(icbper_tax.amount),
                         "mtoTriIcbperItem": fmt(icbper),
                     }
@@ -2684,9 +2694,16 @@ class AccountMove(models.Model):
             )
             d = float(ln.get("descuento") or 0)
             disc = round(100.0 * (1 - (1 - d / 100.0) * (1 - g / 100.0)), 6) if g else d
+            qty = float(ln.get("cantidad") or 1)
+            if ln.get("icbper"):
+                # La bolsa es unidad discreta: normalizar la cantidad al entero DESDE EL ORIGEN.
+                # Así Odoo computa la base y la tax fija del ICBPER (nº bolsas × monto) sobre el
+                # MISMO conteo entero que va al XML, y el reparto IGV/ICBPER del ítem no se
+                # descuadra cuando llega una cantidad con decimales (SUNAT valida por ítem).
+                qty = float(self._l10n_pe_ne_bolsas(qty))
             lvals = {
                 "name": ln.get("descripcion") or (prod.name if prod else "ITEM"),
-                "quantity": float(ln.get("cantidad") or 1),
+                "quantity": qty,
                 # Motivo 03: importe 0 (solo se corrige la descripción, no el monto).
                 "price_unit": 0.0 if es_correccion else float(ln.get("precioUnitario") or 0),
                 "discount": 0.0 if es_correccion else disc,

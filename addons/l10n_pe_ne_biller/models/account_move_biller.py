@@ -669,6 +669,7 @@ class AccountMove(models.Model):
             self._l10n_pe_ne_regla_detraccion_monto,    # SPOT: mtoDetraccion > 0
             self._l10n_pe_ne_regla_exportacion_pais,    # 0200: país del no domiciliado
             self._l10n_pe_ne_regla_boleta_doc,          # boleta > S/700 con documento
+            self._l10n_pe_ne_regla_vencidos,            # farma/perecibles: lote vencido
         ):
             findings += regla() or []
         return findings
@@ -799,6 +800,35 @@ class AccountMove(models.Model):
                     "Una boleta mayor a S/ 700 requiere el documento de identidad del cliente "
                     "(DNI, RUC, carné de extranjería o pasaporte)."
                 ),
+            }]
+        return []
+
+    def _l10n_pe_ne_regla_vencidos(self, hoy=None):
+        """Farma / perecibles: avisa si la venta despachó un lote VENCIDO. Lee el lote que la
+        salida de stock reservó (FEFO: el que caduca antes sale primero); si ya venció, el
+        negocio está entregando producto caducado. Es un AVISO —control de negocio/DIGEMID, no
+        una regla de SUNAT—: no bloquea la emisión, pero salta en el pre-flight para que quien
+        despacha lo vea antes de entregar. Solo aplica a ventas (out_invoice)."""
+        if self.move_type != "out_invoice":
+            return []
+        hoy = hoy or self._l10n_pe_ne_today_lima()
+        smls = self.env["stock.move.line"].search(
+            [("move_id.l10n_pe_ne_move_id", "=", self.id)]
+        )
+        vencidos = []
+        for sml in smls:
+            venc = sml.lot_id.expiration_date
+            if venc and venc.date() < hoy:
+                vencidos.append(
+                    "%s (lote %s, venció %s)"
+                    % (sml.product_id.display_name, sml.lot_id.name, venc.date())
+                )
+        if vencidos:
+            return [{
+                "code": "vencido", "campo": "stock.lot", "nivel": "aviso",
+                "mensaje": _(
+                    "Se está despachando producto VENCIDO: %s. Revisa el lote antes de entregar."
+                ) % "; ".join(vencidos),
             }]
         return []
 

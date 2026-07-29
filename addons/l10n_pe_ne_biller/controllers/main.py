@@ -736,6 +736,26 @@ class L10nPeNeApi(http.Controller):
 
         return self._run(op)
 
+    @http.route("/ne/api/preflight", **_POST)
+    def preflight(self, **kw):
+        """Pre-flight: valida el comprobante contra las reglas SUNAT SIN emitirlo ni persistir
+        nada, para que la SPA muestre avisos/errores antes de dar «Emitir». Devuelve
+        {"findings": [{code, campo, nivel, mensaje}]} — nivel 'error' debería bloquear la
+        emisión en la SPA; 'aviso' es informativo."""
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+
+        def op():
+            payload = self._body()
+            tipo = payload.get("tipoDoc")
+            if tipo in ("20", "40"):
+                # Retención/percepción (otro-CPE): sin reglas de pre-flight aún.
+                return {"findings": []}
+            return {"findings": self._move(uid).l10n_pe_ne_preflight(payload)}
+
+        return self._run(op)
+
     @http.route("/ne/api/anular", **_POST)
     def anular(self, **kw):
         uid = self._identify()

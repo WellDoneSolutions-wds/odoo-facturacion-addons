@@ -2712,10 +2712,11 @@ class AccountMove(models.Model):
 
     # ------------------------------------------- API ligera (BFF NE Express, /json/2)
     @api.model
-    def l10n_pe_ne_quick_emit(self, payload):
+    def l10n_pe_ne_quick_emit(self, payload, enviar=True):
         """Emite un comprobante desde un payload PLANO (sin contexto contable previo): crea/halla el
         cliente, arma el account.move con sus líneas (impuesto por código cat-05), lo postea y lo envía a
-        SUNAT vía el facturador. Devuelve el resultado. Lo consume el BFF stateless por /json/2 — así la
+        SUNAT vía el facturador. Devuelve el resultado. Con `enviar=False` arma y postea pero NO envía y
+        devuelve el account.move (lo usa el pre-flight para validar sin emitir). Lo consume el BFF por /json/2 — así la
         lógica de negocio queda en Odoo (fuente única) y el dato vive en Odoo (upgrade sin migración)."""
         company = self.env.company
         journal = self.env["account.journal"].search(
@@ -2959,8 +2960,35 @@ class AccountMove(models.Model):
                     self._l10n_pe_fmt(proj.facturado), self._l10n_pe_fmt(proj.valor_total),
                     self._l10n_pe_fmt(otras),
                 ))
+        if not enviar:
+            # Pre-flight: el comprobante quedó armado y posteado pero NO se envía a SUNAT.
+            # El llamador (l10n_pe_ne_preflight) valida y revierte la transacción.
+            return move
         move.action_l10n_pe_send_to_biller()
         return move.l10n_pe_ne_quick_result()
+
+    @api.model
+    def l10n_pe_ne_preflight(self, payload):
+        """Valida un payload SIN emitir ni persistir. Arma el comprobante EXACTAMENTE como
+        quick_emit (misma lógica, misma fidelidad), corre el motor de validaciones L1 y REVIERTE
+        todo con un SAVEPOINT — no deja comprobante, producto ni movimiento de stock. Devuelve
+        [{code, campo, nivel, mensaje}] para que la SPA muestre avisos/errores ANTES de emitir.
+
+        Cualquier UserError del armado (tax faltante, saldo de NC, avance de obra…) se devuelve
+        como un finding bloqueante, así el pre-flight refleja también esos cortes."""
+        self.env.cr.execute("SAVEPOINT ne_preflight")
+        try:
+            move = self.l10n_pe_ne_quick_emit(dict(payload or {}), enviar=False)
+            return move._l10n_pe_ne_validaciones()
+        except UserError as e:
+            return [{"code": "bloqueo", "campo": "", "nivel": "error",
+                     "mensaje": str(e)}]
+        finally:
+            # Revierte SIEMPRE: el pre-flight no persiste nada (los findings ya se extrajeron
+            # como dicts planos antes de este rollback). Invalida la caché ORM para que no
+            # queden en memoria los registros ya inexistentes (un flush posterior fallaría).
+            self.env.cr.execute("ROLLBACK TO SAVEPOINT ne_preflight")
+            self.env.invalidate_all()
 
     def _l10n_pe_ne_check_numero_libre(self, serie, correlativo):
         """Impide reutilizar un número fiscal (serie+correlativo) ya emitido/anulado en

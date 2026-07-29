@@ -103,3 +103,47 @@ class TestValidacionPreEmision(TransactionCase):
             l10n_pe_ne_estado_proceso_seleccion='LP-002-2026',
             l10n_pe_ne_estado_contrato='CTO-77-2026')  # los 4
         self.assertNotIn('3146', self._codes(move))
+
+    # -- pre-flight: valida un payload SIN emitir ni persistir ------------------------------
+    def _payload(self, lineas, **extra):
+        return {
+            'tipoDoc': '01', 'moneda': 'PEN', 'serie': 'F001',
+            'cliente': {'tipoDoc': '6', 'numDoc': '20100070970', 'razonSocial': 'CLIENTE SAC'},
+            'lineas': lineas, **extra,
+        }
+
+    def test_preflight_no_persiste_nada(self):
+        """La prueba clave del savepoint: el pre-flight arma y postea el comprobante para
+        validarlo, pero al revertir NO debe quedar ni comprobante ni producto ni stock."""
+        Move = self.env['account.move']
+        antes_mv = Move.search_count([])
+        antes_pr = self.env['product.product'].search_count([])
+        antes_sm = self.env['stock.move'].search_count([])
+        Move.l10n_pe_ne_preflight(self._payload(
+            [{'descripcion': 'PRODUCTO PREFLIGHT', 'cantidad': 1, 'precioUnitario': 500,
+              'taxCode': '1000'}]))
+        self.assertEqual(Move.search_count([]), antes_mv, 'el pre-flight dejó un comprobante')
+        self.assertEqual(self.env['product.product'].search_count([]), antes_pr,
+                         'el pre-flight dejó un producto en el catálogo')
+        self.assertEqual(self.env['stock.move'].search_count([]), antes_sm,
+                         'el pre-flight dejó un movimiento de stock')
+
+    def test_preflight_credito_gratuito_no_bloquea(self):
+        findings = self.env['account.move'].l10n_pe_ne_preflight(self._payload(
+            [{'descripcion': 'ITEM', 'cantidad': 1, 'precioUnitario': 500, 'taxCode': '1000'},
+             {'descripcion': 'REGALO', 'cantidad': 1, 'precioUnitario': 790, 'taxCode': '9996'}],
+            formaPago={'tipo': 'Credito', 'cuotas': [{'fecha': '2026-09-29', 'monto': 590}]}))
+        self.assertFalse([f for f in findings if f['nivel'] == 'error'],
+                         'crédito con gratuito no debe bloquear (regresión 3265)')
+
+    def test_preflight_estado_parcial_avisa(self):
+        findings = self.env['account.move'].l10n_pe_ne_preflight(self._payload(
+            [{'descripcion': 'ITEM', 'cantidad': 1, 'precioUnitario': 500, 'taxCode': '1000'}],
+            ventaEstado={'expediente': 'EXP-1', 'procesoSeleccion': 'LP-2'}))  # 2 de 4
+        self.assertIn('3146', {f['code'] for f in findings})
+
+    def test_preflight_cuotas_descuadradas_avisan(self):
+        findings = self.env['account.move'].l10n_pe_ne_preflight(self._payload(
+            [{'descripcion': 'ITEM', 'cantidad': 1, 'precioUnitario': 500, 'taxCode': '1000'}],
+            formaPago={'tipo': 'Credito', 'cuotas': [{'fecha': '2026-09-29', 'monto': 1000}]}))
+        self.assertIn('cuotas-suma', {f['code'] for f in findings})

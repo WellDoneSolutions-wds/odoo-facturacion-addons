@@ -177,6 +177,10 @@ class AccountMoveLine(models.Model):
         help="Código de unidad de medida SUNAT de la línea (ej. NIU, KGM, ZZ). "
         "Si está vacío se deriva de la unidad de medida del producto.",
     )
+    l10n_pe_ne_fraccionado = fields.Boolean(
+        string="Vendido fraccionado", copy=False,
+        help="Farma: esta línea se vende por la sub-unidad del producto (fraccionamiento). La "
+        "cantidad va en sub-unidades y el stock descuenta cantidad/unidades_por_empaque del empaque.")
     l10n_pe_ne_cod_producto_sunat = fields.Char(
         string="Cód. producto SUNAT (cat.25)",
         copy=False,
@@ -1521,9 +1525,12 @@ class AccountMove(models.Model):
         )
 
     def _l10n_pe_unit_code(self, line):
-        """Código de unidad SUNAT (cat. 03) de la línea: override por línea, luego el guardado en el
-        producto (POS/masiva no mandan unidad por línea), luego override manual en la UoM, si no el
-        mapeo por XMLID de la unidad estándar de Odoo, si no 'NIU'."""
+        """Código de unidad SUNAT (cat. 03) de la línea: si es venta fraccionada, la sub-unidad del
+        producto; luego override por línea, el guardado en el producto (POS/masiva no mandan unidad
+        por línea), override manual en la UoM, mapeo por XMLID de la unidad estándar de Odoo, si no
+        'NIU'."""
+        if line.l10n_pe_ne_fraccionado:
+            return line.product_id.l10n_pe_ne_unidad_fraccion or DEFAULT_UNIT_CODE
         if line.l10n_pe_ne_unit_code:
             return line.l10n_pe_ne_unit_code
         if line.product_id.l10n_pe_ne_unit_code:
@@ -3008,6 +3015,15 @@ class AccountMove(models.Model):
                 lvals["l10n_pe_ne_cod_producto_sunat"] = ln["codSunat"]
             if ln.get("afectacionGratuita"):
                 lvals["l10n_pe_ne_afectacion_gratuita"] = ln["afectacionGratuita"]
+            if ln.get("fraccionar"):
+                # Farma: vender por sub-unidad. Requiere el factor del producto (unidades por
+                # empaque); sin él no hay cómo descontar el stock del empaque.
+                if not (prod and prod.l10n_pe_ne_unidades_por_empaque > 0):
+                    raise UserError(_(
+                        "«%s» no se puede vender fraccionado: configura las unidades por empaque "
+                        "en el producto."
+                    ) % ((ln.get("descripcion") or "").strip() or (prod.name if prod else "ITEM")))
+                lvals["l10n_pe_ne_fraccionado"] = True
             lines.append((0, 0, lvals))
         # Otros cargos (que afectan la base imponible): se agregan como una línea gravada adicional, así
         # suben gravada/IGV/total con la maquinaria de líneas ya validada (no se prorratea el desc. global).
@@ -4784,6 +4800,17 @@ class AccountMove(models.Model):
             lote.expiration_date = linea.l10n_pe_ne_vence
         return lote
 
+    def _l10n_pe_ne_stock_qty(self, line):
+        """Cantidad a mover en la UoM del producto (el empaque). Normal = |cantidad|. Fraccionada
+        = |cantidad| / unidades_por_empaque: la línea va en sub-unidades pero el stock se lleva en
+        empaques, así vender 5 unidades de una caja de 30 descuenta 5/30 de caja."""
+        qty = abs(line.quantity or 0.0)
+        if line.l10n_pe_ne_fraccionado:
+            factor = line.product_id.l10n_pe_ne_unidades_por_empaque or 0.0
+            if factor > 0:
+                return qty / factor
+        return qty
+
     def _l10n_pe_ne_stock_aplicar(self, lineas, origen, destino, reversa=False, con_lote=False):
         """Motor común: crea y valida los movimientos de `lineas` entre dos ubicaciones.
 
@@ -4805,7 +4832,7 @@ class AccountMove(models.Model):
             moves |= self.env["stock.move"].create(
                 {
                     "product_id": l.product_id.id,
-                    "product_uom_qty": abs(l.quantity),
+                    "product_uom_qty": self._l10n_pe_ne_stock_qty(l),
                     "product_uom": l.product_uom_id.id,
                     "location_id": origen.id,
                     "location_dest_id": destino.id,

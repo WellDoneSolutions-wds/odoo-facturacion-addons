@@ -413,7 +413,8 @@ class AccountMove(models.Model):
     #   _l10n_pe_detraccion_base total − desc. que NO afecta IGV. Importe de la OPERACIÓN para
     #                           el SPOT (incluye gratuitos y NO resta anticipo; distinto criterio).
     #   _l10n_pe_neto_pendiente importe_cobrar − detracción − inicial al contado − retención de
-    #                           garantía de obra. = saldo a CRÉDITO (lo que suman las cuotas).
+    #                           garantía − amortización de adelanto de obra.
+    #                           = saldo a CRÉDITO (lo que suman las cuotas).
     #
     # Invariantes (SUNAT + negocio):  neto_pendiente ≤ importe_cobrar ≤ amount_total ;
     #   importe_cobrar ≥ 0 ; detracción ≥ 0 ; sum(cuotas) == neto pendiente del crédito.
@@ -1046,7 +1047,8 @@ class AccountMove(models.Model):
         inicial = self.l10n_pe_ne_inicial_contado or 0.0
         return round(
             self._l10n_pe_importe_cobrar() - det - inicial
-            - self._l10n_pe_ne_retencion_garantia_monto(), 2)
+            - self._l10n_pe_ne_retencion_garantia_monto()
+            - (self.l10n_pe_ne_amortizacion_adelanto or 0.0), 2)
 
     def _l10n_pe_ne_retencion_garantia_monto(self):
         """Monto de la retención de garantía (obra) = % sobre el importe a cobrar. 0 si no aplica.
@@ -1253,6 +1255,11 @@ class AccountMove(models.Model):
         help="Retención de fiel cumplimiento (obra): % que el cliente retiene de la valorización "
         "y libera al final del contrato. NO es tributo ni descuento —no cambia el total ni el "
         "IGV del comprobante—: solo reduce el neto a cobrar de esta valorización.")
+    l10n_pe_ne_amortizacion_adelanto = fields.Monetary(
+        string="Amortización de adelanto", copy=False, currency_field="currency_id",
+        help="Obra: parte del adelanto (directo/de materiales) que la entidad ya pagó y recupera "
+        "en ESTA valorización. NO es el anticipo SUNAT (doc A/B): es una deducción contractual "
+        "que no cambia el total ni el IGV, solo reduce el neto a cobrar y amortiza el adelanto.")
     l10n_pe_ne_forma_pago = fields.Selection(
         [("Contado", "Contado"), ("Credito", "Crédito")],
         default="Contado",
@@ -6201,6 +6208,9 @@ class AccountMove(models.Model):
         if payload.get("retencionGarantia"):
             move.l10n_pe_ne_retencion_garantia_rate = float(
                 (payload["retencionGarantia"] or {}).get("tasa") or 0)
+        # Amortización de adelanto de obra (deducción contractual, no anticipo SUNAT).
+        if payload.get("amortizacionAdelanto"):
+            move.l10n_pe_ne_amortizacion_adelanto = float(payload["amortizacionAdelanto"] or 0)
         fp = payload.get("formaPago") or {}
         if fp.get("tipo") == "Credito" or fp.get("cuotas"):
             move.l10n_pe_ne_forma_pago = "Credito"
@@ -6441,6 +6451,8 @@ class AccountMove(models.Model):
                 "tasa": self.l10n_pe_ne_retencion_garantia_rate,
                 "monto": self._l10n_pe_ne_retencion_garantia_monto(),
             } if self.l10n_pe_ne_retencion_garantia_rate else None,
+            # Amortización de adelanto de obra recuperada en esta valorización (None si no aplica).
+            "amortizacionAdelanto": self.l10n_pe_ne_amortizacion_adelanto or None,
             "anticipos": self._l10n_pe_ne_anticipos_list(),
             "lineas": lineas,
             "notasCredito": [

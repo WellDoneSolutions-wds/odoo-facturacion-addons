@@ -785,16 +785,19 @@ class AccountMove(models.Model):
         )
 
     def _l10n_pe_neto_pendiente(self):
-        """Neto pendiente de pago = base de la operación − detracción (si aplica). Con detracción
-        el cliente solo paga el neto; el monto detraído se deposita en el Banco de la Nación,
-        así que el pendiente/cuotas van sobre el neto, no sobre el total. La base ya resta el
-        descuento que no afecta el IGV (mismo criterio que la base de detracción y el front)."""
+        """Neto pendiente de pago = lo que el cliente REALMENTE paga a crédito. Parte del importe
+        a cobrar (que ya excluye los bienes GRATUITOS, el anticipo aplicado y el descuento que no
+        afecta el IGV), menos la detracción (va al Banco de la Nación) y menos la inicial ya pagada
+        al contado. Base ≠ base de detracción: aquella es el importe de la operación (con gratuitos
+        y sin restar anticipo); usarla aquí hacía mtoNetoPendientePago > mtoImpVenta cuando había una
+        línea gratuita (p.ej. total 2950 con gratuito 790 → neto 2950 > payable 2160) → rechazo SUNAT
+        3265 ('El Monto neto pendiente de pago debe ser menor o igual al Importe total del comprobante')."""
         self.ensure_one()
         det = self._l10n_pe_detraccion_monto() if self.l10n_pe_ne_detraccion else 0.0
-        # Venta con inicial al contado: el saldo a crédito (lo que suman las cuotas) es el total
-        # menos la detracción y menos la inicial ya pagada.
+        # Venta con inicial al contado: el saldo a crédito (lo que suman las cuotas) es el importe
+        # a cobrar menos la detracción y menos la inicial ya pagada.
         inicial = self.l10n_pe_ne_inicial_contado or 0.0
-        return round(self._l10n_pe_detraccion_base() - det - inicial, 2)
+        return round(self._l10n_pe_importe_cobrar() - det - inicial, 2)
 
     def _l10n_pe_adicional_cabecera(self):
         """Bloque adicional de la cabecera: detracción y/o total a cobrar de la percepción."""
@@ -6113,7 +6116,11 @@ class AccountMove(models.Model):
                 "inafecta": round(b["inafecto"], 2),
                 "igv": round(b["igv"], 2),
                 "icbper": round(b["icbper"], 2),
-                "total": round(b["total"], 2),
+                # Total = importe a COBRAR (lo que paga el cliente), no amount_total: excluye los
+                # bienes gratuitos, el anticipo aplicado y el descuento que no afecta el IGV. Así el
+                # "Total" del detalle == la suma de su propio desglose (gravada+exo+ina+IGV+ICBPER) y
+                # no confunde con un total inflado por una línea gratuita (== el mtoImpVenta emitido).
+                "total": round(self._l10n_pe_importe_cobrar(), 2),
             },
         }
 

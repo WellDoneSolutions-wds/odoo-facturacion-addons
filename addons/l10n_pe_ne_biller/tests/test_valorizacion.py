@@ -28,7 +28,7 @@ class TestValorizacion(L10nPeSeedMixin, EnvioSincronoMixin, TransactionCase):
         self.proyecto = self.env['l10n_pe_ne.proyecto'].create({
             'name': 'CARRETERA KM 10', 'valor_total': 100000.0})
 
-    def _emitir(self, monto, retencion=None):
+    def _emitir(self, monto, retencion=None, amortizacion=None):
         ok = type('R', (), {'status_code': 200, 'text': '<?xml version="1.0"?><Invoice/>',
                             'headers': {}})()
         payload = {
@@ -40,9 +40,29 @@ class TestValorizacion(L10nPeSeedMixin, EnvioSincronoMixin, TransactionCase):
         }
         if retencion is not None:
             payload['retencionGarantia'] = {'tasa': retencion}
+        if amortizacion is not None:
+            payload['amortizacionAdelanto'] = amortizacion
         with patch(_TARGET, return_value=ok):
             res = self.Move.l10n_pe_ne_quick_emit(payload)
         return self.Move.browse(res['id'])
+
+    def test_amortizacion_adelanto_reduce_neto_y_baja_saldo(self):
+        self.proyecto.adelanto = 20000.0  # adelanto recibido al inicio
+        m = self._emitir(10000, amortizacion=2360.0)  # amortiza parte en esta valorización
+        cobrar = m._l10n_pe_importe_cobrar()  # 11 800 c/IGV
+        self.assertAlmostEqual(m._l10n_pe_neto_pendiente(), round(cobrar - 2360.0, 2), delta=0.01)
+        self.assertLessEqual(m._l10n_pe_neto_pendiente(), cobrar + 0.005)  # invariante 3265
+        self.proyecto.invalidate_recordset()
+        self.assertAlmostEqual(self.proyecto.adelanto_amortizado, 2360.0, delta=0.01)
+        self.assertAlmostEqual(self.proyecto.adelanto_saldo, 20000.0 - 2360.0, delta=0.01)
+
+    def test_detalle_expone_la_amortizacion(self):
+        m = self._emitir(10000, amortizacion=2360.0)
+        self.assertEqual(m.l10n_pe_ne_comprobante_detalle()['amortizacionAdelanto'], 2360.0)
+
+    def test_sin_amortizacion_no_expone_nada(self):
+        m = self._emitir(4000)
+        self.assertIsNone(m.l10n_pe_ne_comprobante_detalle()['amortizacionAdelanto'])
 
     def test_retencion_garantia_reduce_el_neto_y_acumula_fondo(self):
         # Valorización 10 000 (base) con 10% de retención de fiel cumplimiento.

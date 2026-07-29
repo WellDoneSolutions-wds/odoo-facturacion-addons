@@ -26,6 +26,23 @@ class ResUsers(models.Model):
         help="La contraseña actual es temporal (seteada por un admin): se fuerza el "
              "cambio en el próximo ingreso al SPA.")
 
+    def l10n_pe_ne_perfil(self):
+        """Perfil y permisos efectivos del usuario para la SPA — FUENTE ÚNICA. La consumen
+        /ne/api/login y /ne/api/whoami (antes el dict estaba duplicado inline en ambas, con
+        riesgo de divergir). El addon l10n_pe_ne_roles la EXTIENDE con super() para añadir las
+        capacidades por rol (puedeCotizar, puedeCobrar, …). La SPA pinta el menú desde esto."""
+        self.ensure_one()
+        return {
+            "user": self.name,
+            "login": self.login,
+            "companyId": self.company_id.id,
+            "company": self.company_id.name,
+            "ruc": self.company_id.vat or "",
+            "isAdmin": self.has_group("base.group_system"),
+            "puedeAnular": self.has_group("l10n_pe_ne_biller.group_l10n_pe_ne_anulacion"),
+            "mustChangePassword": self.l10n_pe_ne_must_change_password,
+        }
+
     @api.model
     def _l10n_pe_ne_gen_password(self, length=14):
         """Contraseña temporal alfanumérica (sin ambigüedad de símbolos para dictarla)."""

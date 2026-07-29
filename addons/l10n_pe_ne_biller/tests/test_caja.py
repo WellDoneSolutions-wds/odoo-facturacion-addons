@@ -78,13 +78,20 @@ class TestCaja(TransactionCase):
             ses.with_user(user).unlink()
 
     # ------------------------------------------------------------ métodos (Task 3)
-    def test_abrir_y_esperado_efectivo(self):
+    def test_abrir_conteo_ciego(self):
+        """D-1 conteo ciego: la sesión abierta NO revela el esperado (ni por medio ni total);
+        solo emite los nombres de medios. El esperado se conoce recién al cerrar."""
         d = self.Sesion.l10n_pe_ne_abrir_caja({"saldoInicial": 150, "nota": "sencillo"})
         self.assertEqual(d["estado"], "abierta")
         self.assertEqual(d["saldoInicial"], 150.0)
-        efec = {f["medio"]: f["monto"] for f in d["esperado"]}
-        self.assertEqual(efec["Efectivo"], 150.0)     # sin ventas ni movs
-        self.assertEqual(d["esperadoTotal"], 150.0)
+        self.assertNotIn("esperado", d)
+        self.assertNotIn("esperadoTotal", d)
+        self.assertIn("Efectivo", d["medios"])
+        # al cerrar sí se revela: Efectivo esperado = 150 (sin ventas ni movs)
+        arq = self.Sesion.l10n_pe_ne_cerrar_caja({"conteos": [{"medio": "Efectivo", "contado": 150}]})
+        efec = {f["medio"]: f for f in arq["arqueo"]}
+        self.assertEqual(efec["Efectivo"]["esperado"], 150.0)
+        self.assertEqual(arq["diferenciaTotal"], 0.0)
 
     def test_abrir_guardas(self):
         self.Sesion.l10n_pe_ne_abrir_caja({"saldoInicial": 10})
@@ -97,15 +104,17 @@ class TestCaja(TransactionCase):
 
     def test_movimientos_afectan_efectivo(self):
         self.Sesion.l10n_pe_ne_abrir_caja({"saldoInicial": 150})
+        # retiro 80 (< umbral 300, no exige voucher)
         d = self.Sesion.l10n_pe_ne_caja_movimiento({"tipo": "retiro", "motivo": "Pago proveedor", "monto": 80})
-        efec = {f["medio"]: f["monto"] for f in d["esperado"]}
-        self.assertEqual(efec["Efectivo"], 70.0)      # 150 - 80
         self.assertEqual(d["retiros"], 80.0)
         d = self.Sesion.l10n_pe_ne_caja_movimiento({"tipo": "ingreso", "motivo": "Sencillo del dueño", "monto": 50})
-        efec = {f["medio"]: f["monto"] for f in d["esperado"]}
-        self.assertEqual(efec["Efectivo"], 120.0)     # 70 + 50
         self.assertEqual(d["ingresos"], 50.0)
         self.assertEqual(len(d["movimientos"]), 2)
+        # D-1: el efectivo esperado (150 - 80 + 50 = 120) se verifica al cerrar (conteo ciego)
+        arq = self.Sesion.l10n_pe_ne_cerrar_caja({"conteos": [{"medio": "Efectivo", "contado": 120}]})
+        efec = {f["medio"]: f for f in arq["arqueo"]}
+        self.assertEqual(efec["Efectivo"]["esperado"], 120.0)
+        self.assertEqual(arq["diferenciaTotal"], 0.0)
 
     def test_movimiento_validaciones(self):
         # sin caja abierta
@@ -125,14 +134,20 @@ class TestCaja(TransactionCase):
         # Escenario del reporte: 10 inicial + 323 de ingreso = 333 disponible en efectivo.
         self.Sesion.l10n_pe_ne_abrir_caja({"saldoInicial": 10})
         self.Sesion.l10n_pe_ne_caja_movimiento({"tipo": "ingreso", "motivo": "venta polo", "monto": 323})
-        # Retirar 500 (> 333) debe bloquearse — antes dejaba el esperado en −167 (imposible).
+        # Retirar 500 (> 333) debe bloquearse — el guard de disponible corre ANTES que el de
+        # voucher, así que aunque 500 > umbral, el mensaje es "solo tiene".
         with self.assertRaisesRegex(UserError, "solo tiene"):
             self.Sesion.l10n_pe_ne_caja_movimiento({"tipo": "retiro", "motivo": "test", "monto": 500})
-        # Retirar exactamente lo disponible (333) sí se permite y deja el efectivo en 0.
-        d = self.Sesion.l10n_pe_ne_caja_movimiento({"tipo": "retiro", "motivo": "cuadre", "monto": 333})
-        efec = {f["medio"]: f["monto"] for f in d["esperado"]}
-        self.assertEqual(efec["Efectivo"], 0.0)
+        # Retirar exactamente lo disponible (333). Como 333 > umbral 300, D-4 exige voucher.
+        d = self.Sesion.l10n_pe_ne_caja_movimiento({
+            "tipo": "retiro", "motivo": "cuadre", "monto": 333,
+            "voucherRef": "DEP-001", "fechaVoucher": "2026-07-18"})
         self.assertEqual(d["retiros"], 333.0)
+        self.assertTrue(any(m["voucherRef"] == "DEP-001" for m in d["movimientos"]))
+        # efectivo esperado 0 al cerrar (conteo ciego)
+        arq = self.Sesion.l10n_pe_ne_cerrar_caja({"conteos": [{"medio": "Efectivo", "contado": 0}]})
+        efec = {f["medio"]: f for f in arq["arqueo"]}
+        self.assertEqual(efec["Efectivo"]["esperado"], 0.0)
 
     def test_cerrar_y_snapshot(self):
         self.Sesion.l10n_pe_ne_abrir_caja({"saldoInicial": 100})
@@ -255,19 +270,31 @@ class TestCaja(TransactionCase):
         v_usd = self._venta_enviada("1104", moneda=usd)                   # USD: aparte
 
         d = self.Sesion.l10n_pe_ne_caja_actual()["sesion"]
-        efec = {f["medio"]: f["monto"] for f in d["esperado"]}
-        # Yape = 30 (solo el medio detallado); Efectivo = saldo + medio Efectivo(20) + v_efec total
-        self.assertEqual(efec["Yape"], 30.0)
-        self.assertEqual(efec["Efectivo"], round(100 + 20 + v_efec.amount_total, 2))
-        # Crédito NO aporta a ningún medio; USD no aparece en porMedio
-        self.assertNotIn("USD", efec)
-        # ventas PEN: v_medios, v_efec, v_cred (3); un solo sinMedio (v_efec); USD aparte
+        # ventas PEN: v_medios, v_efec, v_cred (3); un solo sinMedio (v_efec); USD aparte.
+        # Estas cifras siguen en el dict abierto (no son el 'esperado' que oculta el conteo ciego).
         self.assertEqual(d["ventas"]["count"], 3)
         self.assertEqual(d["ventas"]["sinMedio"], 1)
         self.assertEqual(d["ventas"]["countUsd"], 1)
         self.assertEqual(d["ventas"]["totalUsd"], round(v_usd.amount_total, 2))
         self.assertEqual(d["ventas"]["total"],
                          round(v_medios.amount_total + v_efec.amount_total + v_cred.amount_total, 2))
+        # D-1: el esperado por medio se revela al cerrar. Yape = 30 (medio detallado);
+        # Efectivo = saldo + medio Efectivo(20) + v_efec total; Crédito no aporta.
+        esp_efec = round(100 + 20 + v_efec.amount_total, 2)
+        esp_usd = round(v_usd.amount_total, 2)
+        arq = self.Sesion.l10n_pe_ne_cerrar_caja({"conteos": [
+            {"medio": "Yape", "contado": 30},
+            {"medio": "Efectivo", "contado": esp_efec},
+            {"medio": "Efectivo USD", "contado": esp_usd},
+        ]})
+        efec = {f["medio"]: f for f in arq["arqueo"]}
+        self.assertEqual(efec["Yape"]["esperado"], 30.0)
+        self.assertEqual(efec["Efectivo"]["esperado"], esp_efec)
+        # H1: el efectivo en dólares ahora SÍ entra al arqueo (medio namespaced 'Efectivo USD'),
+        # ya no es invisible; un faltante en dólares descuadra.
+        self.assertIn("Efectivo USD", efec)
+        self.assertEqual(efec["Efectivo USD"]["esperado"], esp_usd)
+        self.assertEqual(arq["diferenciaTotal"], 0.0)
 
     def test_amarre_cuenta_desde_el_cobro(self):
         """La venta cuenta desde el COBRO (en cola async incluida): con la emisión en
@@ -280,8 +307,10 @@ class TestCaja(TransactionCase):
         v_rech.l10n_pe_biller_state = "rechazado"      # falló en definitiva: no cuenta
         d = self.Sesion.l10n_pe_ne_caja_actual()["sesion"]
         self.assertEqual(d["ventas"]["count"], 1)
-        esp = {f["medio"]: f["monto"] for f in d["esperado"]}
-        self.assertEqual(esp["Efectivo"], 150.0)       # saldo 100 + venta en cola 50
+        # D-1: el esperado se revela al cerrar. saldo 100 + venta en cola 50 = 150
+        arq = self.Sesion.l10n_pe_ne_cerrar_caja({"conteos": [{"medio": "Efectivo", "contado": 150}]})
+        efec = {f["medio"]: f for f in arq["arqueo"]}
+        self.assertEqual(efec["Efectivo"]["esperado"], 150.0)
 
     def test_snapshot_inmutable_bajo_mutacion(self):
         """HU4: el arqueo de una sesión CERRADA lee los snapshots congelados
@@ -294,12 +323,11 @@ class TestCaja(TransactionCase):
         self._venta_enviada("1201", medios=[{"medio": "Efectivo", "monto": 118}])
         d = self.Sesion.l10n_pe_ne_caja_actual()["sesion"]
         self.assertEqual(d["ventas"]["count"], 1)     # amarrada mientras está abierta
-        esp = {f["medio"]: f["monto"] for f in d["esperado"]}
-        self.assertEqual(esp["Efectivo"], 218.0)      # saldo 100 + medio 118
+        esperado_efec = 218.0                          # saldo 100 + medio 118 (se revela al cerrar)
 
         # cerrar: congela conteos_cierre + ventas_cierre (arqueo con diferencia -2.30)
         arq = self.Sesion.l10n_pe_ne_cerrar_caja({
-            "conteos": [{"medio": "Efectivo", "contado": esp["Efectivo"] - 2.30}]})
+            "conteos": [{"medio": "Efectivo", "contado": esperado_efec - 2.30}]})
         sid = arq["id"]
         self.assertEqual(arq["diferenciaTotal"], -2.30)
 
@@ -318,6 +346,60 @@ class TestCaja(TransactionCase):
         self.assertEqual(after, before)
         self.assertEqual(after["ventas"]["count"], 1)          # sigue contando la venta congelada
         self.assertEqual(after["diferenciaTotal"], -2.30)
+
+    # ------------------------------------------------- integridad (iteración 2)
+    def test_conteo_ciego_corte_parcial(self):
+        """D-1: el 'corte parcial' (arqueo de una sesión ABIERTA, botón Imprimir corte) NO
+        revela el esperado ni la diferencia; solo los medios. Al cerrar sí."""
+        d = self.Sesion.l10n_pe_ne_abrir_caja({"saldoInicial": 90})
+        arq_abierto = self.Sesion.l10n_pe_ne_caja_arqueo(d["id"])
+        self.assertIsNone(arq_abierto["esperadoTotal"])
+        self.assertIsNone(arq_abierto["diferenciaTotal"])
+        for f in arq_abierto["arqueo"]:
+            self.assertIsNone(f["esperado"])
+        # al cerrar se revela
+        arq = self.Sesion.l10n_pe_ne_cerrar_caja({"conteos": [{"medio": "Efectivo", "contado": 90}]})
+        self.assertEqual(arq["esperadoTotal"], 90.0)
+
+    def test_retiro_umbral_exige_voucher(self):
+        """D-4: un retiro sobre el umbral (S/300 por defecto) exige voucher + fecha."""
+        self.Sesion.l10n_pe_ne_abrir_caja({"saldoInicial": 1000})
+        # bajo el umbral: pasa sin voucher
+        self.Sesion.l10n_pe_ne_caja_movimiento({"tipo": "retiro", "motivo": "mototaxi", "monto": 50})
+        # sobre el umbral sin voucher: bloquea
+        with self.assertRaisesRegex(UserError, "voucher"):
+            self.Sesion.l10n_pe_ne_caja_movimiento({"tipo": "retiro", "motivo": "deposito banco", "monto": 400})
+        # sobre el umbral con voucher + fecha: pasa y guarda la contraparte
+        d = self.Sesion.l10n_pe_ne_caja_movimiento({
+            "tipo": "retiro", "motivo": "deposito banco", "monto": 400,
+            "voucherRef": "OP-99887", "fechaVoucher": "2026-07-18", "destino": "BCP 191-..."})
+        mv = next(m for m in d["movimientos"] if m["voucherRef"] == "OP-99887")
+        self.assertEqual(mv["fechaVoucher"], "2026-07-18")
+        self.assertEqual(mv["destino"], "BCP 191-...")
+
+    def test_retiro_umbral_configurable(self):
+        """D-4: el umbral vive en res.company y es configurable por RUC."""
+        self.company.l10n_pe_ne_retiro_umbral = 1000.0
+        self.Sesion.l10n_pe_ne_abrir_caja({"saldoInicial": 2000})
+        # 400 ahora está bajo el umbral (1000): pasa sin voucher
+        self.Sesion.l10n_pe_ne_caja_movimiento({"tipo": "retiro", "motivo": "compra", "monto": 400})
+
+    def test_sesion_cerrada_es_inmutable(self):
+        """D-2: una sesión cerrada no admite reescritura de su arqueo (ruta /web), salvo
+        con el contexto de bypass del sistema; sus movimientos también quedan congelados."""
+        self.Sesion.l10n_pe_ne_abrir_caja({"saldoInicial": 100})
+        d = self.Sesion.l10n_pe_ne_caja_movimiento({"tipo": "ingreso", "motivo": "sencillo", "monto": 30})
+        mov = self.Movimiento.browse(d["movimientos"][-1]["id"])
+        arq = self.Sesion.l10n_pe_ne_cerrar_caja({"conteos": [{"medio": "Efectivo", "contado": 130}]})
+        sesion = self.Sesion.browse(arq["id"])
+        with self.assertRaisesRegex(UserError, "inmutable"):
+            sesion.write({"conteos_cierre": []})
+        with self.assertRaisesRegex(UserError, "inmutable"):
+            sesion.write({"saldo_inicial": 999})
+        with self.assertRaisesRegex(UserError, "inmutable"):
+            mov.write({"monto": 1})
+        # el bypass del sistema (migraciones/mantenimiento) sí puede tocar un campo snapshot
+        sesion.with_context(l10n_pe_ne_bypass_lock=True).write({"saldo_inicial": 100.0})
 
     def test_arqueo_cross_tenant(self):
         d = self.Sesion.l10n_pe_ne_abrir_caja({"saldoInicial": 10})

@@ -11,3 +11,4 @@ from . import test_credito_gratuito
 from . import test_validacion_preemision
 from . import test_harness_verticales
 from . import test_modelo_dinero
+from . import test_vencido

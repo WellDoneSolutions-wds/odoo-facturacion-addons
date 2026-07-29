@@ -2,13 +2,13 @@ from unittest.mock import patch
 
 from odoo.tests import TransactionCase, tagged
 
-from .common import EnvioSincronoMixin
+from .common import EnvioSincronoMixin, L10nPeSeedMixin
 
 _TARGET = 'odoo.addons.l10n_pe_ne_biller.models.account_move_biller.requests.post'
 
 
 @tagged('post_install', '-at_install')
-class TestIcbperCantidad(EnvioSincronoMixin, TransactionCase):
+class TestIcbperCantidad(L10nPeSeedMixin, EnvioSincronoMixin, TransactionCase):
     """ICBPER (bolsa plástica) con cantidad NO entera.
 
     SUNAT cuenta la bolsa como unidad DISCRETA: `ctdBolsasTriIcbperItem` es un entero y no
@@ -20,17 +20,8 @@ class TestIcbperCantidad(EnvioSincronoMixin, TransactionCase):
     """
 
     def setUp(self):
-        super().setUp()
+        super().setUp()  # L10nPeSeedMixin siembra RUC + IGV
         self.Move = self.env['account.move']
-        # El IGV (1000) lo aporta el plan contable l10n_pe; en una BD sembrada ya existe.
-        # Lo aseguramos para que el test sea hermético (no depende del plan cargado).
-        Tax = self.env['account.tax'].sudo()
-        if not Tax.search([('company_id', '=', self.env.company.id),
-                           ('type_tax_use', '=', 'sale'),
-                           ('l10n_pe_edi_tax_code', '=', '1000')], limit=1):
-            Tax.create({'name': 'IGV 18% (test)', 'amount_type': 'percent', 'amount': 18.0,
-                        'type_tax_use': 'sale', 'l10n_pe_edi_tax_code': '1000',
-                        'company_id': self.env.company.id})
 
     def _emitir(self, lineas):
         ok = type('R', (), {'status_code': 200, 'text': '<?xml version="1.0"?><Invoice/>',

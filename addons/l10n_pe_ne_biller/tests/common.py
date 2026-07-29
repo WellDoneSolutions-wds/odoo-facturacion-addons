@@ -1,3 +1,41 @@
+class L10nPeSeedMixin:
+    """Fundación del harness de validación (L2): siembra el entorno fiscal peruano MÍNIMO para
+    que los tests corran en CUALQUIER base de datos —local incluida—, no solo en el CI que ya
+    trae el plan contable l10n_pe cargado. Deja listo:
+
+      * el RUC de la compañía (varios flujos —comunicación de baja, PLE, reporte— lo exigen);
+      * el IGV de venta (cat-05 1000) en ``self.igv`` — sin él una línea gravada revienta con
+        el rechazo 3111 (TaxableAmount>0 + TaxAmount 0.00).
+
+    Las demás afectaciones (exonerado 9997 / inafecto 9998 / exportación 9995 / gratuito 9996)
+    y el ICBPER/ISC se autocrean on-demand (``_l10n_pe_ne_tax_by_code`` / ``_ensure_*``), así que
+    no hace falta sembrarlas aquí. Idempotente: si la compañía ya tiene RUC o el IGV (p.ej. en
+    CI), NO los toca. Es la base sobre la que un harness por vertical arma sus casos.
+
+    Uso: heredar ANTES de TransactionCase, p.ej.
+        class TestX(L10nPeSeedMixin, TransactionCase): ...
+    y usar ``self.igv`` sin volver a buscarlo.
+    """
+
+    # RUC de prueba distinto del partner-cliente típico ('20100070970') para no colisionar vats.
+    L10N_PE_TEST_RUC = "20100190797"
+
+    def setUp(self):
+        super().setUp()
+        company = self.env.company
+        if not (company.vat or "").strip():
+            company.sudo().vat = self.L10N_PE_TEST_RUC
+        Tax = self.env["account.tax"].sudo()
+        self.igv = Tax.search([
+            ("company_id", "=", company.id), ("type_tax_use", "=", "sale"),
+            ("l10n_pe_edi_tax_code", "=", "1000")], limit=1)
+        if not self.igv:
+            self.igv = Tax.create({
+                "name": "IGV 18% (test)", "amount_type": "percent", "amount": 18.0,
+                "type_tax_use": "sale", "l10n_pe_edi_tax_code": "1000",
+                "company_id": company.id})
+
+
 class EnvioSincronoMixin:
     """Fija el camino de envío que ejercen los tests: el SÍNCRONO.
 

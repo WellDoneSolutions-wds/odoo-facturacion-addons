@@ -1516,13 +1516,37 @@ class AccountMove(models.Model):
 
     _L10N_PE_ANTICIPO_PREFIX = "PAGO ANTICIPADO"
 
+    def _l10n_pe_ne_lotes_linea(self, line):
+        """(nombre, vencimiento) de los lotes que la salida de stock reservó para el producto de
+        la línea, SOLO si el producto rastrea vencimiento (farma/perecibles). Vacío si no aplica.
+        Sirve para anotar lote y caducidad en la descripción del ítem (trazabilidad y canje)."""
+        prod = line.product_id
+        if not prod or not prod.use_expiration_date:
+            return []
+        smls = self.env["stock.move.line"].search([
+            ("move_id.l10n_pe_ne_move_id", "=", self.id),
+            ("product_id", "=", prod.id),
+        ])
+        return [(sml.lot_id.name, sml.lot_id.expiration_date) for sml in smls if sml.lot_id]
+
     def _l10n_pe_des_item(self, line):
         """Descripción del ítem para el XML. En un comprobante marcado como pago anticipado
         (doc. A) antepone 'PAGO ANTICIPADO' para que el documento identifique la operación sin
-        depender de una leyenda cat. 52 (que no existe para anticipos)."""
+        depender de una leyenda cat. 52 (que no existe para anticipos). En productos que rastrean
+        vencimiento (farma/perecibles) anexa el lote y la caducidad despachados, para que queden
+        en el comprobante (XML y PDF) sin campos nuevos ni cambios en el micro/plantilla."""
         desc = line.name or line.product_id.display_name or ""
         if self.l10n_pe_ne_es_anticipo and not desc.startswith(self._L10N_PE_ANTICIPO_PREFIX):
             desc = ("%s - %s" % (self._L10N_PE_ANTICIPO_PREFIX, desc)).strip(" -")
+        lotes = self._l10n_pe_ne_lotes_linea(line)
+        if lotes:
+            etqs = []
+            for nombre, venc in lotes:
+                etq = "Lote %s" % nombre
+                if venc:
+                    etq += " Vence %s" % venc.date().strftime("%d/%m/%Y")
+                etqs.append(etq)
+            desc = "%s | %s" % (desc, " · ".join(etqs))
         return desc
 
     def _l10n_pe_detalle(self):

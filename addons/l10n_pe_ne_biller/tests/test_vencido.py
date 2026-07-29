@@ -55,3 +55,26 @@ class TestVencido(L10nPeSeedMixin, EnvioSincronoMixin, TransactionCase):
             'name': 'CUADERNO', 'default_code': 'LIB1', 'type': 'consu', 'is_storable': True})
         codes = {f['code'] for f in self.Move.l10n_pe_ne_preflight(self._payload(prod))}
         self.assertNotIn('vencido', codes)
+
+    # -- F1: lote + vencimiento en la descripción del ítem (XML + PDF) --------------------
+    def _emitir(self, prod):
+        from unittest.mock import patch
+        ok = type('R', (), {'status_code': 200, 'text': '<Invoice/>', 'headers': {}})()
+        target = 'odoo.addons.l10n_pe_ne_biller.models.account_move_biller.requests.post'
+        with patch(target, return_value=ok):
+            res = self.Move.l10n_pe_ne_quick_emit(self._payload(prod))
+        return self.Move.browse(res['id'])
+
+    def test_lote_y_vencimiento_van_en_la_descripcion(self):
+        prod = self._producto_con_lote()
+        self._sembrar_lote(prod, '2030-12-31 00:00:00')
+        move = self._emitir(prod)
+        des = move._l10n_pe_detalle()[0]['desItem']
+        self.assertIn('Lote L-2030-12-31', des, 'el lote va en la descripción del ítem')
+        self.assertIn('Vence 31/12/2030', des, 'el vencimiento va en la descripción del ítem')
+
+    def test_producto_sin_vencimiento_no_anota_lote(self):
+        prod = self.env['product.product'].create({
+            'name': 'CUADERNO', 'default_code': 'LIB2', 'type': 'consu', 'is_storable': True})
+        move = self._emitir(prod)
+        self.assertNotIn('Lote', move._l10n_pe_detalle()[0]['desItem'])

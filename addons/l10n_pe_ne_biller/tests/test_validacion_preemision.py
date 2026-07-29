@@ -194,3 +194,35 @@ class TestValidacionPreEmision(TransactionCase):
         move = self._export_move(pais='US')
         self.assertEqual(move._l10n_pe_tipo_operacion(), '0200')
         self.assertNotIn('exportacion-pais', self._codes(move))
+
+    # -- boleta (03) > S/700: exige documento del adquirente ------------------------------
+    def _boleta(self, precio, con_doc=False):
+        if con_doc:
+            dni = self.env['l10n_latam.identification.type'].search(
+                [('l10n_pe_vat_code', '=', '1')], limit=1)  # DNI
+            partner = self.env['res.partner'].create({
+                'name': 'CONSUMIDOR', 'vat': '12345678',
+                'l10n_latam_identification_type_id': dni.id})
+        else:
+            partner = self.env['res.partner'].create({'name': 'CONSUMIDOR FINAL'})  # sin doc
+        move = self.env['account.move'].create({
+            'move_type': 'out_invoice', 'partner_id': partner.id, 'invoice_date': '2026-07-29',
+            'l10n_pe_serie': 'B001', 'l10n_pe_correlativo': '1',
+            'invoice_line_ids': [(0, 0, {'product_id': self.product.id, 'quantity': 1.0,
+                                         'price_unit': precio, 'tax_ids': [(6, 0, self.igv.ids)]})]})
+        move.action_post()
+        return move
+
+    def test_boleta_mayor_700_sin_doc_bloquea(self):
+        move = self._boleta(800, con_doc=False)  # total c/IGV = 944 > 700
+        self.assertEqual(move._l10n_pe_document_type(), '03', 'debe ser boleta')
+        self.assertIn('boleta-700-doc', self._codes(move))
+
+    def test_boleta_mayor_700_con_doc_no_bloquea(self):
+        move = self._boleta(800, con_doc=True)
+        self.assertEqual(move._l10n_pe_document_type(), '03')
+        self.assertNotIn('boleta-700-doc', self._codes(move))
+
+    def test_boleta_menor_700_sin_doc_no_bloquea(self):
+        move = self._boleta(500, con_doc=False)  # total c/IGV = 590 <= 700
+        self.assertNotIn('boleta-700-doc', self._codes(move))

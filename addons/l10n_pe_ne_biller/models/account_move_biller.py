@@ -653,6 +653,7 @@ class AccountMove(models.Model):
             self._l10n_pe_ne_regla_detraccion_cuenta,   # SPOT: cta. Banco de la Nación
             self._l10n_pe_ne_regla_detraccion_monto,    # SPOT: mtoDetraccion > 0
             self._l10n_pe_ne_regla_exportacion_pais,    # 0200: país del no domiciliado
+            self._l10n_pe_ne_regla_boleta_doc,          # boleta > S/700 con documento
         ):
             findings += regla() or []
         return findings
@@ -765,6 +766,23 @@ class AccountMove(models.Model):
                     "Es una operación de exportación pero el cliente no tiene país. SUNAT exige "
                     "el país del adquirente no domiciliado: edítalo en el cliente y vuelve a "
                     "emitir."
+                ),
+            }]
+        return []
+
+    def _l10n_pe_ne_regla_boleta_doc(self):
+        """Boleta (03) mayor a S/ 700: SUNAT (Rgto. de Comprobantes de Pago, art. 8) exige
+        identificar al adquirente con su documento cuando el importe SUPERA los S/ 700. Sin
+        documento (consumidor final) la boleta se rechaza. Acepta cualquier documento válido —
+        DNI/RUC/CE/pasaporte viajan en `vat`."""
+        if self._l10n_pe_document_type() != "03":
+            return []
+        if (self.amount_total or 0.0) > 700 and not (self.partner_id.vat or "").strip():
+            return [{
+                "code": "boleta-700-doc", "campo": "cliente/numDoc", "nivel": "error",
+                "mensaje": _(
+                    "Una boleta mayor a S/ 700 requiere el documento de identidad del cliente "
+                    "(DNI, RUC, carné de extranjería o pasaporte)."
                 ),
             }]
         return []
@@ -1853,19 +1871,8 @@ class AccountMove(models.Model):
         self.ensure_one()
         self._l10n_pe_check_lineas_impuesto()
         self._l10n_pe_check_anticipo()
-        self._l10n_pe_ne_asegurar_valido()   # L1: reglas SUNAT (3265, …) antes de enviar
-        # Boleta > S/700 exige el documento de identidad del cliente (SUNAT la rechaza sin él en prod).
+        self._l10n_pe_ne_asegurar_valido()   # L1: reglas SUNAT (3265, boleta>700, detracción, …)
         _logger.info("Product lines: %s", len(self._l10n_pe_product_lines()))
-        if (
-            self._l10n_pe_document_type() == "03"
-            and (self.amount_total or 0.0) > 700
-            and not (self.partner_id.vat or "").strip()
-        ):
-            raise UserError(
-                _(
-                    "Una boleta mayor a S/ 700 requiere el documento de identidad del cliente."
-                )
-            )
         req = {
             "id": self._l10n_pe_id_block(with_document_type=True),
             "emisor": self._l10n_pe_emisor(),

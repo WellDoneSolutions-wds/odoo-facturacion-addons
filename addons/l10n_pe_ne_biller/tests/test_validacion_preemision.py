@@ -169,3 +169,28 @@ class TestValidacionPreEmision(TransactionCase):
                           l10n_pe_ne_detraccion_cuenta='00-123-456789')
         errores = [f for f in move._l10n_pe_ne_validaciones() if f['nivel'] == 'error']
         self.assertFalse(errores, 'detracción con cuenta y tasa válida no debe bloquear')
+
+    # -- exportación (tipOperacion 0200): país del adquirente no domiciliado --------------
+    def _export_move(self, pais=None):
+        exp = self.env['account.move']._l10n_pe_ne_tax_by_code('9995')  # afectación exportación
+        vals = {'name': 'FOREIGN BUYER CO'}
+        if pais:
+            vals['country_id'] = self.env['res.country'].search([('code', '=', pais)], limit=1).id
+        partner = self.env['res.partner'].create(vals)
+        move = self.env['account.move'].create({
+            'move_type': 'out_invoice', 'partner_id': partner.id, 'invoice_date': '2026-07-29',
+            'l10n_pe_serie': 'F001', 'l10n_pe_correlativo': '261',
+            'invoice_line_ids': [(0, 0, {'product_id': self.product.id, 'quantity': 1.0,
+                                         'price_unit': 1000.0, 'tax_ids': [(6, 0, exp.ids)]})]})
+        move.action_post()
+        return move
+
+    def test_exportacion_sin_pais_bloquea(self):
+        move = self._export_move(pais=None)
+        self.assertEqual(move._l10n_pe_tipo_operacion(), '0200', 'debe ser exportación (0200)')
+        self.assertIn('exportacion-pais', self._codes(move))
+
+    def test_exportacion_con_pais_no_bloquea(self):
+        move = self._export_move(pais='US')
+        self.assertEqual(move._l10n_pe_tipo_operacion(), '0200')
+        self.assertNotIn('exportacion-pais', self._codes(move))

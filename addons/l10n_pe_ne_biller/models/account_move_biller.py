@@ -386,9 +386,24 @@ class AccountMove(models.Model):
             )
         return out
 
+    # ==================================================== MODELO DE DINERO (L3)
+    # Cuatro magnitudes, una definición autoritativa cada una. Confundirlas fue la raíz del
+    # rechazo 3265 (el neto pendiente incluía gratuitos). Las invariantes se fijan por test
+    # en test_modelo_dinero.py.
+    #
+    #   amount_total            total contable (Odoo). INCLUYE los bienes gratuitos.
+    #   _l10n_pe_importe_cobrar total − anticipo − desc. que NO afecta IGV − gratuitos.
+    #                           = lo que el cliente PAGA = mtoImpVenta (PayableAmount).
+    #   _l10n_pe_detraccion_base total − desc. que NO afecta IGV. Importe de la OPERACIÓN para
+    #                           el SPOT (incluye gratuitos y NO resta anticipo; distinto criterio).
+    #   _l10n_pe_neto_pendiente importe_cobrar − detracción − inicial al contado.
+    #                           = saldo a CRÉDITO (lo que suman las cuotas).
+    #
+    # Invariantes (SUNAT + negocio):  neto_pendiente ≤ importe_cobrar ≤ amount_total ;
+    #   importe_cobrar ≥ 0 ; detracción ≥ 0 ; sum(cuotas) == neto pendiente del crédito.
     def _l10n_pe_importe_cobrar(self):
         """Importe neto a cobrar = total − anticipo aplicado − descuento que no afecta el IGV −
-        bienes gratuitos (lo que el cliente paga)."""
+        bienes gratuitos (lo que el cliente paga). Ver «MODELO DE DINERO» arriba."""
         self.ensure_one()
         ant = self._l10n_pe_anticipo()
         return round(

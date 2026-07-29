@@ -652,6 +652,7 @@ class AccountMove(models.Model):
             self._l10n_pe_ne_regla_estado_grupo,        # SUNAT 3146-3149
             self._l10n_pe_ne_regla_detraccion_cuenta,   # SPOT: cta. Banco de la Nación
             self._l10n_pe_ne_regla_detraccion_monto,    # SPOT: mtoDetraccion > 0
+            self._l10n_pe_ne_regla_exportacion_pais,    # 0200: país del no domiciliado
         ):
             findings += regla() or []
         return findings
@@ -748,6 +749,23 @@ class AccountMove(models.Model):
                     "La detracción da un monto de S/ 0.00. Revisa la tasa (%(tasa)s%%) o el "
                     "importe de la operación: el monto de la detracción debe ser mayor a 0."
                 ) % {"tasa": self._l10n_pe_fmt(self.l10n_pe_ne_detraccion_rate or 0.0)},
+            }]
+        return []
+
+    def _l10n_pe_ne_regla_exportacion_pais(self):
+        """Exportación (tipOperacion 0200 = todas las líneas con afectación 9995): SUNAT exige el
+        país del adquirente NO DOMICILIADO (codPaisCliente del AdditionalHeader). Sin país en el
+        cliente el dato se omite del XML y la exportación se rechaza/observa."""
+        if self._l10n_pe_tipo_operacion() != "0200":
+            return []
+        if not (self.partner_id.country_id.code or "").strip():
+            return [{
+                "code": "exportacion-pais", "campo": "codPaisCliente", "nivel": "error",
+                "mensaje": _(
+                    "Es una operación de exportación pero el cliente no tiene país. SUNAT exige "
+                    "el país del adquirente no domiciliado: edítalo en el cliente y vuelve a "
+                    "emitir."
+                ),
             }]
         return []
 

@@ -5094,6 +5094,11 @@ class AccountMove(models.Model):
             "taxCode": (tax.l10n_pe_edi_tax_code or "1000") if tax else "1000",
             "unidad": p.l10n_pe_ne_unit_code or "",
             "icbper": icbper,
+            # Fraccionamiento (farma): el producto se puede vender por sub-unidad. El front muestra
+            # el toggle "fraccionar" solo cuando `fraccionable`; `unidadFraccion` es la sub-unidad SUNAT.
+            "fraccionable": (p.l10n_pe_ne_unidades_por_empaque or 0.0) > 0,
+            "unidadesPorEmpaque": p.l10n_pe_ne_unidades_por_empaque or 0.0,
+            "unidadFraccion": p.l10n_pe_ne_unidad_fraccion or "",
             # "bien" | "servicio" — el vocabulario del negocio, no el de Odoo (consu/service).
             # 'combo' no lo usa esta app; si apareciera, se trata como bien (es tangible).
             "tipo": "servicio" if p.type == "service" else "bien",

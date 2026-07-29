@@ -3040,19 +3040,26 @@ class AccountMove(models.Model):
 
         Cualquier UserError del armado (tax faltante, saldo de NC, avance de obra…) se devuelve
         como un finding bloqueante, así el pre-flight refleja también esos cortes."""
-        self.env.cr.execute("SAVEPOINT ne_preflight")
+        # Savepoint GESTIONADO por Odoo (cr.savepoint): nombres únicos + limpieza de caché en el
+        # rollback. Se fuerza el rollback lanzando un centinela DESPUÉS de extraer los findings
+        # (dicts planos que sobreviven al rollback). Con un SAVEPOINT manual + invalidate_all, una
+        # segunda llamada en la misma transacción reventaba en el cómputo de impuestos del create.
+        class _Revert(Exception):
+            pass
+
+        findings = []
         try:
-            move = self.l10n_pe_ne_quick_emit(dict(payload or {}), enviar=False)
-            return move._l10n_pe_ne_validaciones()
-        except UserError as e:
-            return [{"code": "bloqueo", "campo": "", "nivel": "error",
-                     "mensaje": str(e)}]
-        finally:
-            # Revierte SIEMPRE: el pre-flight no persiste nada (los findings ya se extrajeron
-            # como dicts planos antes de este rollback). Invalida la caché ORM para que no
-            # queden en memoria los registros ya inexistentes (un flush posterior fallaría).
-            self.env.cr.execute("ROLLBACK TO SAVEPOINT ne_preflight")
-            self.env.invalidate_all()
+            with self.env.cr.savepoint():
+                try:
+                    move = self.l10n_pe_ne_quick_emit(dict(payload or {}), enviar=False)
+                    findings = move._l10n_pe_ne_validaciones()
+                except UserError as e:
+                    findings = [{"code": "bloqueo", "campo": "", "nivel": "error",
+                                 "mensaje": str(e)}]
+                raise _Revert()
+        except _Revert:
+            pass
+        return findings
 
     def _l10n_pe_ne_check_numero_libre(self, serie, correlativo):
         """Impide reutilizar un número fiscal (serie+correlativo) ya emitido/anulado en

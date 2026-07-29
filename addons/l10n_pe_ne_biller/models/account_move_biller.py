@@ -412,8 +412,8 @@ class AccountMove(models.Model):
     #                           = lo que el cliente PAGA = mtoImpVenta (PayableAmount).
     #   _l10n_pe_detraccion_base total − desc. que NO afecta IGV. Importe de la OPERACIÓN para
     #                           el SPOT (incluye gratuitos y NO resta anticipo; distinto criterio).
-    #   _l10n_pe_neto_pendiente importe_cobrar − detracción − inicial al contado.
-    #                           = saldo a CRÉDITO (lo que suman las cuotas).
+    #   _l10n_pe_neto_pendiente importe_cobrar − detracción − inicial al contado − retención de
+    #                           garantía de obra. = saldo a CRÉDITO (lo que suman las cuotas).
     #
     # Invariantes (SUNAT + negocio):  neto_pendiente ≤ importe_cobrar ≤ amount_total ;
     #   importe_cobrar ≥ 0 ; detracción ≥ 0 ; sum(cuotas) == neto pendiente del crédito.
@@ -1041,9 +1041,19 @@ class AccountMove(models.Model):
         self.ensure_one()
         det = self._l10n_pe_detraccion_monto() if self.l10n_pe_ne_detraccion else 0.0
         # Venta con inicial al contado: el saldo a crédito (lo que suman las cuotas) es el importe
-        # a cobrar menos la detracción y menos la inicial ya pagada.
+        # a cobrar menos la detracción, la inicial ya pagada y la retención de garantía de obra
+        # (el cliente la retiene y la libera al final del contrato; se cobra menos AHORA).
         inicial = self.l10n_pe_ne_inicial_contado or 0.0
-        return round(self._l10n_pe_importe_cobrar() - det - inicial, 2)
+        return round(
+            self._l10n_pe_importe_cobrar() - det - inicial
+            - self._l10n_pe_ne_retencion_garantia_monto(), 2)
+
+    def _l10n_pe_ne_retencion_garantia_monto(self):
+        """Monto de la retención de garantía (obra) = % sobre el importe a cobrar. 0 si no aplica.
+        No toca el total ni el IGV del comprobante; solo reduce el neto a cobrar de la valorización."""
+        self.ensure_one()
+        rate = self.l10n_pe_ne_retencion_garantia_rate or 0.0
+        return round(self._l10n_pe_importe_cobrar() * rate / 100.0, 2) if rate else 0.0
 
     def _l10n_pe_adicional_cabecera(self):
         """Bloque adicional de la cabecera: detracción y/o total a cobrar de la percepción."""
@@ -1238,6 +1248,11 @@ class AccountMove(models.Model):
     l10n_pe_ne_valorizacion_nro = fields.Integer(
         string="N° de valorización", copy=False, default=0,
         help="Orden de esta valorización dentro del contrato (facturación por avance de obra).")
+    l10n_pe_ne_retencion_garantia_rate = fields.Float(
+        string="Retención de garantía %", copy=False,
+        help="Retención de fiel cumplimiento (obra): % que el cliente retiene de la valorización "
+        "y libera al final del contrato. NO es tributo ni descuento —no cambia el total ni el "
+        "IGV del comprobante—: solo reduce el neto a cobrar de esta valorización.")
     l10n_pe_ne_forma_pago = fields.Selection(
         [("Contado", "Contado"), ("Credito", "Crédito")],
         default="Contado",
@@ -6181,6 +6196,11 @@ class AccountMove(models.Model):
         # Proyecto/contrato (avance de obra).
         if payload.get("proyectoId"):
             move.l10n_pe_ne_proyecto_id = int(payload["proyectoId"])
+        # Retención de garantía (fiel cumplimiento de obra): % que el cliente retiene y libera al
+        # final. Reduce el neto a cobrar; no toca el total ni el IGV.
+        if payload.get("retencionGarantia"):
+            move.l10n_pe_ne_retencion_garantia_rate = float(
+                (payload["retencionGarantia"] or {}).get("tasa") or 0)
         fp = payload.get("formaPago") or {}
         if fp.get("tipo") == "Credito" or fp.get("cuotas"):
             move.l10n_pe_ne_forma_pago = "Credito"
@@ -6415,6 +6435,12 @@ class AccountMove(models.Model):
             "valorizacionNro": self.l10n_pe_ne_valorizacion_nro or None,
             "proyecto": self.l10n_pe_ne_proyecto_id._l10n_pe_ne_dict()
             if self.l10n_pe_ne_proyecto_id else None,
+            # Retención de garantía de obra: % y monto retenido de ESTA valorización (None si no
+            # aplica). Reduce el neto a cobrar; no cambia el total del comprobante.
+            "retencionGarantia": {
+                "tasa": self.l10n_pe_ne_retencion_garantia_rate,
+                "monto": self._l10n_pe_ne_retencion_garantia_monto(),
+            } if self.l10n_pe_ne_retencion_garantia_rate else None,
             "anticipos": self._l10n_pe_ne_anticipos_list(),
             "lineas": lineas,
             "notasCredito": [

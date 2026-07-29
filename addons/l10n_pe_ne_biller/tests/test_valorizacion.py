@@ -28,18 +28,46 @@ class TestValorizacion(L10nPeSeedMixin, EnvioSincronoMixin, TransactionCase):
         self.proyecto = self.env['l10n_pe_ne.proyecto'].create({
             'name': 'CARRETERA KM 10', 'valor_total': 100000.0})
 
-    def _emitir(self, monto):
+    def _emitir(self, monto, retencion=None):
         ok = type('R', (), {'status_code': 200, 'text': '<?xml version="1.0"?><Invoice/>',
                             'headers': {}})()
+        payload = {
+            'tipoDoc': '01', 'moneda': 'PEN', 'serie': 'F001',
+            'cliente': {'tipoDoc': '6', 'numDoc': '20100070970', 'razonSocial': 'MUNICIPALIDAD X'},
+            'lineas': [{'descripcion': 'Avance de obra', 'productId': self.product.id,
+                        'cantidad': 1, 'precioUnitario': monto, 'taxCode': '1000'}],
+            'proyectoId': self.proyecto.id,
+        }
+        if retencion is not None:
+            payload['retencionGarantia'] = {'tasa': retencion}
         with patch(_TARGET, return_value=ok):
-            res = self.Move.l10n_pe_ne_quick_emit({
-                'tipoDoc': '01', 'moneda': 'PEN', 'serie': 'F001',
-                'cliente': {'tipoDoc': '6', 'numDoc': '20100070970', 'razonSocial': 'MUNICIPALIDAD X'},
-                'lineas': [{'descripcion': 'Avance de obra', 'productId': self.product.id,
-                            'cantidad': 1, 'precioUnitario': monto, 'taxCode': '1000'}],
-                'proyectoId': self.proyecto.id,
-            })
+            res = self.Move.l10n_pe_ne_quick_emit(payload)
         return self.Move.browse(res['id'])
+
+    def test_retencion_garantia_reduce_el_neto_y_acumula_fondo(self):
+        # Valorización 10 000 (base) con 10% de retención de fiel cumplimiento.
+        m = self._emitir(10000, retencion=10.0)
+        cobrar = m._l10n_pe_importe_cobrar()            # 11 800 (con IGV)
+        retenido = m._l10n_pe_ne_retencion_garantia_monto()
+        self.assertAlmostEqual(retenido, round(cobrar * 0.10, 2), delta=0.01)
+        # El neto a cobrar = importe a cobrar − retención (no baja el total ni el IGV).
+        self.assertAlmostEqual(m._l10n_pe_neto_pendiente(), round(cobrar - retenido, 2), delta=0.01)
+        self.assertLessEqual(m._l10n_pe_neto_pendiente(), cobrar + 0.005)  # invariante 3265
+        # El contrato acumula el fondo de garantía retenido.
+        self.proyecto.invalidate_recordset()
+        self.assertAlmostEqual(self.proyecto.retencion_acumulada, retenido, delta=0.01)
+
+    def test_detalle_expone_la_retencion(self):
+        m = self._emitir(10000, retencion=10.0)
+        rg = m.l10n_pe_ne_comprobante_detalle()['retencionGarantia']
+        self.assertTrue(rg)
+        self.assertEqual(rg['tasa'], 10.0)
+        self.assertGreater(rg['monto'], 0.0)
+
+    def test_sin_retencion_no_expone_nada(self):
+        m = self._emitir(4000)
+        self.assertIsNone(m.l10n_pe_ne_comprobante_detalle()['retencionGarantia'])
+        self.assertEqual(m._l10n_pe_ne_retencion_garantia_monto(), 0.0)
 
     def test_valorizaciones_se_numeran_y_acumulan(self):
         m1 = self._emitir(4000)

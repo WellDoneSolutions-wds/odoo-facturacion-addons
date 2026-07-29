@@ -20,6 +20,8 @@ class L10nPeNeProyecto(models.Model):
     saldo = fields.Monetary(compute="_compute_facturado", string="Saldo por facturar")
     avance = fields.Float(compute="_compute_facturado", string="Avance %")
     valorizaciones = fields.Integer(compute="_compute_facturado", string="N° de valorizaciones")
+    retencion_acumulada = fields.Monetary(
+        compute="_compute_facturado", string="Fondo de garantía retenido")
 
     def _compute_facturado(self):
         Move = self.env["account.move"].sudo()
@@ -32,16 +34,20 @@ class L10nPeNeProyecto(models.Model):
             p.saldo = (p.valor_total or 0.0) - p.facturado
             p.avance = round(p.facturado / p.valor_total * 100.0, 2) if p.valor_total else 0.0
             p.valorizaciones = len(moves)
+            p.retencion_acumulada = round(
+                sum(m._l10n_pe_ne_retencion_garantia_monto() for m in moves), 2)
 
     def _l10n_pe_ne_dict(self):
         self.ensure_one()
         # Recalcula en caliente: facturado/saldo/avance son computed NO almacenados. Si el
         # comprobante se emitió en esta misma transacción, la caché podría tener el acumulado
         # previo al envío (en producción el detalle es otro request y no ocurre).
-        self.invalidate_recordset(["facturado", "saldo", "avance", "valorizaciones"])
+        self.invalidate_recordset(
+            ["facturado", "saldo", "avance", "valorizaciones", "retencion_acumulada"])
         return {"id": self.id, "name": self.name, "valorTotal": self.valor_total,
                 "facturado": self.facturado, "saldo": self.saldo,
-                "avance": self.avance, "valorizaciones": self.valorizaciones}
+                "avance": self.avance, "valorizaciones": self.valorizaciones,
+                "retencionAcumulada": self.retencion_acumulada}
 
     @api.model
     def l10n_pe_ne_list(self):

@@ -45,9 +45,30 @@ class ResUsers(models.Model):
 
     @api.model
     def _l10n_pe_ne_gen_password(self, length=14):
-        """Contraseña temporal alfanumérica (sin ambigüedad de símbolos para dictarla)."""
-        alphabet = string.ascii_letters + string.digits
-        return ''.join(secrets.choice(alphabet) for _ in range(length))
+        """Contraseña temporal alfanumérica (sin símbolos ambiguos, para dictarla).
+        Garantiza al menos una mayúscula, una minúscula y un número, así cumple la
+        política (_l10n_pe_ne_check_password_policy) aun siendo aleatoria."""
+        length = max(length, _MIN_LEN)
+        chars = [secrets.choice(string.ascii_uppercase),
+                 secrets.choice(string.ascii_lowercase),
+                 secrets.choice(string.digits)]
+        pool = string.ascii_letters + string.digits
+        chars += [secrets.choice(pool) for _ in range(length - len(chars))]
+        secrets.SystemRandom().shuffle(chars)  # que las obligatorias no queden siempre al inicio
+        return ''.join(chars)
+
+    @api.model
+    def _l10n_pe_ne_check_password_policy(self, password):
+        """Política de contraseña, alineada con el schema del front (passwordSchema):
+        mínimo 8 caracteres, al menos una mayúscula y un número. Se valida en el SERVIDOR
+        para que un POST directo (saltándose el front) no pueda fijar una clave débil."""
+        pw = password or ''
+        if len(pw) < _MIN_LEN:
+            raise UserError(_("La contraseña debe tener al menos %d caracteres.") % _MIN_LEN)
+        if not re.search(r'[A-Z]', pw):
+            raise UserError(_("La contraseña debe incluir al menos una mayúscula."))
+        if not re.search(r'\d', pw):
+            raise UserError(_("La contraseña debe incluir al menos un número."))
 
     @api.model
     def l10n_pe_ne_admin_reset_password(self, target_id, new_password=None, force_change=True):
@@ -64,8 +85,7 @@ class ResUsers(models.Model):
         if not (target.company_ids & self.env.user.company_ids):
             raise AccessError(_("No puedes gestionar usuarios de otra empresa."))
         pw = (new_password or '').strip() or self._l10n_pe_ne_gen_password()
-        if len(pw) < _MIN_LEN:
-            raise UserError(_("La contraseña debe tener al menos %d caracteres.") % _MIN_LEN)
+        self._l10n_pe_ne_check_password_policy(pw)
         target.write({'password': pw, 'l10n_pe_ne_must_change_password': bool(force_change)})
         # Revoca sesiones activas del target (una API key sobrevive al cambio de clave).
         self.env['res.users.apikeys'].sudo().search([('user_id', '=', target.id)]).unlink()
@@ -81,8 +101,7 @@ class ResUsers(models.Model):
         user = self.env.user
         current = current_password or ''
         new = (new_password or '').strip()
-        if len(new) < _MIN_LEN:
-            raise UserError(_("La nueva contraseña debe tener al menos %d caracteres.") % _MIN_LEN)
+        self._l10n_pe_ne_check_password_policy(new)
         try:
             user._check_credentials({'type': 'password', 'password': current}, {'interactive': False})
         except AccessDenied:
@@ -118,10 +137,13 @@ class ResUsers(models.Model):
 
     @api.model
     def l10n_pe_ne_request_password_reset(self, login, origin):
-        """Fase 2 self-service: valida la cuenta, genera el token de reset
-        (auth_signup) y envía el correo con link al SPA. Lanza errores explícitos
-        (como el reset nativo de Odoo): sin cuenta / sin correo. El correo va SIEMPRE
-        al email de la ficha del usuario (no al texto ingresado)."""
+        """Fase 2 self-service: si existe una cuenta activa CON correo, genera el token de
+        reset (auth_signup) y envía el link al SPA.
+
+        La respuesta es SIEMPRE genérica —exista o no la cuenta, tenga o no correo, esté o
+        no en cooldown— para NO permitir enumerar usuarios/correos: un atacante no puede
+        distinguir un login válido de uno inválido por la respuesta. (Antes lanzaba
+        errores explícitos 'no existe la cuenta' / 'no tiene correo', que sí enumeraban.)"""
         origin = (origin or '').rstrip('/')
         ok_origin = bool(_L10N_PE_NE_SPA_ORIGIN_RE.match(origin)) or origin.startswith('http://localhost')
         if not ok_origin:
@@ -132,33 +154,22 @@ class ResUsers(models.Model):
         # Acepta usuario (login exacto) o correo (case-insensitive), como el reset nativo.
         user = self.sudo().search([('active', '=', True), ('login', '=', login)], limit=1) \
             or self.sudo().search([('active', '=', True), ('email', '=ilike', login)], limit=1)
-        if not user or user.share:
-            raise UserError(_("No se encontró una cuenta para este inicio de sesión."))
-        if not user.email:
-            raise UserError(_("No se puede enviar el correo electrónico: el usuario %s no tiene dirección de correo electrónico.") % user.name)
-        # Rate-limit simple: 1 correo por usuario cada 60s.
-        icp = self.env['ir.config_parameter'].sudo()
-        key = 'l10n_pe_ne.reset_cooldown.%d' % user.id
-        last = icp.get_param(key)
-        now = fields.Datetime.now()
-        if last and (now - fields.Datetime.to_datetime(last)).total_seconds() < 60:
-            raise UserError(_("Ya te enviamos un enlace hace un momento. Revisa tu correo (y spam) o espera un minuto."))
-        icp.set_param(key, fields.Datetime.to_string(now))
-        user.partner_id.signup_prepare(signup_type='reset')
-        token = user.partner_id._generate_signup_token()
-        link = '%s/reset?token=%s' % (origin, werkzeug.urls.url_quote(token))
-        self._l10n_pe_ne_send_reset_email(user, link)
-        return {'ok': True, 'email': self._l10n_pe_ne_mask_email(user.email)}
-
-    @api.model
-    def _l10n_pe_ne_mask_email(self, email):
-        """a***o@dominio.com — para confirmar el destino sin exponerlo entero."""
-        try:
-            local, domain = (email or '').split('@', 1)
-        except ValueError:
-            return email or ''
-        shown = local[:1] + '*' if len(local) <= 2 else local[0] + ('*' * (len(local) - 2)) + local[-1]
-        return '%s@%s' % (shown, domain)
+        # Solo se hace trabajo cuando hay una cuenta interna con correo; en cualquier otro
+        # caso se cae directo a la respuesta genérica de abajo, sin revelar nada.
+        if user and not user.share and user.email:
+            icp = self.env['ir.config_parameter'].sudo()
+            key = 'l10n_pe_ne.reset_cooldown.%d' % user.id
+            last = icp.get_param(key)
+            now = fields.Datetime.now()
+            # Rate-limit: 1 correo por usuario cada 60s. En cooldown NO reenvía —y tampoco lo
+            # revela: sale por la misma respuesta genérica que un login inexistente.
+            if not (last and (now - fields.Datetime.to_datetime(last)).total_seconds() < 60):
+                icp.set_param(key, fields.Datetime.to_string(now))
+                user.partner_id.signup_prepare(signup_type='reset')
+                token = user.partner_id._generate_signup_token()
+                link = '%s/reset?token=%s' % (origin, werkzeug.urls.url_quote(token))
+                self._l10n_pe_ne_send_reset_email(user, link)
+        return {'ok': True}
 
     def _l10n_pe_ne_send_reset_email(self, user, link):
         company_name = user.company_id.name or 'NE Express'
@@ -189,8 +200,7 @@ class ResUsers(models.Model):
     def l10n_pe_ne_confirm_password_reset(self, token, password):
         """Fase 2: valida el token de reset y fija la contraseña nueva."""
         password = (password or '').strip()
-        if len(password) < _MIN_LEN:
-            raise UserError(_("La contraseña debe tener al menos %d caracteres.") % _MIN_LEN)
+        self._l10n_pe_ne_check_password_policy(password)
         Partner = self.env['res.partner'].sudo()
         try:
             partner = Partner._signup_retrieve_partner(token, check_validity=True, raise_exception=True)

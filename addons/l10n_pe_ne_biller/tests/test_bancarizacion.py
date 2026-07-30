@@ -114,3 +114,12 @@ class TestBancarizacion(TransactionCase):
         self.assertEqual(d['bancarizacion'], 'bancarizado')
         self.assertEqual(d['bancarizacionConstancia'], 'OP-9')
         self.assertEqual(d['bancarizacionDocNombre'], 'v.pdf')
+
+    def test_doc_bytes_para_descarga(self):
+        m = self._factura_banc()
+        self.assertIsNone(m._l10n_pe_ne_bancarizacion_doc_bytes())   # sin doc → None
+        m.l10n_pe_ne_marcar_bancarizado({'doc': self._PDF, 'docName': 'v.pdf'})
+        raw, name, ct = m._l10n_pe_ne_bancarizacion_doc_bytes()
+        self.assertTrue(raw.startswith(b'%PDF'))
+        self.assertEqual(name, 'v.pdf')
+        self.assertEqual(ct, 'application/pdf')

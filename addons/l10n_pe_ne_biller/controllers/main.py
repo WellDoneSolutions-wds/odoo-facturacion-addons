@@ -847,6 +847,24 @@ class L10nPeNeApi(http.Controller):
 
         return self._run(op)
 
+    @http.route("/ne/api/comprobantes/<int:rec_id>/bancarizacion-doc", **_GET)
+    def bancarizacion_doc(self, rec_id, **kw):
+        """Descarga el documento de bancarización (voucher/constancia) del comprobante."""
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        try:
+            info = self._move(uid).browse(rec_id)._l10n_pe_ne_bancarizacion_doc_bytes()
+            if not info:
+                return self._err(f"El comprobante {rec_id} no tiene documento de bancarización", status=404)
+            raw, name, ct = info
+            return request.make_response(raw, headers=[
+                ("Content-Type", ct),
+                ("Content-Disposition", f'attachment; filename="{name}"'),
+            ])
+        except Exception as e:  # noqa: BLE001
+            return self._fail(e)
+
     @http.route("/ne/api/otrocpe/<int:rec_id>/<string:kind>", **_GET)
     def otrocpe_file(self, rec_id, kind, **kw):
         uid = self._identify()

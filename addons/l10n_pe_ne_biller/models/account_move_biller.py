@@ -1619,6 +1619,18 @@ class AccountMove(models.Model):
             self.l10n_pe_ne_bancarizacion_medio = payload["medio"]
         return {"ok": True, "bancarizacion": self.l10n_pe_ne_bancarizacion}
 
+    def _l10n_pe_ne_bancarizacion_doc_bytes(self):
+        """(raw, filename, content_type) del documento de bancarización, o None si no hay."""
+        self.ensure_one()
+        if not self.l10n_pe_ne_bancarizacion_doc:
+            return None
+        raw = base64.b64decode(self.l10n_pe_ne_bancarizacion_doc)
+        name = self.l10n_pe_ne_bancarizacion_doc_name or "bancarizacion"
+        ext = (name.rsplit(".", 1)[-1] or "").lower()
+        ct = {"pdf": "application/pdf", "png": "image/png",
+              "jpg": "image/jpeg", "jpeg": "image/jpeg"}.get(ext, "application/octet-stream")
+        return raw, name, ct
+
     def _l10n_pe_document_type(self):
         """Código SUNAT del comprobante: 01 Factura, 03 Boleta, 07 NC, 08 ND."""
         self.ensure_one()

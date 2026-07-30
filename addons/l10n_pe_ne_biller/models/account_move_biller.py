@@ -85,7 +85,7 @@ DETRACCION_TASAS = {
 # usuario fija el override en `uom.uom.l10n_pe_ne_unit_code`.
 UOM_CODE_BY_XMLID = {
     "uom.product_uom_unit": "NIU",
-    "uom.product_uom_dozen": "DPC",
+    "uom.product_uom_dozen": "DZN",
     "uom.product_uom_kgm": "KGM",
     "uom.product_uom_gram": "GRM",
     "uom.product_uom_day": "DAY",
@@ -129,7 +129,9 @@ UNIDAD_IMPORT = {
     "dia": "DAY", "dias": "DAY", "day": "DAY",
     "hora": "HUR", "horas": "HUR", "hr": "HUR", "hur": "HUR",
     "juego": "SET", "juegos": "SET", "set": "SET",
-    "docena": "DPC", "docenas": "DPC", "dpc": "DPC",
+    # Docena = DZN ("dozen" en cat.03), igual que el front (QA-021). DPC ("dozen piece") también
+    # es válido en cat.03 y se respeta si el usuario lo teclea explícito.
+    "docena": "DZN", "docenas": "DZN", "dzn": "DZN", "dpc": "DPC",
     "onza": "ONZ", "onzas": "ONZ", "onz": "ONZ",
 }
 # Afectación IGV: texto (cat.07 humano) → código cat.07 que espera el producto.

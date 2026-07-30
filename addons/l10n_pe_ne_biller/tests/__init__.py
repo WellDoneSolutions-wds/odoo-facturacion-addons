@@ -22,3 +22,4 @@ from . import test_vinculadas
 from . import test_linea_valor_cero
 from . import test_bancarizacion
 from . import test_peso_ferreteria
+from . import test_maderera_textil

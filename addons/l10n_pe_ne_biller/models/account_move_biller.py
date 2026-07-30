@@ -1166,13 +1166,15 @@ class AccountMove(models.Model):
             move.l10n_pe_serie = serie
 
     def _l10n_pe_detraccion_base(self):
-        """Base de la detracción (SPOT) = importe de la operación = total − descuento que NO
-        afecta la base del IGV (cat. 53 cód. 03). Ese descuento reduce el MtoImpVenta que paga
-        el adquirente, así que también reduce la base sobre la que se detrae — de lo contrario
-        se detrae de más y la base no coincide con el total que muestra el front ni con el
-        PayableAmount del XML. NO se descuenta el anticipo: la base es la de la operación."""
+        """Base de la detracción (SPOT) = importe de la operación ONEROSA = total − líneas
+        gratuitas (9996) − descuento que NO afecta la base del IGV (cat. 53 cód. 03). El
+        descuento no-afecta reduce el MtoImpVenta que paga el adquirente; las gratuitas no son
+        operación onerosa sujeta al SPOT (amount_total las incluye vía grat_base). Sin excluir
+        ambos se detrae de más y la base no coincide ni con el importe a cobrar (sumImpVenta) ni
+        con lo que muestra el front. NO se descuenta el anticipo: la base es la de la operación."""
         self.ensure_one()
-        return round((self.amount_total or 0.0) - self._l10n_pe_desc_no_afecta(), 2)
+        return round((self.amount_total or 0.0) - self._l10n_pe_gratuito_base()
+                     - self._l10n_pe_desc_no_afecta(), 2)
 
     def _l10n_pe_detraccion_monto(self):
         self.ensure_one()

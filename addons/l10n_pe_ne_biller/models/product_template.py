@@ -52,6 +52,11 @@ class ProductTemplate(models.Model):
         help="Farma: código de registro sanitario DIGEMID del producto. Si está, se anota en la "
              "descripción del ítem del comprobante (trazabilidad). Vacío = no se emite.")
 
+    l10n_pe_ne_controlado = fields.Boolean(
+        string="Producto controlado (psicotrópico/estupefaciente)",
+        help="Farma: sustancia controlada por DIGEMID. Su venta EXIGE receta retenida (número + "
+             "colegiatura del médico); se bloquea la emisión sin esos datos y se anotan en la línea.")
+
     l10n_pe_ne_detraccion_cod = fields.Char(
         string="Sujeto a detracción (cat. 54)",
         help="Código del bien/servicio en el catálogo 54 de SUNAT (SPOT). Vacío = no "

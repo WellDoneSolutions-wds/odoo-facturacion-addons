@@ -417,7 +417,7 @@ class AccountMove(models.Model):
     #   _l10n_pe_detraccion_base total − desc. que NO afecta IGV. Importe de la OPERACIÓN para
     #                           el SPOT (incluye gratuitos y NO resta anticipo; distinto criterio).
     #   _l10n_pe_neto_pendiente importe_cobrar − detracción − inicial al contado − retención de
-    #                           garantía − amortización de adelanto − monto cubierto por convenio.
+    #                           garantía − amortización de adelanto − penalidad − monto cubierto.
     #                           = saldo a CRÉDITO (lo que suman las cuotas) / copago del paciente.
     #
     # Invariantes (SUNAT + negocio):  neto_pendiente ≤ importe_cobrar ≤ amount_total ;
@@ -685,7 +685,9 @@ class AccountMove(models.Model):
         for regla in (
             self._l10n_pe_ne_regla_neto_pendiente,      # SUNAT 3265
             self._l10n_pe_ne_regla_cuotas_suma,
+            self._l10n_pe_ne_regla_deducciones_exceden, # neto a cobrar no puede ser negativo
             self._l10n_pe_ne_regla_estado_grupo,        # SUNAT 3146-3149
+            self._l10n_pe_ne_regla_estado_conformidad,  # venta al Estado: acta de recepción
             self._l10n_pe_ne_regla_detraccion_cuenta,   # SPOT: cta. Banco de la Nación
             self._l10n_pe_ne_regla_detraccion_monto,    # SPOT: mtoDetraccion > 0
             self._l10n_pe_ne_regla_detraccion_tasa,     # SPOT: tasa oficial del código
@@ -753,6 +755,39 @@ class AccountMove(models.Model):
                     "unidad ejecutora, proceso de selección y contrato). SUNAT los exige como "
                     "grupo, así que se omitirán TODOS. Complétalos o déjalos vacíos."
                 ) % {"n": sum(llenos)},
+            }]
+        return []
+
+    def _l10n_pe_ne_regla_deducciones_exceden(self):
+        """Las deducciones contractuales (retención de garantía, amortización de adelanto,
+        penalidad) + la detracción + la inicial + el monto cubierto por convenio no pueden dejar
+        el neto a cobrar en negativo: significaría que el comprobante 'devuelve' dinero. Bloquea."""
+        if self._l10n_pe_neto_pendiente() < -0.005:
+            return [{
+                "code": "deducciones-exceden", "campo": "neto a cobrar", "nivel": "error",
+                "mensaje": _(
+                    "Las deducciones del comprobante (retención de garantía, amortización de "
+                    "adelanto, penalidad, detracción, inicial y convenio) superan el importe a "
+                    "cobrar (S/ %(cobrar).2f): el neto a cobrar quedaría negativo. Revísalas."
+                ) % {"cobrar": self._l10n_pe_importe_cobrar()},
+            }]
+        return []
+
+    def _l10n_pe_ne_regla_estado_conformidad(self):
+        """Venta al Estado: la entidad exige un acta de conformidad/recepción como requisito previo
+        a facturar. Si los 4 datos del proceso están completos pero falta la conformidad, avisa
+        (no bloquea: hay casos —adelantos, valorizaciones a cuenta— sin acta todavía)."""
+        datos = [
+            self.l10n_pe_ne_estado_expediente, self.l10n_pe_ne_estado_unidad_ejecutora,
+            self.l10n_pe_ne_estado_proceso_seleccion, self.l10n_pe_ne_estado_contrato,
+        ]
+        if all((v or "").strip() for v in datos) and not (self.l10n_pe_ne_conformidad or "").strip():
+            return [{
+                "code": "estado-conformidad", "campo": "conformidad", "nivel": "aviso",
+                "mensaje": _(
+                    "Venta al Estado sin acta de conformidad/recepción. La entidad suele exigirla "
+                    "como sustento antes de facturar; regístrala si ya la tienes."
+                ),
             }]
         return []
 
@@ -1092,6 +1127,7 @@ class AccountMove(models.Model):
             self._l10n_pe_importe_cobrar() - det - inicial
             - self._l10n_pe_ne_retencion_garantia_monto()
             - (self.l10n_pe_ne_amortizacion_adelanto or 0.0)
+            - (self.l10n_pe_ne_penalidad or 0.0)
             - (self.l10n_pe_ne_monto_cubierto or 0.0), 2)
 
     def _l10n_pe_ne_retencion_garantia_monto(self):
@@ -1304,6 +1340,20 @@ class AccountMove(models.Model):
         help="Obra: parte del adelanto (directo/de materiales) que la entidad ya pagó y recupera "
         "en ESTA valorización. NO es el anticipo SUNAT (doc A/B): es una deducción contractual "
         "que no cambia el total ni el IGV, solo reduce el neto a cobrar y amortiza el adelanto.")
+    # Penalidad del contrato (venta al Estado / obra): descuento fijo (S/) que la entidad aplica por
+    # incumplimiento (plazos, calidad). Como la retención y la amortización, es una deducción
+    # CONTRACTUAL: reduce el neto a cobrar de esta valorización/comprobante, no el total ni el IGV.
+    l10n_pe_ne_penalidad = fields.Monetary(
+        string="Penalidad del contrato", copy=False, currency_field="currency_id",
+        help="Venta al Estado / obra: penalidad (S/) que la entidad descuenta por incumplimiento. "
+        "Deducción contractual: reduce el neto a cobrar, no el total ni el IGV del comprobante.")
+    # Conformidad / acta de recepción (venta al Estado): número o referencia del acta que la entidad
+    # emite como requisito previo a facturar. Dato de registro del ERP (como la DUA): NO va al XML
+    # firmado —el UBL no tiene campo— y queda editable aun con el comprobante emitido.
+    l10n_pe_ne_conformidad = fields.Char(
+        string="Conformidad / acta de recepción (Estado)", copy=False,
+        help="Venta al Estado: N° o referencia del acta de conformidad/recepción previa a facturar. "
+        "Dato del ERP para el sustento del expediente; no se envía a SUNAT en el XML.")
     # Convenio / tercero pagador (farma: SIS, aseguradora). El comprobante va al PACIENTE por el
     # total; la parte cubierta por el tercero reduce el neto que paga el paciente (copago) y queda
     # como cuenta por cobrar al tercero. No cambia el total ni el IGV del comprobante.
@@ -6293,6 +6343,8 @@ class AccountMove(models.Model):
             move.l10n_pe_ne_estado_unidad_ejecutora = (ve.get("unidadEjecutora") or "").strip()
             move.l10n_pe_ne_estado_proceso_seleccion = (ve.get("procesoSeleccion") or "").strip()
             move.l10n_pe_ne_estado_contrato = (ve.get("contrato") or "").strip()
+            # Conformidad / acta de recepción (opcional): dato de registro, no va al XML.
+            move.l10n_pe_ne_conformidad = (ve.get("conformidad") or "").strip() or False
         # Guía de remisión referenciada (DespatchDocumentReference).
         if payload.get("guiaRef"):
             move.l10n_pe_ne_guia_ref = payload["guiaRef"]
@@ -6313,6 +6365,9 @@ class AccountMove(models.Model):
         # Amortización de adelanto de obra (deducción contractual, no anticipo SUNAT).
         if payload.get("amortizacionAdelanto"):
             move.l10n_pe_ne_amortizacion_adelanto = float(payload["amortizacionAdelanto"] or 0)
+        # Penalidad del contrato (Estado/obra): descuento fijo por incumplimiento; reduce el neto.
+        if payload.get("penalidad"):
+            move.l10n_pe_ne_penalidad = float(payload["penalidad"] or 0)
         # Convenio / tercero pagador (SIS/aseguradora): la parte cubierta reduce el copago del paciente.
         if payload.get("convenio"):
             c = payload["convenio"] or {}
@@ -6565,6 +6620,10 @@ class AccountMove(models.Model):
             } if self.l10n_pe_ne_retencion_garantia_rate else None,
             # Amortización de adelanto de obra recuperada en esta valorización (None si no aplica).
             "amortizacionAdelanto": self.l10n_pe_ne_amortizacion_adelanto or None,
+            # Penalidad del contrato descontada en este comprobante (None si no aplica).
+            "penalidad": self.l10n_pe_ne_penalidad or None,
+            # Conformidad / acta de recepción (venta al Estado). "" si no se registró.
+            "conformidad": self.l10n_pe_ne_conformidad or "",
             # Convenio (tercero pagador): quién cubre, cuánto, y el copago que paga el paciente.
             "convenio": {
                 "tercero": self.l10n_pe_ne_tercero_pagador or "",

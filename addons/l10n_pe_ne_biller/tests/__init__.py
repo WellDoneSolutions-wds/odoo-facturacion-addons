@@ -17,3 +17,4 @@ from . import test_guia_proyecto
 from . import test_fraccionamiento
 from . import test_convenio
 from . import test_controlados
+from . import test_venta_estado

@@ -1126,17 +1126,22 @@ class AccountMove(models.Model):
         # venta con IGV (amount_total): el descuento NO reduce gravada/IGV, solo el MtoImpVenta.
         desc_na = self._l10n_pe_desc_no_afecta()
         if desc_na > 0:
-            base = self.amount_total or 0.0
+            # FACTOR UNITARIO (igual que el anticipo 04): base = el propio monto del descuento,
+            # factor 1.00000, monto = base. Así base × factor = monto EXACTO para cualquier importe
+            # y la regla SUNAT 4322 (|monto − base × factor| ≤ 1) pasa siempre. Antes se emitía
+            # base = amount_total con el factor a 5 decimales (desc/base): en operaciones de base
+            # alta (≳ S/ 200.000) el redondeo del factor × base se desviaba > 1 sol → rechazo 4322
+            # (mismo bug que ya se corrigió en el anticipo). El XSL de SUNAT solo suma el `Amount`
+            # (mtoVariableGlobal) de este código, nunca su BaseAmount → achicar la base no cambia nada.
             out.append(
                 {
                     "tipVariableGlobal": "false",
                     "codTipoVariableGlobal": DESC_GLOBAL_NO_AFECTA_COD,
-                    # 5 decimales: misma tolerancia SUNAT que el anticipo (mtoVariable ≈ base × por).
-                    "porVariableGlobal": "%.5f" % (desc_na / base if base else 0.0),
+                    "porVariableGlobal": "1.00000",
                     "monMontoVariableGlobal": moneda,
                     "mtoVariableGlobal": fmt(desc_na),
                     "monBaseImponibleVariableGlobal": moneda,
-                    "mtoBaseImpVariableGlobal": fmt(base),
+                    "mtoBaseImpVariableGlobal": fmt(desc_na),
                 }
             )
         return out

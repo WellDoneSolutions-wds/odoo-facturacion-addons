@@ -114,11 +114,29 @@ class TestBillerDescuentoNoAfecta(TransactionCase):
         self.assertEqual(req['detalle'][0]['mtoIgvItem'], '90.00')
 
     def test_variable_global_no_afecta(self):
+        # B1: factor unitario (base = monto, por = 1.00000) → base × factor = monto exacto, así la
+        # regla SUNAT 4322 pasa para cualquier importe. Antes base = precio de venta con factor a 5
+        # decimales → en base alta (≳ S/ 200.000) la desviación superaba 1 sol y SUNAT rechazaba.
         gv = self._move(100.0)._l10n_pe_build_invoice_request()['variablesGlobales']
         na = [v for v in gv if v['codTipoVariableGlobal'] == DESC_GLOBAL_NO_AFECTA_COD]
         self.assertEqual(len(na), 1)
         self.assertEqual(na[0]['mtoVariableGlobal'], '100.00')
-        self.assertEqual(na[0]['mtoBaseImpVariableGlobal'], '590.00')   # base = precio de venta
+        self.assertEqual(na[0]['porVariableGlobal'], '1.00000')
+        self.assertEqual(na[0]['mtoBaseImpVariableGlobal'], '100.00')   # base = monto (no el precio de venta)
+
+    def test_variable_global_no_afecta_base_alta_pasa_4322(self):
+        # Base alta (línea 1.000.000 → total 1.18M, descuento no-afecta 200.000): con factor 1.00000
+        # y base = monto, la desviación 4322 |monto − base×factor| es 0. Antes (base×0.16949) > 1 sol.
+        move = self.env['account.move'].create({
+            'move_type': 'out_invoice', 'partner_id': self.partner.id, 'invoice_date': '2026-06-20',
+            'l10n_pe_serie': 'F001', 'l10n_pe_correlativo': '9', 'l10n_pe_ne_desc_no_afecta': 200000.0,
+            'invoice_line_ids': [(0, 0, {'product_id': self.product.id, 'quantity': 1.0,
+                                         'price_unit': 1000000.0, 'tax_ids': [(6, 0, self.igv.ids)]})]})
+        move.action_post()
+        na = [v for v in move._l10n_pe_build_invoice_request()['variablesGlobales']
+              if v['codTipoVariableGlobal'] == DESC_GLOBAL_NO_AFECTA_COD][0]
+        dev = abs(float(na['mtoVariableGlobal']) - float(na['mtoBaseImpVariableGlobal']) * float(na['porVariableGlobal']))
+        self.assertLessEqual(dev, 1.0)
 
     def test_sin_descuento_no_emite_variable(self):
         req = self._move(0.0)._l10n_pe_build_invoice_request()

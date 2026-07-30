@@ -1441,5 +1441,93 @@
   },
   "expected": "rejected-guard",
   "source": "session F5 (controlado-receta)"
+ },
+ {
+  "id": "HAB-FERRETERIA",
+  "doc": "factura",
+  "title": "Ferreteria: venta por metro (MTR) y metro cuadrado (MTK)",
+  "partner": "ruc",
+  "lines": [
+   {
+    "tax": "gravado",
+    "price": 8,
+    "qty": 12.5,
+    "uom": "MTR"
+   },
+   {
+    "tax": "gravado",
+    "price": 45,
+    "qty": 8,
+    "uom": "MTK"
+   }
+  ],
+  "flags": {
+   "serie": "F001"
+  },
+  "expected": "accepted",
+  "source": "map habilitado ferreteria (cat-03 MTR/MTK)"
+ },
+ {
+  "id": "HAB-MADERERA",
+  "doc": "factura",
+  "title": "Maderera/aserradero: madera por metro cubico (MTQ)",
+  "partner": "ruc",
+  "lines": [
+   {
+    "tax": "gravado",
+    "price": 320,
+    "qty": 3.5,
+    "uom": "MTQ"
+   }
+  ],
+  "flags": {
+   "serie": "F001"
+  },
+  "expected": "accepted",
+  "source": "map habilitado maderera (cat-03 MTQ)"
+ },
+ {
+  "id": "HAB-TEXTIL",
+  "doc": "factura",
+  "title": "Textil/telas: por metro (MTR) y por docena (DZN)",
+  "partner": "ruc",
+  "lines": [
+   {
+    "tax": "gravado",
+    "price": 15,
+    "qty": 20,
+    "uom": "MTR"
+   },
+   {
+    "tax": "gravado",
+    "price": 90,
+    "qty": 2,
+    "uom": "DZN"
+   }
+  ],
+  "flags": {
+   "serie": "F001"
+  },
+  "expected": "accepted",
+  "source": "map habilitado textil (cat-03 MTR/DZN)"
+ },
+ {
+  "id": "HAB-AGROPECUARIO",
+  "doc": "factura",
+  "title": "Agropecuario/insumos: exonerado (9997) al peso (KGM)",
+  "partner": "ruc",
+  "lines": [
+   {
+    "tax": "exonerado",
+    "price": 6,
+    "qty": 50,
+    "uom": "KGM"
+   }
+  ],
+  "flags": {
+   "serie": "F001"
+  },
+  "expected": "accepted",
+  "source": "map habilitado agropecuario (exonerado 9997 + KGM)"
  }
 ]

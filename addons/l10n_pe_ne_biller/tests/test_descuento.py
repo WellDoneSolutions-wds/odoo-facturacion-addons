@@ -54,6 +54,22 @@ class TestBillerDescuento(TransactionCase):
         self.assertEqual(payload['adicionalDetalle'], [])
         self.assertEqual(payload['detalle'][0]['mtoValorVentaItem'], '500.00')
 
+    def test_valor_unitario_alta_cantidad_reconcilia_3271(self):
+        # A3: valor sin-IGV no terminante (10/1.18 = 8.4745…) × cantidad alta. A 2 decimales el
+        # mtoValorUnitario "8.47" × 300 = 2541.00 se desviaba del mtoValorVentaItem 2542.37 (1.37 > 1)
+        # → rechazo SUNAT 3271/4288. Con más decimales la reconciliación queda sub-céntimo.
+        move = self.env['account.move'].create({
+            'move_type': 'out_invoice', 'partner_id': self.partner.id, 'invoice_date': '2026-06-20',
+            'l10n_pe_serie': 'F001', 'l10n_pe_correlativo': '7',
+            'invoice_line_ids': [(0, 0, {'product_id': self.product.id, 'quantity': 300.0,
+                                         'price_unit': 8.474576271186441, 'tax_ids': [(6, 0, self.igv.ids)]})]})
+        move.action_post()
+        d = move._l10n_pe_build_invoice_request()['detalle'][0]
+        dev = abs(float(d['mtoValorUnitario']) * 300 - float(d['mtoValorVentaItem']))
+        self.assertLessEqual(dev, 0.01)
+        # Backward-compat: un valor unitario EXACTO sigue a 2 decimales (500.00 no cambia).
+        self.assertEqual(self._move(0.0)._l10n_pe_build_invoice_request()['detalle'][0]['mtoValorUnitario'], '500.00')
+
     def test_descuento_monto_fijo_factor_reconstruye(self):
         """SUNAT 3290: con un descuento cuyo % NO es fracción redonda de la base (un descuento en
         monto fijo, p.ej. S/50 sobre 470 → 10.6383%), el factor por ítem debe reconstruir el monto

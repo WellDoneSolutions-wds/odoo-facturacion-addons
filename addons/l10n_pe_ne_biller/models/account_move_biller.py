@@ -1542,6 +1542,18 @@ class AccountMove(models.Model):
     def _l10n_pe_fmt(self, amount):
         return "%.2f" % (amount or 0.0)
 
+    def _l10n_pe_fmt_unit(self, amount):
+        # Valores UNITARIOS (valor/precio unitario): SUNAT admite hasta 10 decimales. A 2 decimales,
+        # `mtoValorUnitario × cantidad` se desviaba de `mtoValorVentaItem` en líneas de alta cantidad
+        # (qty ≳ 200 con valor sin-IGV no terminante, p.ej. 10/1.18 → > 1 sol → rechazo 3271/4288).
+        # Se mantiene "%.2f" cuando el valor YA es exacto a 2 decimales (compat con los tests y la
+        # referencia SUNAT) y se amplía a 8 decimales SOLO cuando hace falta para reconciliar.
+        amount = amount or 0.0
+        r2 = round(amount, 2)
+        if abs(amount - r2) < 1e-9:
+            return "%.2f" % r2
+        return ("%.8f" % amount).rstrip("0")
+
     def _l10n_pe_fmt_cant(self, qty):
         """Cantidad para SUNAT (ctdUnidadItem): hasta 3 decimales, sin ceros de relleno más allá
         de 2. Conserva la venta al peso de balanza (18.375) sin ensuciar los conteos (2 -> 2.00).
@@ -1831,10 +1843,10 @@ class AccountMove(models.Model):
                 "codUnidadMedida": self._l10n_pe_unit_code(line),
                 "ctdUnidadItem": self._l10n_pe_fmt_cant(qty),
                 "desItem": self._l10n_pe_des_item(line),
-                "mtoValorUnitario": fmt(gross / qty if qty else 0.0),
+                "mtoValorUnitario": self._l10n_pe_fmt_unit(gross / qty if qty else 0.0),
                 "mtoValorVentaItem": fmt(base),
                 # Precio de venta unitario = (valor venta + ISC + IGV) / cantidad; NO incluye el ICBPER.
-                "mtoPrecioVentaUnitario": fmt((base + isc + igv) / qty if qty else 0.0),
+                "mtoPrecioVentaUnitario": self._l10n_pe_fmt_unit((base + isc + igv) / qty if qty else 0.0),
                 "mtoValorReferencialUnitario": "0.00",
                 "porIgvItem": fmt(por_igv),
                 # La base del IGV incluye el ISC (el IGV se computa sobre valor venta + ISC).
@@ -1857,7 +1869,7 @@ class AccountMove(models.Model):
                         "mtoValorUnitario": "0.00",
                         "mtoValorVentaItem": fmt(base),
                         "mtoPrecioVentaUnitario": "0.00",
-                        "mtoValorReferencialUnitario": fmt(gross / qty if qty else 0.0),
+                        "mtoValorReferencialUnitario": self._l10n_pe_fmt_unit(gross / qty if qty else 0.0),
                         "porIgvItem": "18.00",
                         "mtoBaseIgvItem": fmt(base),
                         "mtoIgvItem": fmt(igv_grat),

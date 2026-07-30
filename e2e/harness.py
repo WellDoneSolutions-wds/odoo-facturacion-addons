@@ -212,6 +212,8 @@ def _apply_flags(move, flags):
         move.l10n_pe_ne_retencion_garantia_rate = float(f['retencion_garantia'])
     if f.get('amortizacion_adelanto'):
         move.l10n_pe_ne_amortizacion_adelanto = float(f['amortizacion_adelanto'])
+    if f.get('penalidad'):
+        move.l10n_pe_ne_penalidad = float(f['penalidad'])
     if f.get('convenio'):
         c = f['convenio']
         move.l10n_pe_ne_tercero_pagador = c.get('tercero', 'SIS')
@@ -222,6 +224,8 @@ def _apply_flags(move, flags):
         move.l10n_pe_ne_estado_unidad_ejecutora = v.get('unidad_ejecutora', '001')
         move.l10n_pe_ne_estado_proceso_seleccion = v.get('proceso', 'LP-1')
         move.l10n_pe_ne_estado_contrato = v.get('contrato', 'CTO-1')
+        if v.get('conformidad'):
+            move.l10n_pe_ne_conformidad = v['conformidad']
     if f.get('receta'):
         r = f['receta']
         move.l10n_pe_ne_receta_numero = r.get('numero', 'R-001')

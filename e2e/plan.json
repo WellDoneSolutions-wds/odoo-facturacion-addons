@@ -1340,7 +1340,7 @@
  {
   "id": "ESTADO-CAT55",
   "doc": "factura",
-  "title": "Ventas al Estado: 4 datos del proceso (cat-55 5000-5003)",
+  "title": "Ventas al Estado: 4 datos del proceso (cat-55 5000-5003) + acta + penalidad",
   "partner": "ruc",
   "lines": [
    {
@@ -1354,12 +1354,43 @@
     "expediente": "EXP-2026-01",
     "unidad_ejecutora": "001",
     "proceso": "LP-002-2026",
-    "contrato": "CTO-77"
+    "contrato": "CTO-77",
+    "conformidad": "ACTA-RECEP-2026-01"
+   },
+   "penalidad": 118,
+   "serie": "F001"
+  },
+  "expected": "accepted",
+  "source": "session P1/P2/P4 (cat-55 grupo 3146-3149; penalidad y acta reducen el neto/sustentan)"
+ },
+ {
+  "id": "ESTADO-DETRACCION",
+  "doc": "factura",
+  "title": "Ventas al Estado con detraccion del rubro (SPOT 037 al 12%)",
+  "partner": "ruc",
+  "lines": [
+   {
+    "tax": "gravado",
+    "price": 2000,
+    "qty": 1
+   }
+  ],
+  "flags": {
+   "venta_estado": {
+    "expediente": "EXP-2026-09",
+    "unidad_ejecutora": "003",
+    "proceso": "LP-009-2026",
+    "contrato": "CTO-109",
+    "conformidad": "ACTA-09"
+   },
+   "detraccion": {
+    "code": "037",
+    "rate": 12
    },
    "serie": "F001"
   },
   "expected": "accepted",
-  "source": "session P1 (cat-55 grupo 3146-3149)"
+  "source": "session P5 (motor SPOT convive con los 4 datos del Estado)"
  },
  {
   "id": "FARMA-FRACCIONADO",

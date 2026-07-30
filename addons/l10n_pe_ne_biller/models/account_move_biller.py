@@ -697,6 +697,7 @@ class AccountMove(models.Model):
             self._l10n_pe_ne_regla_vencidos,            # farma/perecibles: lote vencido
             self._l10n_pe_ne_regla_convenio_cubierto,   # convenio: cubierto ≤ importe a cobrar
             self._l10n_pe_ne_regla_controlado_receta,   # farma: controlado exige receta retenida
+            self._l10n_pe_ne_regla_linea_valor_cero,    # SUNAT 2028: línea onerosa con importe 0
         ):
             findings += regla() or []
         return findings
@@ -966,6 +967,35 @@ class AccountMove(models.Model):
                     "La venta incluye un producto controlado: se requiere la receta retenida "
                     "(número de receta y colegiatura CMP del médico)."
                 ),
+            }]
+        return []
+
+    def _l10n_pe_ne_regla_linea_valor_cero(self):
+        """SUNAT 2028: una línea de operación ONEROSA (gravada 1000, exonerada 9997, inafecta 9998,
+        exportación 9995, IVAP 1016) no puede tener importe 0 — el valor de venta queda vacío y SUNAT
+        rechaza con 'errorCode 2028 (nodo: /)'. Solo la línea GRATUITA (9996) admite valor 0 (su
+        importe es referencial). Convierte el 2028 críptico en un mensaje accionable: poné precio o
+        marcá la línea como gratuita."""
+        # La NC de corrección por error en la descripción (motivo 03) lleva sus líneas a valor 0 por
+        # diseño —solo corrige texto, no montos— y SUNAT la acepta: esta regla no aplica.
+        if (self.l10n_pe_motivo_code or "").strip() == "03":
+            return []
+        malas = []
+        for line in self._l10n_pe_product_lines():
+            (_tip_afe, cod_tri, _nt, _ct, _cc), _por = self._l10n_pe_tax_info(line)
+            if cod_tri == "9996":  # gratuito: el valor 0 es válido (precio referencial aparte)
+                continue
+            base, _igv, _isc, _icb = self._l10n_pe_line_amounts(line)
+            if base <= 0.005:
+                malas.append(line.product_id.display_name or line.name or _("(ítem sin nombre)"))
+        if malas:
+            return [{
+                "code": "2028", "campo": "detalle/mtoValorVentaItem", "nivel": "error",
+                "mensaje": _(
+                    "Estas líneas están gravadas/afectas pero su importe es S/ 0.00, y SUNAT las "
+                    "rechaza (error 2028): %(items)s. Ponles precio, o si no se cobran, márcalas "
+                    "como gratuitas (bonificación)."
+                ) % {"items": ", ".join(malas)},
             }]
         return []
 

@@ -1153,6 +1153,29 @@
   "iteration": 7
  },
  {
+  "id": "NEG-GRAVADO-CERO",
+  "doc": "factura",
+  "title": "Linea gravada con importe 0 debe rechazar (SUNAT 2028)",
+  "partner": "ruc",
+  "lines": [
+   {
+    "tax": "gravado",
+    "price": 100,
+    "qty": 1
+   },
+   {
+    "tax": "gravado",
+    "price": 0,
+    "qty": 1
+   }
+  ],
+  "flags": {
+   "serie": "F001"
+  },
+  "expected": "rejected:importe es S/ 0.00",
+  "source": "rechazo real SUNAT 2028 (boleta B001-211, linea gravada a 0); regla L1 2028"
+ },
+ {
   "id": "NEG-RA-SINMOTIVO",
   "doc": "ra",
   "title": "Comunicacion de baja sin motivo debe rechazar",

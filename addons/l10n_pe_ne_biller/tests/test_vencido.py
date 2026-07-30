@@ -78,3 +78,16 @@ class TestVencido(L10nPeSeedMixin, EnvioSincronoMixin, TransactionCase):
             'name': 'CUADERNO', 'default_code': 'LIB2', 'type': 'consu', 'is_storable': True})
         move = self._emitir(prod)
         self.assertNotIn('Lote', move._l10n_pe_detalle()[0]['desItem'])
+
+    # -- F4: registro sanitario DIGEMID en la descripción del ítem ------------------------
+    def test_registro_sanitario_va_en_la_descripcion(self):
+        prod = self.env['product.product'].create({
+            'name': 'AMOXICILINA', 'default_code': 'FARMA2', 'type': 'consu', 'is_storable': True,
+            'l10n_pe_ne_registro_sanitario': 'EN-12345'})
+        des = self._emitir(prod)._l10n_pe_detalle()[0]['desItem']
+        self.assertIn('Reg. San. EN-12345', des)
+
+    def test_sin_registro_sanitario_no_anota(self):
+        prod = self.env['product.product'].create({
+            'name': 'GENERICO', 'default_code': 'GEN1', 'type': 'consu', 'is_storable': True})
+        self.assertNotIn('Reg. San.', self._emitir(prod)._l10n_pe_detalle()[0]['desItem'])

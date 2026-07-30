@@ -47,6 +47,11 @@ class ProductTemplate(models.Model):
         string="Unidad de fracción (cat.03)",
         help="Código SUNAT de la sub-unidad al vender fraccionado (ej. NIU). Vacío = NIU.")
 
+    l10n_pe_ne_registro_sanitario = fields.Char(
+        string="Registro sanitario (DIGEMID)",
+        help="Farma: código de registro sanitario DIGEMID del producto. Si está, se anota en la "
+             "descripción del ítem del comprobante (trazabilidad). Vacío = no se emite.")
+
     l10n_pe_ne_detraccion_cod = fields.Char(
         string="Sujeto a detracción (cat. 54)",
         help="Código del bien/servicio en el catálogo 54 de SUNAT (SPOT). Vacío = no "

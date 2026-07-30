@@ -142,6 +142,9 @@ def _line_vals(line):
             'tax_ids': [(6, 0, taxes)]}
     if line.get('uom'):
         vals['product_uom_id'] = _uom(line['uom']).id
+        # Código de unidad SUNAT EXACTO (cat-03) por el override de línea: cubre cualquier unidad
+        # (MTK m², MTQ m³, DZN docena…) sin depender de que exista la UoM base en Odoo.
+        vals['l10n_pe_ne_unit_code'] = line['uom']
     if tax_kind == 'icbper' and line.get('bags'):
         vals['quantity'] = float(line['bags'])
     if line.get('fraccionar'):

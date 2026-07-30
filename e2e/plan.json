@@ -1554,5 +1554,29 @@
   },
   "expected": "accepted",
   "source": "map habilitado servicios por hora (cat-03 HUR/DAY)"
+ },
+ {
+  "id": "HAB-PERECIBLE-LOTE",
+  "doc": "factura",
+  "title": "Perecible: alimento por lote con vencimiento (FEFO anota lote en desItem)",
+  "partner": "ruc",
+  "lines": [
+   {
+    "tax": "gravado",
+    "price": 8.5,
+    "qty": 24,
+    "uom": "NIU",
+    "lote": {
+     "name": "L-2027-03",
+     "vence": "2027-03-31 00:00:00",
+     "qty": 200
+    }
+   }
+  ],
+  "flags": {
+   "serie": "F001"
+  },
+  "expected": "accepted",
+  "source": "map presente perecibles: control de caducidad por lote (F1/F2 FEFO)"
  }
 ]

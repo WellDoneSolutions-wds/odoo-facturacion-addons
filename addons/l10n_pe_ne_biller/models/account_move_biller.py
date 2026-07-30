@@ -1448,6 +1448,13 @@ class AccountMove(models.Model):
     l10n_pe_ne_medios_pago = fields.Json(
         string="Medios de pago (POS)", copy=False
     )  # [{'medio','monto'}]
+    l10n_pe_ne_bancarizacion = fields.Selection(
+        [('no_aplica', 'No aplica'), ('pendiente', 'Pendiente'), ('bancarizado', 'Bancarizado')],
+        string="Bancarización (Ley 28194)", default='no_aplica', copy=False,
+        help="Seguimiento del uso de medio de pago para operaciones ≥ S/2,000 o US$500.")
+    l10n_pe_ne_bancarizacion_constancia = fields.Char(string="Constancia de bancarización", copy=False)
+    l10n_pe_ne_bancarizacion_fecha = fields.Date(string="Fecha de bancarización", copy=False)
+    l10n_pe_ne_bancarizacion_medio = fields.Char(string="Medio de bancarización", copy=False)
     # Redondeo de efectivo (Ley 29571 + retiro de monedas < S/ 0.10): ajuste ≤ 0 a favor del
     # consumidor sobre el total a cobrar EN EFECTIVO. NO va al XML/comprobante (amount_total sigue
     # exacto); es un dato de caja: el arqueo espera 'amount_total + redondeo' de efectivo, y el
@@ -1519,6 +1526,34 @@ class AccountMove(models.Model):
         if len(dec) < 2:
             dec = (dec + "00")[:2]
         return "%s.%s" % (entero, dec)
+
+    def _l10n_pe_ne_bancarizacion_estado(self):
+        """Estado de bancarización derivado del total, moneda y medios (efectivo no bancariza).
+        Solo factura (01) en PEN/USD; boleta/NC/ND/otra moneda → no_aplica."""
+        self.ensure_one()
+        UMBRAL = {"PEN": 2000.0, "USD": 500.0}
+        umbral = UMBRAL.get(self.currency_id.name or "PEN")
+        tipo = self.l10n_pe_ne_tipo_doc or self._l10n_pe_document_type()
+        if self.move_type != "out_invoice" or self.debit_origin_id or tipo != "01" or umbral is None:
+            return "no_aplica"
+        if (self.amount_total or 0.0) < umbral:
+            return "no_aplica"
+        medios = self.l10n_pe_ne_medios_pago or []
+        bancariza = any(m.get("medio") != "Efectivo" and float(m.get("monto") or 0) > 0 for m in medios)
+        return "bancarizado" if bancariza else "pendiente"
+
+    def l10n_pe_ne_marcar_bancarizado(self, payload=None):
+        """Marca la factura como bancarizada (el cliente pagó por medio financiero) + guarda la constancia."""
+        self.ensure_one()
+        payload = payload or {}
+        self.l10n_pe_ne_bancarizacion = "bancarizado"
+        if payload.get("constancia"):
+            self.l10n_pe_ne_bancarizacion_constancia = payload["constancia"]
+        if payload.get("fecha"):
+            self.l10n_pe_ne_bancarizacion_fecha = payload["fecha"]
+        if payload.get("medio"):
+            self.l10n_pe_ne_bancarizacion_medio = payload["medio"]
+        return {"ok": True, "bancarizacion": self.l10n_pe_ne_bancarizacion}
 
     def _l10n_pe_document_type(self):
         """Código SUNAT del comprobante: 01 Factura, 03 Boleta, 07 NC, 08 ND."""
@@ -3275,6 +3310,7 @@ class AccountMove(models.Model):
         move = self.env["account.move"].create(vals)
         self._l10n_pe_ne_quick_flags(move, payload)
         move.action_post()
+        move.l10n_pe_ne_bancarizacion = move._l10n_pe_ne_bancarizacion_estado()
         # Stock: el bien sale (o vuelve, si es NC) cuando la venta existe en Odoo, no cuando
         # SUNAT responde — la mercadería ya cambió de manos. Va después del post y antes de
         # enviar: si SUNAT rechaza, el movimiento se corrige con la NC, igual que el importe.
@@ -6533,7 +6569,7 @@ class AccountMove(models.Model):
     @api.model
     def l10n_pe_ne_quick_list(self, query=None, desde=None, hasta=None, estado=None, tipo=None,
                               forma_pago=None, monto_min=None, monto_max=None, serie=None,
-                              moneda=None, limit=100, offset=None):
+                              moneda=None, bancarizacion=None, limit=100, offset=None):
         """Lista de comprobantes emitidos (sin los blobs), para la UI. Filtros
         opcionales: query (cliente/RUC/correlativo), rango de fechas (desde/hasta),
         estado del facturador (por_enviar/en_proceso/enviado/anulado/rechazado/error),
@@ -6571,6 +6607,8 @@ class AccountMove(models.Model):
             domain.append(("currency_id.name", "=", moneda))
         if forma_pago:
             domain.append(("l10n_pe_ne_forma_pago", "=", forma_pago))
+        if bancarizacion:
+            domain.append(("l10n_pe_ne_bancarizacion", "=", bancarizacion))
         if mmin is not None:
             domain.append(("amount_total", ">=", mmin))
         if mmax is not None:
@@ -6612,6 +6650,7 @@ class AccountMove(models.Model):
                 "serie": m.l10n_pe_ne_serie_emit or m.l10n_pe_serie or "",
                 "correlativo": m.l10n_pe_ne_corr_emit or "",
                 "estado": m.l10n_pe_biller_state,
+                "bancarizacion": m.l10n_pe_ne_bancarizacion,
                 "total": m.amount_total,
                 "moneda": m.currency_id.name or "PEN",
                 "cliente": m.partner_id.name or "",

@@ -701,6 +701,7 @@ class L10nPeNeApi(http.Controller):
                 monto_max=kw.get("montoMax") or None,
                 serie=kw.get("serie") or None,
                 moneda=kw.get("moneda") or None,
+                bancarizacion=kw.get("bancarizacion") or None,
                 limit=pg["limit"] if pg else 100,
                 offset=pg["offset"] if pg else None,
             )
@@ -830,6 +831,19 @@ class L10nPeNeApi(http.Controller):
             move = self._move(uid).browse(rec_id)
             move.action_l10n_pe_send_to_biller()
             return move.l10n_pe_ne_quick_result()
+
+        return self._run(op)
+
+    @http.route("/ne/api/comprobantes/<int:rec_id>/bancarizar", **_POST)
+    def bancarizar_comprobante(self, rec_id, **kw):
+        """Marca un comprobante como bancarizado (Ley 28194) + guarda la constancia."""
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+
+        def op():
+            move = self._move(uid).browse(rec_id)
+            return move.l10n_pe_ne_marcar_bancarizado(self._body())
 
         return self._run(op)
 

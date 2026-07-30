@@ -27,7 +27,7 @@ class TestModeloDinero(L10nPeSeedMixin, TransactionCase):
         self.product = self.env['product.product'].create({'name': 'ITEM', 'default_code': 'I1'})
 
     def _build(self, gravado=None, gratuito=None, detraccion=False, credito_cuotas=None,
-               inicial=0.0, retencion=0.0, amortizacion=0.0):
+               inicial=0.0, retencion=0.0, amortizacion=0.0, cubierto=0.0):
         lines = []
         if gravado:
             lines.append((0, 0, {'product_id': self.product.id, 'quantity': 1.0,
@@ -51,6 +51,8 @@ class TestModeloDinero(L10nPeSeedMixin, TransactionCase):
             vals['l10n_pe_ne_retencion_garantia_rate'] = retencion
         if amortizacion:
             vals['l10n_pe_ne_amortizacion_adelanto'] = amortizacion
+        if cubierto:
+            vals['l10n_pe_ne_monto_cubierto'] = cubierto
         move = self.env['account.move'].create(vals)
         move.action_post()
         return move
@@ -99,6 +101,8 @@ class TestModeloDinero(L10nPeSeedMixin, TransactionCase):
             ('obra con retención + amortización de adelanto',
              dict(gravado=10000, retencion=10.0, amortizacion=2360.0,
                   credito_cuotas=[{'fecha': '2026-12-31', 'monto': 7000}])),
+            ('farma con convenio (copago): el tercero cubre parte',
+             dict(gravado=100, cubierto=70.0)),
         ]
         for nombre, kw in casos:
             with self.subTest(caso=nombre):

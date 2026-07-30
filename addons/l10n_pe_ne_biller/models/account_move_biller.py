@@ -417,8 +417,8 @@ class AccountMove(models.Model):
     #   _l10n_pe_detraccion_base total − desc. que NO afecta IGV. Importe de la OPERACIÓN para
     #                           el SPOT (incluye gratuitos y NO resta anticipo; distinto criterio).
     #   _l10n_pe_neto_pendiente importe_cobrar − detracción − inicial al contado − retención de
-    #                           garantía − amortización de adelanto de obra.
-    #                           = saldo a CRÉDITO (lo que suman las cuotas).
+    #                           garantía − amortización de adelanto − monto cubierto por convenio.
+    #                           = saldo a CRÉDITO (lo que suman las cuotas) / copago del paciente.
     #
     # Invariantes (SUNAT + negocio):  neto_pendiente ≤ importe_cobrar ≤ amount_total ;
     #   importe_cobrar ≥ 0 ; detracción ≥ 0 ; sum(cuotas) == neto pendiente del crédito.
@@ -692,6 +692,7 @@ class AccountMove(models.Model):
             self._l10n_pe_ne_regla_exportacion_pais,    # 0200: país del no domiciliado
             self._l10n_pe_ne_regla_boleta_doc,          # boleta > S/700 con documento
             self._l10n_pe_ne_regla_vencidos,            # farma/perecibles: lote vencido
+            self._l10n_pe_ne_regla_convenio_cubierto,   # convenio: cubierto ≤ importe a cobrar
         ):
             findings += regla() or []
         return findings
@@ -875,6 +876,23 @@ class AccountMove(models.Model):
             }]
         return []
 
+    def _l10n_pe_ne_regla_convenio_cubierto(self):
+        """Convenio/tercero pagador: el monto cubierto por el tercero no puede superar el importe a
+        cobrar del comprobante (dejaría el copago del paciente en negativo)."""
+        cubierto = self.l10n_pe_ne_monto_cubierto or 0.0
+        if cubierto <= 0:
+            return []
+        cobrar = self._l10n_pe_importe_cobrar()
+        if cubierto > cobrar + 0.005:
+            return [{
+                "code": "convenio-cubierto", "campo": "montoCubierto", "nivel": "error",
+                "mensaje": _(
+                    "El monto cubierto por el convenio (S/ %(cub).2f) supera el importe a cobrar "
+                    "del comprobante (S/ %(cob).2f). El copago del paciente no puede ser negativo."
+                ) % {"cub": cubierto, "cob": cobrar},
+            }]
+        return []
+
     def _l10n_pe_ne_asegurar_valido(self):
         """Guard de emisión: corta con los errores accionables ANTES de enviar a SUNAT. Los
         avisos no bloquean (los consume el pre-flight de la SPA)."""
@@ -1052,7 +1070,8 @@ class AccountMove(models.Model):
         return round(
             self._l10n_pe_importe_cobrar() - det - inicial
             - self._l10n_pe_ne_retencion_garantia_monto()
-            - (self.l10n_pe_ne_amortizacion_adelanto or 0.0), 2)
+            - (self.l10n_pe_ne_amortizacion_adelanto or 0.0)
+            - (self.l10n_pe_ne_monto_cubierto or 0.0), 2)
 
     def _l10n_pe_ne_retencion_garantia_monto(self):
         """Monto de la retención de garantía (obra) = % sobre el importe a cobrar. 0 si no aplica.
@@ -1264,6 +1283,16 @@ class AccountMove(models.Model):
         help="Obra: parte del adelanto (directo/de materiales) que la entidad ya pagó y recupera "
         "en ESTA valorización. NO es el anticipo SUNAT (doc A/B): es una deducción contractual "
         "que no cambia el total ni el IGV, solo reduce el neto a cobrar y amortiza el adelanto.")
+    # Convenio / tercero pagador (farma: SIS, aseguradora). El comprobante va al PACIENTE por el
+    # total; la parte cubierta por el tercero reduce el neto que paga el paciente (copago) y queda
+    # como cuenta por cobrar al tercero. No cambia el total ni el IGV del comprobante.
+    l10n_pe_ne_tercero_pagador = fields.Char(
+        string="Tercero pagador (convenio)", copy=False,
+        help="Nombre del tercero que cubre parte de la venta (SIS, aseguradora, convenio).")
+    l10n_pe_ne_monto_cubierto = fields.Monetary(
+        string="Monto cubierto por el tercero", copy=False, currency_field="currency_id",
+        help="Parte del importe a cobrar que paga el tercero (convenio). Reduce el neto del "
+        "paciente (copago); no cambia el total ni el IGV.")
     l10n_pe_ne_forma_pago = fields.Selection(
         [("Contado", "Contado"), ("Credito", "Crédito")],
         default="Contado",
@@ -6249,6 +6278,11 @@ class AccountMove(models.Model):
         # Amortización de adelanto de obra (deducción contractual, no anticipo SUNAT).
         if payload.get("amortizacionAdelanto"):
             move.l10n_pe_ne_amortizacion_adelanto = float(payload["amortizacionAdelanto"] or 0)
+        # Convenio / tercero pagador (SIS/aseguradora): la parte cubierta reduce el copago del paciente.
+        if payload.get("convenio"):
+            c = payload["convenio"] or {}
+            move.l10n_pe_ne_tercero_pagador = (c.get("tercero") or "").strip() or False
+            move.l10n_pe_ne_monto_cubierto = float(c.get("montoCubierto") or 0)
         fp = payload.get("formaPago") or {}
         if fp.get("tipo") == "Credito" or fp.get("cuotas"):
             move.l10n_pe_ne_forma_pago = "Credito"
@@ -6491,6 +6525,12 @@ class AccountMove(models.Model):
             } if self.l10n_pe_ne_retencion_garantia_rate else None,
             # Amortización de adelanto de obra recuperada en esta valorización (None si no aplica).
             "amortizacionAdelanto": self.l10n_pe_ne_amortizacion_adelanto or None,
+            # Convenio (tercero pagador): quién cubre, cuánto, y el copago que paga el paciente.
+            "convenio": {
+                "tercero": self.l10n_pe_ne_tercero_pagador or "",
+                "montoCubierto": self.l10n_pe_ne_monto_cubierto,
+                "copago": round(max(0.0, self._l10n_pe_importe_cobrar() - (self.l10n_pe_ne_monto_cubierto or 0.0)), 2),
+            } if self.l10n_pe_ne_monto_cubierto else None,
             "anticipos": self._l10n_pe_ne_anticipos_list(),
             "lineas": lineas,
             "notasCredito": [

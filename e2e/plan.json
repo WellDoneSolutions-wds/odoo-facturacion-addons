@@ -1529,5 +1529,30 @@
   },
   "expected": "accepted",
   "source": "map habilitado agropecuario (exonerado 9997 + KGM)"
+ },
+ {
+  "id": "HAB-SERVICIOS-HORA",
+  "doc": "factura",
+  "title": "Servicios por hora/dia: consultoria (HUR) y alquiler de equipo (DAY)",
+  "partner": "ruc",
+  "lines": [
+   {
+    "tax": "gravado",
+    "price": 120,
+    "qty": 5,
+    "uom": "HUR"
+   },
+   {
+    "tax": "gravado",
+    "price": 400,
+    "qty": 3,
+    "uom": "DAY"
+   }
+  ],
+  "flags": {
+   "serie": "F001"
+  },
+  "expected": "accepted",
+  "source": "map habilitado servicios por hora (cat-03 HUR/DAY)"
  }
 ]

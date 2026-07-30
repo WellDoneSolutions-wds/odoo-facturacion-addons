@@ -17,6 +17,9 @@ import random
 
 CASES_FILE = os.environ.get('E2E_CASES_FILE', '/tmp/e2e_cases.json')
 RESULTS_FILE = os.environ.get('E2E_RESULTS_FILE', '/tmp/e2e_results.json')
+# E2E_DRY=1: NO envía a SUNAT; arma el comprobante y corre las guardas/reglas L1 (validación
+# offline del corpus). Un caso "accepted" pasa si arma sin errores; un negativo debe cortar.
+DRY = os.environ.get('E2E_DRY') == '1'
 # QW08: formatos de representación impresa a verificar contra el biller-pdf real (p.ej. 'TICKET').
 PDF_FORMATS = [f.strip().upper() for f in os.environ.get('E2E_PDF_FORMATS', '').split(',') if f.strip()]
 
@@ -103,8 +106,16 @@ def _uom(code):
 
 
 def _line_vals(line):
-    prod = env['product.product'].create({'name': 'ITEM ' + (line.get('tax') or 'gravado'),
-                                          'default_code': 'P' + str(random.randint(1000, 9999))})
+    pvals = {'name': 'ITEM ' + (line.get('tax') or 'gravado'),
+             'default_code': 'P' + str(random.randint(1000, 9999))}
+    if line.get('controlado'):
+        pvals['l10n_pe_ne_controlado'] = True
+    if line.get('registro'):
+        pvals['l10n_pe_ne_registro_sanitario'] = line['registro']
+    if line.get('fraccionar'):
+        pvals['l10n_pe_ne_unidades_por_empaque'] = float(line.get('factor', 30))
+        pvals['l10n_pe_ne_unidad_fraccion'] = line.get('unidad_fraccion', 'NIU')
+    prod = env['product.product'].create(pvals)
     taxes = []
     tax_kind = line.get('tax', 'gravado')
     if tax_kind == 'ivap':
@@ -133,6 +144,8 @@ def _line_vals(line):
         vals['product_uom_id'] = _uom(line['uom']).id
     if tax_kind == 'icbper' and line.get('bags'):
         vals['quantity'] = float(line['bags'])
+    if line.get('fraccionar'):
+        vals['l10n_pe_ne_fraccionado'] = True   # farma: vender por la sub-unidad del producto
     return (0, 0, vals)
 
 
@@ -165,9 +178,46 @@ def _apply_flags(move, flags):
         }]
     if f.get('motivo'):
         move.l10n_pe_motivo_code = f['motivo']
+    # --- features de esta sesión (obra / farma / Estado) ---
+    if f.get('forma_pago') == 'credito' or f.get('cuotas'):
+        move.l10n_pe_ne_forma_pago = 'Credito'
+        if f.get('cuotas'):
+            move.l10n_pe_ne_cuotas = f['cuotas']            # [{fecha, monto}]
+        if f.get('inicial'):
+            move.l10n_pe_ne_inicial_contado = float(f['inicial'])
+    if f.get('proyecto'):
+        p = f['proyecto']
+        proj = env['l10n_pe_ne.proyecto'].create({
+            'name': p.get('name', 'OBRA E2E'), 'valor_total': float(p.get('valor_total', 500000))})
+        move.l10n_pe_ne_proyecto_id = proj.id
+    if f.get('retencion_garantia'):
+        move.l10n_pe_ne_retencion_garantia_rate = float(f['retencion_garantia'])
+    if f.get('amortizacion_adelanto'):
+        move.l10n_pe_ne_amortizacion_adelanto = float(f['amortizacion_adelanto'])
+    if f.get('convenio'):
+        c = f['convenio']
+        move.l10n_pe_ne_tercero_pagador = c.get('tercero', 'SIS')
+        move.l10n_pe_ne_monto_cubierto = float(c.get('monto', 0))
+    if f.get('venta_estado'):
+        v = f['venta_estado']
+        move.l10n_pe_ne_estado_expediente = v.get('expediente', 'EXP-1')
+        move.l10n_pe_ne_estado_unidad_ejecutora = v.get('unidad_ejecutora', '001')
+        move.l10n_pe_ne_estado_proceso_seleccion = v.get('proceso', 'LP-1')
+        move.l10n_pe_ne_estado_contrato = v.get('contrato', 'CTO-1')
+    if f.get('receta'):
+        r = f['receta']
+        move.l10n_pe_ne_receta_numero = r.get('numero', 'R-001')
+        move.l10n_pe_ne_receta_colegiatura = r.get('colegiatura', 'CMP-1')
 
 
 def _send_move(move):
+    if DRY:
+        # Verificación offline: corre las MISMAS guardas que el envío (líneas con tax, anticipo,
+        # y el motor L1) sin tocar SUNAT. Si arma sin errores, se reporta como aceptado (CDR 0).
+        move._l10n_pe_check_lineas_impuesto()
+        move._l10n_pe_check_anticipo()
+        move._l10n_pe_ne_asegurar_valido()
+        return 'enviado', 'DRY ResponseCode 0 (armado OK, sin enviar)'
     move.action_l10n_pe_send_to_biller()
     return move.l10n_pe_biller_state, (move.l10n_pe_biller_message or '')
 

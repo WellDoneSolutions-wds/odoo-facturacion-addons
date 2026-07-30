@@ -1484,6 +1484,10 @@ class AccountMove(models.Model):
     l10n_pe_ne_bancarizacion_constancia = fields.Char(string="Constancia de bancarización", copy=False)
     l10n_pe_ne_bancarizacion_fecha = fields.Date(string="Fecha de bancarización", copy=False)
     l10n_pe_ne_bancarizacion_medio = fields.Char(string="Medio de bancarización", copy=False)
+    l10n_pe_ne_bancarizacion_doc = fields.Binary(
+        string="Documento de bancarización", attachment=True, copy=False,
+        help="Voucher/constancia del banco que sustenta la bancarización (Ley 28194).")
+    l10n_pe_ne_bancarizacion_doc_name = fields.Char(string="Nombre del documento", copy=False)
     # Redondeo de efectivo (Ley 29571 + retiro de monedas < S/ 0.10): ajuste ≤ 0 a favor del
     # consumidor sobre el total a cobrar EN EFECTIVO. NO va al XML/comprobante (amount_total sigue
     # exacto); es un dato de caja: el arqueo espera 'amount_total + redondeo' de efectivo, y el
@@ -1584,9 +1588,28 @@ class AccountMove(models.Model):
         return "bancarizado" if bancariza else "pendiente"
 
     def l10n_pe_ne_marcar_bancarizado(self, payload=None):
-        """Marca la factura como bancarizada (el cliente pagó por medio financiero) + guarda la constancia."""
+        """Marca la factura como bancarizada + guarda la constancia (texto/fecha/medio) y,
+        opcional, el documento de respaldo (PDF/JPG/PNG ≤ 5MB). Re-llamarla con otro doc lo
+        reemplaza; sin doc, el documento existente se conserva."""
         self.ensure_one()
         payload = payload or {}
+        doc = payload.get("doc")
+        if doc:
+            try:
+                raw = base64.b64decode(doc, validate=True)
+            except Exception:
+                raise UserError(_("El documento de bancarización no es un archivo válido."))
+            if len(raw) > 5 * 1024 * 1024:
+                raise UserError(_("El documento de bancarización no puede superar los 5 MB."))
+            # Magic-number: PDF %PDF, JPEG \xff\xd8, PNG \x89PNG. La extensión sola no basta.
+            es_pdf = raw[:5] == b"%PDF-"
+            es_jpg = raw[:3] == b"\xff\xd8\xff"
+            es_png = raw[:8] == b"\x89PNG\r\n\x1a\n"
+            if not (es_pdf or es_jpg or es_png):
+                raise UserError(_("El documento debe ser PDF, JPG o PNG."))
+            self.l10n_pe_ne_bancarizacion_doc = doc.encode() if isinstance(doc, str) else doc
+            nombre = (payload.get("docName") or "").strip() or ("voucher.pdf" if es_pdf else "voucher.png" if es_png else "voucher.jpg")
+            self.l10n_pe_ne_bancarizacion_doc_name = nombre
         self.l10n_pe_ne_bancarizacion = "bancarizado"
         if payload.get("constancia"):
             self.l10n_pe_ne_bancarizacion_constancia = payload["constancia"]
@@ -6853,6 +6876,13 @@ class AccountMove(models.Model):
                 # no confunde con un total inflado por una línea gratuita (== el mtoImpVenta emitido).
                 "total": round(self._l10n_pe_importe_cobrar(), 2),
             },
+            # Bancarización (Ley 28194): estado + constancia/fecha/medio + nombre del documento
+            # de respaldo (el binario se sirve aparte, no en el detalle).
+            "bancarizacion": self.l10n_pe_ne_bancarizacion,
+            "bancarizacionConstancia": self.l10n_pe_ne_bancarizacion_constancia or "",
+            "bancarizacionFecha": (self.l10n_pe_ne_bancarizacion_fecha and str(self.l10n_pe_ne_bancarizacion_fecha)) or "",
+            "bancarizacionMedio": self.l10n_pe_ne_bancarizacion_medio or "",
+            "bancarizacionDocNombre": self.l10n_pe_ne_bancarizacion_doc_name or "",
         }
 
     def l10n_pe_ne_get_files(self, kind=None):

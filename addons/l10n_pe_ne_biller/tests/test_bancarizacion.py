@@ -62,3 +62,55 @@ class TestBancarizacion(TransactionCase):
         self.assertEqual(next(r for r in res if r['id'] == m.id)['bancarizacion'], 'pendiente')
         res2 = self.env['account.move'].l10n_pe_ne_quick_list(bancarizacion='bancarizado')
         self.assertNotIn(m.id, [r['id'] for r in res2])
+
+    import base64 as _b64
+    _PDF = _b64.b64encode(b"%PDF-1.4\n%mock voucher\n").decode()
+    _PNG = _b64.b64encode(b"\x89PNG\r\n\x1a\n" + b"0" * 40).decode()
+
+    def _factura_banc(self):
+        m = self._factura(precio=3000.0, medios=[{'medio': 'Transferencia', 'monto': 3540}])
+        m.l10n_pe_ne_bancarizacion = 'pendiente'
+        return m
+
+    def test_marcar_guarda_documento(self):
+        m = self._factura_banc()
+        m.l10n_pe_ne_marcar_bancarizado({'constancia': 'OP-1', 'doc': self._PDF, 'docName': 'voucher.pdf'})
+        self.assertEqual(m.l10n_pe_ne_bancarizacion, 'bancarizado')
+        self.assertEqual(m.l10n_pe_ne_bancarizacion_doc_name, 'voucher.pdf')
+        self.assertTrue(m.l10n_pe_ne_bancarizacion_doc)
+
+    def test_marcar_sin_doc_no_borra_el_existente(self):
+        m = self._factura_banc()
+        m.l10n_pe_ne_marcar_bancarizado({'doc': self._PDF, 'docName': 'v.pdf'})
+        m.l10n_pe_ne_marcar_bancarizado({'constancia': 'OP-2'})   # sin doc
+        self.assertEqual(m.l10n_pe_ne_bancarizacion_doc_name, 'v.pdf')
+        self.assertTrue(m.l10n_pe_ne_bancarizacion_doc)
+
+    def test_marcar_reemplaza_documento(self):
+        m = self._factura_banc()
+        m.l10n_pe_ne_marcar_bancarizado({'doc': self._PDF, 'docName': 'a.pdf'})
+        m.l10n_pe_ne_marcar_bancarizado({'doc': self._PNG, 'docName': 'b.png'})
+        self.assertEqual(m.l10n_pe_ne_bancarizacion_doc_name, 'b.png')
+
+    def test_marcar_doc_muy_grande_bloquea(self):
+        from odoo.exceptions import UserError
+        m = self._factura_banc()
+        grande = self._b64.b64encode(b"%PDF-" + b"0" * (5 * 1024 * 1024 + 10)).decode()
+        with self.assertRaises(UserError):
+            m.l10n_pe_ne_marcar_bancarizado({'doc': grande, 'docName': 'big.pdf'})
+        self.assertFalse(m.l10n_pe_ne_bancarizacion_doc)
+
+    def test_marcar_doc_tipo_no_permitido_bloquea(self):
+        from odoo.exceptions import UserError
+        m = self._factura_banc()
+        exe = self._b64.b64encode(b"MZ\x90\x00malware").decode()
+        with self.assertRaises(UserError):
+            m.l10n_pe_ne_marcar_bancarizado({'doc': exe, 'docName': 'x.pdf'})
+
+    def test_detalle_expone_bancarizacion(self):
+        m = self._factura_banc()
+        m.l10n_pe_ne_marcar_bancarizado({'constancia': 'OP-9', 'medio': 'Transferencia', 'doc': self._PDF, 'docName': 'v.pdf'})
+        d = m.l10n_pe_ne_comprobante_detalle()
+        self.assertEqual(d['bancarizacion'], 'bancarizado')
+        self.assertEqual(d['bancarizacionConstancia'], 'OP-9')
+        self.assertEqual(d['bancarizacionDocNombre'], 'v.pdf')

@@ -104,6 +104,27 @@ class TestExportacion(TransactionCase):
         move = self._invoice([self._line(self.exp)], partner=partner)
         self.assertEqual(move._l10n_pe_adicional_cabecera()["codPaisCliente"], "US")
 
+    def test_pais_completa_partner_existente_sin_pais(self):
+        # Un partner extranjero YA registrado sin país: una emisión de exportación que manda
+        # `pais` en el payload le completa el country_id (antes se ignoraba en un partner existente
+        # y la 0200 quedaba bloqueada por falta de codPaisCliente).
+        p = self.env["res.partner"].create({
+            "name": "OLD FOREIGN", "vat": "EXTOLD1", "company_id": self.company.id})
+        self.assertFalse(p.country_id)
+        got = self.Move._l10n_pe_ne_quick_partner({
+            "razonSocial": "OLD FOREIGN", "numDoc": "EXTOLD1", "tipoDoc": "7", "pais": "US"})
+        self.assertEqual(got.id, p.id)               # reusa el existente (mismo vat)
+        self.assertEqual(got.country_id.code, "US")  # y le completa el país
+
+    def test_pais_no_pisa_partner_existente_con_pais(self):
+        us = self.env.ref("base.us")
+        p = self.env["res.partner"].create({
+            "name": "FOREIGN US", "vat": "EXTUS1", "country_id": us.id, "company_id": self.company.id})
+        got = self.Move._l10n_pe_ne_quick_partner({
+            "razonSocial": "FOREIGN US", "numDoc": "EXTUS1", "pais": "CL"})
+        self.assertEqual(got.id, p.id)
+        self.assertEqual(got.country_id.code, "US")  # NO pisa el país ya guardado (sigue US, no CL)
+
     def test_paises_catalogo_no_vacio(self):
         paises = self.Move.l10n_pe_ne_paises()
         self.assertTrue(any(p["code"] == "US" for p in paises))

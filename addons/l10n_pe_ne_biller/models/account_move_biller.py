@@ -693,6 +693,7 @@ class AccountMove(models.Model):
             self._l10n_pe_ne_regla_detraccion_monto,    # SPOT: mtoDetraccion > 0
             self._l10n_pe_ne_regla_detraccion_tasa,     # SPOT: tasa oficial del código
             self._l10n_pe_ne_regla_exportacion_pais,    # 0200: país del no domiciliado
+            self._l10n_pe_ne_regla_exportacion_ruc,     # 0200: adquirente no domiciliado (aviso si RUC)
             self._l10n_pe_ne_regla_boleta_doc,          # boleta > S/700 con documento
             self._l10n_pe_ne_regla_vencidos,            # farma/perecibles: lote vencido
             self._l10n_pe_ne_regla_convenio_cubierto,   # convenio: cubierto ≤ importe a cobrar
@@ -886,6 +887,25 @@ class AccountMove(models.Model):
                 ),
             }]
         return []
+
+    def _l10n_pe_ne_regla_exportacion_ruc(self):
+        """Exportación (0200): el adquirente es un sujeto NO DOMICILIADO, que por definición no
+        tiene RUC peruano — SUNAT espera identificarlo con carné de extranjería (4), pasaporte
+        (7) o doc. no domiciliado sin RUC (0). Un RUC en una 0200 es sospechoso; se AVISA (no
+        bloquea: el emisor puede tener un caso legítimo, y así la regla no rompe emisiones que
+        SUNAT sí acepta)."""
+        if self._l10n_pe_tipo_operacion() != "0200":
+            return []
+        if (self._l10n_pe_cliente_doc()[0] or "") != "6":
+            return []
+        return [{
+            "code": "exportacion-ruc", "campo": "tipDocUsuario", "nivel": "aviso",
+            "mensaje": _(
+                "En una exportación el adquirente suele ser no domiciliado y no tener RUC. "
+                "Verifica el tipo de documento del cliente (carné de extranjería, pasaporte o "
+                "sin RUC): SUNAT puede observar una operación de exportación con RUC."
+            ),
+        }]
 
     def _l10n_pe_ne_regla_boleta_doc(self):
         """Boleta (03) mayor a S/ 700: SUNAT (Rgto. de Comprobantes de Pago, art. 8) exige
@@ -3674,6 +3694,16 @@ class AccountMove(models.Model):
                 found.street = addr
         if urb and not found.street2:
             found.street2 = urb
+        # País del adquirente (exportación / no domiciliado): si un partner ya registrado no tiene
+        # país guardado, lo completamos con el del payload — así una factura de exportación a un
+        # cliente preexistente sin país no queda bloqueada por el guard 0200. No pisa un país ya
+        # guardado (para cambiarlo se usa la API de clientes, que sí lo reescribe).
+        if not found.country_id:
+            pais = (c.get("pais") or "").strip().upper()
+            if pais:
+                country = self.env["res.country"].search([("code", "=", pais)], limit=1)
+                if country:
+                    found.country_id = country.id
         return found
 
     # Afectaciones de tasa 0% (cat-05) que se auto-crean si el plan no las trae. El IGV (1000)

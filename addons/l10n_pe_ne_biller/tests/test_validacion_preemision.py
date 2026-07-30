@@ -210,6 +210,25 @@ class TestValidacionPreEmision(L10nPeSeedMixin, TransactionCase):
         self.assertEqual(move._l10n_pe_tipo_operacion(), '0200')
         self.assertNotIn('exportacion-pais', self._codes(move))
 
+    def test_exportacion_con_ruc_avisa_pero_no_bloquea(self):
+        # 0200 con adquirente RUC: SUNAT espera un no domiciliado (sin RUC). Se AVISA, no se bloquea
+        # (el frontend admite RUC "si lo tuviera"; la regla nudge no debe romper esa emisión).
+        exp = self.env['account.move']._l10n_pe_ne_tax_by_code('9995')
+        ruc_type = self.env['l10n_latam.identification.type'].search([('l10n_pe_vat_code', '=', '6')], limit=1)
+        partner = self.env['res.partner'].create({
+            'name': 'FOREIGN RUC', 'vat': '20100070970', 'country_id': self.env.ref('base.us').id,
+            'l10n_latam_identification_type_id': ruc_type.id})
+        move = self.env['account.move'].create({
+            'move_type': 'out_invoice', 'partner_id': partner.id, 'invoice_date': '2026-07-29',
+            'l10n_pe_serie': 'F001', 'l10n_pe_correlativo': '262',
+            'invoice_line_ids': [(0, 0, {'product_id': self.product.id, 'quantity': 1.0,
+                                         'price_unit': 1000.0, 'tax_ids': [(6, 0, exp.ids)]})]})
+        move.action_post()
+        self.assertEqual(move._l10n_pe_tipo_operacion(), '0200')
+        findings = move._l10n_pe_ne_validaciones()
+        self.assertIn('exportacion-ruc', {f['code'] for f in findings})                  # avisa
+        self.assertNotIn('exportacion-ruc', {f['code'] for f in findings if f['nivel'] == 'error'})  # no bloquea
+
     # -- boleta (03) > S/700: exige documento del adquirente ------------------------------
     def _boleta(self, precio, con_doc=False):
         if con_doc:

@@ -1126,17 +1126,22 @@ class AccountMove(models.Model):
         # venta con IGV (amount_total): el descuento NO reduce gravada/IGV, solo el MtoImpVenta.
         desc_na = self._l10n_pe_desc_no_afecta()
         if desc_na > 0:
-            base = self.amount_total or 0.0
+            # FACTOR UNITARIO (igual que el anticipo 04): base = el propio monto del descuento,
+            # factor 1.00000, monto = base. Así base × factor = monto EXACTO para cualquier importe
+            # y la regla SUNAT 4322 (|monto − base × factor| ≤ 1) pasa siempre. Antes se emitía
+            # base = amount_total con el factor a 5 decimales (desc/base): en operaciones de base
+            # alta (≳ S/ 200.000) el redondeo del factor × base se desviaba > 1 sol → rechazo 4322
+            # (mismo bug que ya se corrigió en el anticipo). El XSL de SUNAT solo suma el `Amount`
+            # (mtoVariableGlobal) de este código, nunca su BaseAmount → achicar la base no cambia nada.
             out.append(
                 {
                     "tipVariableGlobal": "false",
                     "codTipoVariableGlobal": DESC_GLOBAL_NO_AFECTA_COD,
-                    # 5 decimales: misma tolerancia SUNAT que el anticipo (mtoVariable ≈ base × por).
-                    "porVariableGlobal": "%.5f" % (desc_na / base if base else 0.0),
+                    "porVariableGlobal": "1.00000",
                     "monMontoVariableGlobal": moneda,
                     "mtoVariableGlobal": fmt(desc_na),
                     "monBaseImponibleVariableGlobal": moneda,
-                    "mtoBaseImpVariableGlobal": fmt(base),
+                    "mtoBaseImpVariableGlobal": fmt(desc_na),
                 }
             )
         return out
@@ -1161,13 +1166,15 @@ class AccountMove(models.Model):
             move.l10n_pe_serie = serie
 
     def _l10n_pe_detraccion_base(self):
-        """Base de la detracción (SPOT) = importe de la operación = total − descuento que NO
-        afecta la base del IGV (cat. 53 cód. 03). Ese descuento reduce el MtoImpVenta que paga
-        el adquirente, así que también reduce la base sobre la que se detrae — de lo contrario
-        se detrae de más y la base no coincide con el total que muestra el front ni con el
-        PayableAmount del XML. NO se descuenta el anticipo: la base es la de la operación."""
+        """Base de la detracción (SPOT) = importe de la operación ONEROSA = total − líneas
+        gratuitas (9996) − descuento que NO afecta la base del IGV (cat. 53 cód. 03). El
+        descuento no-afecta reduce el MtoImpVenta que paga el adquirente; las gratuitas no son
+        operación onerosa sujeta al SPOT (amount_total las incluye vía grat_base). Sin excluir
+        ambos se detrae de más y la base no coincide ni con el importe a cobrar (sumImpVenta) ni
+        con lo que muestra el front. NO se descuenta el anticipo: la base es la de la operación."""
         self.ensure_one()
-        return round((self.amount_total or 0.0) - self._l10n_pe_desc_no_afecta(), 2)
+        return round((self.amount_total or 0.0) - self._l10n_pe_gratuito_base()
+                     - self._l10n_pe_desc_no_afecta(), 2)
 
     def _l10n_pe_detraccion_monto(self):
         self.ensure_one()
@@ -1537,6 +1544,18 @@ class AccountMove(models.Model):
     def _l10n_pe_fmt(self, amount):
         return "%.2f" % (amount or 0.0)
 
+    def _l10n_pe_fmt_unit(self, amount):
+        # Valores UNITARIOS (valor/precio unitario): SUNAT admite hasta 10 decimales. A 2 decimales,
+        # `mtoValorUnitario × cantidad` se desviaba de `mtoValorVentaItem` en líneas de alta cantidad
+        # (qty ≳ 200 con valor sin-IGV no terminante, p.ej. 10/1.18 → > 1 sol → rechazo 3271/4288).
+        # Se mantiene "%.2f" cuando el valor YA es exacto a 2 decimales (compat con los tests y la
+        # referencia SUNAT) y se amplía a 8 decimales SOLO cuando hace falta para reconciliar.
+        amount = amount or 0.0
+        r2 = round(amount, 2)
+        if abs(amount - r2) < 1e-9:
+            return "%.2f" % r2
+        return ("%.8f" % amount).rstrip("0")
+
     def _l10n_pe_fmt_cant(self, qty):
         """Cantidad para SUNAT (ctdUnidadItem): hasta 3 decimales, sin ceros de relleno más allá
         de 2. Conserva la venta al peso de balanza (18.375) sin ensuciar los conteos (2 -> 2.00).
@@ -1826,10 +1845,10 @@ class AccountMove(models.Model):
                 "codUnidadMedida": self._l10n_pe_unit_code(line),
                 "ctdUnidadItem": self._l10n_pe_fmt_cant(qty),
                 "desItem": self._l10n_pe_des_item(line),
-                "mtoValorUnitario": fmt(gross / qty if qty else 0.0),
+                "mtoValorUnitario": self._l10n_pe_fmt_unit(gross / qty if qty else 0.0),
                 "mtoValorVentaItem": fmt(base),
                 # Precio de venta unitario = (valor venta + ISC + IGV) / cantidad; NO incluye el ICBPER.
-                "mtoPrecioVentaUnitario": fmt((base + isc + igv) / qty if qty else 0.0),
+                "mtoPrecioVentaUnitario": self._l10n_pe_fmt_unit((base + isc + igv) / qty if qty else 0.0),
                 "mtoValorReferencialUnitario": "0.00",
                 "porIgvItem": fmt(por_igv),
                 # La base del IGV incluye el ISC (el IGV se computa sobre valor venta + ISC).
@@ -1852,7 +1871,7 @@ class AccountMove(models.Model):
                         "mtoValorUnitario": "0.00",
                         "mtoValorVentaItem": fmt(base),
                         "mtoPrecioVentaUnitario": "0.00",
-                        "mtoValorReferencialUnitario": fmt(gross / qty if qty else 0.0),
+                        "mtoValorReferencialUnitario": self._l10n_pe_fmt_unit(gross / qty if qty else 0.0),
                         "porIgvItem": "18.00",
                         "mtoBaseIgvItem": fmt(base),
                         "mtoIgvItem": fmt(igv_grat),

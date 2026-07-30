@@ -68,6 +68,27 @@ class TestBillerDetraccion(TransactionCase):
         # Neto pendiente = base 600 − detracción 72 = 528.00.
         self.assertEqual(payload['datoPago']['mtoNetoPendientePago'], '528.00')
 
+    def test_detraccion_base_resta_gratuito(self):
+        """B3: la base de la detracción excluye el valor de las líneas GRATUITAS (9996) — un regalo
+        no es operación onerosa sujeta al SPOT. Antes se detraía incluyendo el gratuito (base y neto
+        de más, sin coincidir con el importe a cobrar ni con lo que muestra el front)."""
+        grat = self.env['account.move']._l10n_pe_ne_tax_by_code('9996')
+        move = self.env['account.move'].create({
+            'move_type': 'out_invoice', 'partner_id': self.partner.id, 'invoice_date': '2026-06-20',
+            'l10n_pe_serie': 'F001', 'l10n_pe_correlativo': '13',
+            'l10n_pe_ne_detraccion': True, 'l10n_pe_ne_detraccion_code': '037',
+            'l10n_pe_ne_detraccion_rate': 12.0,
+            'invoice_line_ids': [
+                (0, 0, {'product_id': self.product.id, 'quantity': 1.0, 'price_unit': 2000.0,
+                        'tax_ids': [(6, 0, self.igv.ids)]}),
+                (0, 0, {'product_id': self.product.id, 'quantity': 1.0, 'price_unit': 500.0,
+                        'tax_ids': [(6, 0, grat.ids)]})]})
+        move.action_post()
+        adic = move._l10n_pe_build_invoice_request()['cabecera']['adicionalCabecera']
+        # Base onerosa = 2360 (2000 gravada + 360 IGV), SIN el gratuito 500 → 12% de 2360 = 283.20 → 283
+        # (antes del fix incluía el gratuito: 12% de 2860 = 343.20 → 343).
+        self.assertEqual(adic['mtoDetraccion'], '283.00')
+
     def test_detraccion_credito_neto_y_cuota_sobre_neto(self):
         """Crédito con detracción: el neto pendiente y la cuota (sin cuotas explícitas)
         van sobre total − detracción, no sobre el total. Regresión del bug reportado:

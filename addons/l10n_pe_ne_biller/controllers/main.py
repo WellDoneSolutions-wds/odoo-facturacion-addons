@@ -659,6 +659,18 @@ class L10nPeNeApi(http.Controller):
         except Exception as e:  # noqa: BLE001
             return self._fail(e)
 
+    @http.route("/ne/api/reportes/vinculadas", **_GET)
+    def reporte_vinculadas(self, ejercicio=None, **kw):
+        """Operaciones con partes vinculadas del ejercicio (sustento DJ de precios de
+        transferencia): agrupado por cliente + cruce con los umbrales de obligación."""
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        try:
+            return self._json(self._move(uid).l10n_pe_ne_reporte_vinculadas(ejercicio))
+        except Exception as e:  # noqa: BLE001
+            return self._fail(e)
+
     @http.route("/ne/api/reportes/export", **_GET)
     def export(self, tipo="ventas", periodo=None, **kw):
         """Centro de descargas: exporta ventas|productos|clientes a XLSX (base64)."""

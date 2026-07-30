@@ -18,3 +18,4 @@ from . import test_fraccionamiento
 from . import test_convenio
 from . import test_controlados
 from . import test_venta_estado
+from . import test_vinculadas

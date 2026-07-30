@@ -688,6 +688,7 @@ class AccountMove(models.Model):
             self._l10n_pe_ne_regla_deducciones_exceden, # neto a cobrar no puede ser negativo
             self._l10n_pe_ne_regla_estado_grupo,        # SUNAT 3146-3149
             self._l10n_pe_ne_regla_estado_conformidad,  # venta al Estado: acta de recepción
+            self._l10n_pe_ne_regla_vinculada_valor_mercado,  # vinculadas: recordar valor de mercado
             self._l10n_pe_ne_regla_detraccion_cuenta,   # SPOT: cta. Banco de la Nación
             self._l10n_pe_ne_regla_detraccion_monto,    # SPOT: mtoDetraccion > 0
             self._l10n_pe_ne_regla_detraccion_tasa,     # SPOT: tasa oficial del código
@@ -790,6 +791,25 @@ class AccountMove(models.Model):
                 ),
             }]
         return []
+
+    def _l10n_pe_ne_regla_vinculada_valor_mercado(self):
+        """Precios de transferencia (V2): si el comprobante va a una parte vinculada, avisa para
+        que el emisor confirme que el precio pactado es de mercado (art. 32-A LIR). No bloquea —no
+        hay fuente de valor de mercado en el sistema—: es un recordatorio para el sustento de la DJ.
+        Con parte no domiciliada, la operación entra a precios de transferencia sin umbral."""
+        p = self.partner_id
+        if not p or not p.l10n_pe_ne_parte_vinculada:
+            return []
+        extra = _(" (no domiciliada: entra a precios de transferencia sin umbral de país)") \
+            if p.l10n_pe_ne_no_domiciliada else ""
+        return [{
+            "code": "vinculada-valor-mercado", "campo": "cliente/parteVinculada", "nivel": "aviso",
+            "mensaje": _(
+                "Operación con parte vinculada «%(nombre)s»%(extra)s. Verifica que el precio sea de "
+                "valor de mercado (art. 32-A LIR) y guarda el sustento para la DJ de precios de "
+                "transferencia."
+            ) % {"nombre": p.name or "", "extra": extra},
+        }]
 
     def _l10n_pe_ne_regla_detraccion_cuenta(self):
         """SPOT: si el comprobante está sujeto a detracción, la cuenta del Banco de la Nación es
@@ -4130,6 +4150,55 @@ class AccountMove(models.Model):
         )
 
     @api.model
+    def l10n_pe_ne_reporte_vinculadas(self, ejercicio=None):
+        """Reporte de operaciones con partes vinculadas del ejercicio (año, default el actual) —
+        sustento de la DJ Informativa de Precios de Transferencia / Reporte Local (V1). Lista los
+        comprobantes emitidos a clientes marcados como parte vinculada, agrupados por cliente, con
+        el tipo de vínculo, si es no domiciliada y el total (las NC restan). Aislado por compañía."""
+        company = self.env.company
+        year = int(ejercicio) if ejercicio else fields.Date.context_today(self).year
+        d0 = fields.Date.to_date("%04d-01-01" % year)
+        d1 = fields.Date.to_date("%04d-12-31" % year)
+        moves = self.search(
+            [
+                ("company_id", "=", company.id),
+                ("move_type", "in", ("out_invoice", "out_refund")),
+                ("state", "=", "posted"),
+                ("invoice_date", ">=", d0), ("invoice_date", "<=", d1),
+                ("l10n_pe_biller_state", "not in", ("por_enviar", "rechazado", False)),
+                ("partner_id.l10n_pe_ne_parte_vinculada", "=", True),
+            ],
+            order="partner_id, invoice_date, id",
+        )
+        tipos = dict(self.env["res.partner"]._fields["l10n_pe_ne_tipo_vinculo"].selection)
+        por_cliente = {}
+        total = 0.0
+        for m in moves:
+            p = m.partner_id
+            g = por_cliente.setdefault(p.id, {
+                "cliente": p.name or "", "numDoc": p.vat or "",
+                "tipoVinculo": p.l10n_pe_ne_tipo_vinculo or "",
+                "tipoVinculoNombre": tipos.get(p.l10n_pe_ne_tipo_vinculo, ""),
+                "noDomiciliada": p.l10n_pe_ne_no_domiciliada,
+                "pais": p.country_id.code or "", "comprobantes": 0, "total": 0.0,
+            })
+            signo = 1.0 if m.move_type == "out_invoice" else -1.0
+            g["comprobantes"] += 1
+            g["total"] = round(g["total"] + signo * (m.amount_total or 0.0), 2)
+            total += signo * (m.amount_total or 0.0)
+        items = sorted(por_cliente.values(), key=lambda x: -x["total"])
+        return {
+            "ejercicio": year,
+            "items": items,
+            "clientes": len(items),
+            "comprobantes": len(moves),
+            "total": round(total, 2),
+            "moneda": company.currency_id.name or "PEN",
+            # Cruce con los umbrales de obligación (V4) para que el reporte diga si hay que presentar.
+            "umbrales": self.env["res.company"].l10n_pe_ne_vinculadas_umbrales(year),
+        }
+
+    @api.model
     def l10n_pe_ne_ple_ventas(self, periodo):
         """Genera el PLE 14.1 (Registro de Ventas) del periodo YYYYMM desde los
         comprobantes emitidos (01/03/07/08) de la compañía actual. Devuelve
@@ -5248,6 +5317,8 @@ class AccountMove(models.Model):
             "pais": p.country_id.code or "",
             "exceptuadoPercepcion": p.l10n_pe_ne_exceptuado_percepcion,
             "parteVinculada": p.l10n_pe_ne_parte_vinculada,
+            "tipoVinculo": p.l10n_pe_ne_tipo_vinculo or "",
+            "noDomiciliada": p.l10n_pe_ne_no_domiciliada,
         }
 
     def _l10n_pe_ne_ident_type(self, tipoDoc):
@@ -5278,6 +5349,7 @@ class AccountMove(models.Model):
             ("direccion", "street"),
             ("exceptuadoPercepcion", "l10n_pe_ne_exceptuado_percepcion"),
             ("parteVinculada", "l10n_pe_ne_parte_vinculada"),
+            ("tipoVinculo", "l10n_pe_ne_tipo_vinculo"),
         ):
             if key in c:
                 vals[field] = c.get(key) or False

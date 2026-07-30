@@ -693,6 +693,7 @@ class AccountMove(models.Model):
             self._l10n_pe_ne_regla_boleta_doc,          # boleta > S/700 con documento
             self._l10n_pe_ne_regla_vencidos,            # farma/perecibles: lote vencido
             self._l10n_pe_ne_regla_convenio_cubierto,   # convenio: cubierto ≤ importe a cobrar
+            self._l10n_pe_ne_regla_controlado_receta,   # farma: controlado exige receta retenida
         ):
             findings += regla() or []
         return findings
@@ -890,6 +891,26 @@ class AccountMove(models.Model):
                     "El monto cubierto por el convenio (S/ %(cub).2f) supera el importe a cobrar "
                     "del comprobante (S/ %(cob).2f). El copago del paciente no puede ser negativo."
                 ) % {"cub": cubierto, "cob": cobrar},
+            }]
+        return []
+
+    def _l10n_pe_ne_tiene_controlado(self):
+        """True si alguna línea de producto es una sustancia controlada (DIGEMID)."""
+        return any(l.product_id.l10n_pe_ne_controlado for l in self._l10n_pe_product_lines())
+
+    def _l10n_pe_ne_regla_controlado_receta(self):
+        """Farma: la venta de un producto CONTROLADO (psicotrópico/estupefaciente) exige receta
+        retenida — número de receta + colegiatura (CMP) del médico. Sin esos datos se bloquea."""
+        if not self._l10n_pe_ne_tiene_controlado():
+            return []
+        if not (self.l10n_pe_ne_receta_numero or "").strip() or \
+           not (self.l10n_pe_ne_receta_colegiatura or "").strip():
+            return [{
+                "code": "controlado-receta", "campo": "receta", "nivel": "error",
+                "mensaje": _(
+                    "La venta incluye un producto controlado: se requiere la receta retenida "
+                    "(número de receta y colegiatura CMP del médico)."
+                ),
             }]
         return []
 
@@ -1293,6 +1314,13 @@ class AccountMove(models.Model):
         string="Monto cubierto por el tercero", copy=False, currency_field="currency_id",
         help="Parte del importe a cobrar que paga el tercero (convenio). Reduce el neto del "
         "paciente (copago); no cambia el total ni el IGV.")
+    # Receta retenida (farma): obligatoria cuando el comprobante vende un producto controlado.
+    l10n_pe_ne_receta_numero = fields.Char(
+        string="N° de receta", copy=False,
+        help="Número de la receta retenida (venta de productos controlados).")
+    l10n_pe_ne_receta_colegiatura = fields.Char(
+        string="Colegiatura del médico (CMP)", copy=False,
+        help="N° de colegiatura (CMP) del médico que prescribe (venta de productos controlados).")
     l10n_pe_ne_forma_pago = fields.Selection(
         [("Contado", "Contado"), ("Credito", "Crédito")],
         default="Contado",
@@ -1608,6 +1636,10 @@ class AccountMove(models.Model):
         reg = (line.product_id.l10n_pe_ne_registro_sanitario or "").strip()
         if reg:
             desc = "%s · Reg. San. %s" % (desc, reg)
+        if line.product_id.l10n_pe_ne_controlado and (self.l10n_pe_ne_receta_numero or "").strip():
+            desc = "%s · Receta %s (CMP %s)" % (
+                desc, self.l10n_pe_ne_receta_numero.strip(),
+                (self.l10n_pe_ne_receta_colegiatura or "").strip())
         return desc
 
     def _l10n_pe_detalle(self):
@@ -5132,6 +5164,7 @@ class AccountMove(models.Model):
             "unidadesPorEmpaque": p.l10n_pe_ne_unidades_por_empaque or 0.0,
             "unidadFraccion": p.l10n_pe_ne_unidad_fraccion or "",
             "registroSanitario": p.l10n_pe_ne_registro_sanitario or "",
+            "controlado": bool(p.l10n_pe_ne_controlado),
             # "bien" | "servicio" — el vocabulario del negocio, no el de Odoo (consu/service).
             # 'combo' no lo usa esta app; si apareciera, se trata como bien (es tangible).
             "tipo": "servicio" if p.type == "service" else "bien",
@@ -5349,6 +5382,8 @@ class AccountMove(models.Model):
             vals["l10n_pe_ne_detraccion_cod"] = (producto.get("detraCod") or "").strip() or False
         if "registroSanitario" in producto:
             vals["l10n_pe_ne_registro_sanitario"] = (producto.get("registroSanitario") or "").strip() or False
+        if "controlado" in producto:
+            vals["l10n_pe_ne_controlado"] = bool(producto.get("controlado"))
         if producto.get("percepTasa") is not None:
             vals["l10n_pe_ne_percepcion_tasa"] = _percep_float(producto.get("percepTasa"))
         if "unidad" in producto:
@@ -6283,6 +6318,11 @@ class AccountMove(models.Model):
             c = payload["convenio"] or {}
             move.l10n_pe_ne_tercero_pagador = (c.get("tercero") or "").strip() or False
             move.l10n_pe_ne_monto_cubierto = float(c.get("montoCubierto") or 0)
+        # Receta retenida (venta de productos controlados).
+        if payload.get("receta"):
+            r = payload["receta"] or {}
+            move.l10n_pe_ne_receta_numero = (r.get("numero") or "").strip() or False
+            move.l10n_pe_ne_receta_colegiatura = (r.get("colegiatura") or "").strip() or False
         fp = payload.get("formaPago") or {}
         if fp.get("tipo") == "Credito" or fp.get("cuotas"):
             move.l10n_pe_ne_forma_pago = "Credito"
@@ -6531,6 +6571,11 @@ class AccountMove(models.Model):
                 "montoCubierto": self.l10n_pe_ne_monto_cubierto,
                 "copago": round(max(0.0, self._l10n_pe_importe_cobrar() - (self.l10n_pe_ne_monto_cubierto or 0.0)), 2),
             } if self.l10n_pe_ne_monto_cubierto else None,
+            # Receta retenida (productos controlados): número + colegiatura del médico. None si no aplica.
+            "receta": {
+                "numero": self.l10n_pe_ne_receta_numero or "",
+                "colegiatura": self.l10n_pe_ne_receta_colegiatura or "",
+            } if self.l10n_pe_ne_receta_numero else None,
             "anticipos": self._l10n_pe_ne_anticipos_list(),
             "lineas": lineas,
             "notasCredito": [

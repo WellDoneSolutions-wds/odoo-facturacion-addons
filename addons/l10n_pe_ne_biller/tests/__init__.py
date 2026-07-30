@@ -15,3 +15,5 @@ from . import test_vencido
 from . import test_valorizacion
 from . import test_guia_proyecto
 from . import test_fraccionamiento
+from . import test_convenio
+from . import test_controlados

@@ -44,3 +44,21 @@ class TestBancarizacion(TransactionCase):
 
     def test_factura_alta_sin_medios_pendiente(self):
         self.assertEqual(self._factura(precio=3000.0)._l10n_pe_ne_bancarizacion_estado(), 'pendiente')
+
+    def test_marcar_bancarizado_guarda_constancia(self):
+        m = self._factura(precio=3000.0, medios=[{'medio': 'Efectivo', 'monto': 3540}])
+        m.l10n_pe_ne_bancarizacion = 'pendiente'
+        m.l10n_pe_ne_marcar_bancarizado({'constancia': 'OP-0099', 'fecha': '2026-06-25', 'medio': 'Transferencia'})
+        self.assertEqual(m.l10n_pe_ne_bancarizacion, 'bancarizado')
+        self.assertEqual(m.l10n_pe_ne_bancarizacion_constancia, 'OP-0099')
+
+    def test_quick_list_filtra_por_bancarizacion(self):
+        # Sin `offset`, l10n_pe_ne_quick_list devuelve la lista plana (paginación opt-in);
+        # ver su docstring. Se itera `res` directo en vez de `res['items']`.
+        m = self._factura(precio=3000.0, medios=[{'medio': 'Efectivo', 'monto': 3540}])
+        m.l10n_pe_ne_bancarizacion = 'pendiente'
+        res = self.env['account.move'].l10n_pe_ne_quick_list(bancarizacion='pendiente')
+        self.assertIn(m.id, [r['id'] for r in res])
+        self.assertEqual(next(r for r in res if r['id'] == m.id)['bancarizacion'], 'pendiente')
+        res2 = self.env['account.move'].l10n_pe_ne_quick_list(bancarizacion='bancarizado')
+        self.assertNotIn(m.id, [r['id'] for r in res2])

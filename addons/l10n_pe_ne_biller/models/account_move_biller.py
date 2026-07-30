@@ -1092,6 +1092,19 @@ class AccountMove(models.Model):
         bancariza = any(m.get("medio") != "Efectivo" and float(m.get("monto") or 0) > 0 for m in medios)
         return "bancarizado" if bancariza else "pendiente"
 
+    def l10n_pe_ne_marcar_bancarizado(self, payload=None):
+        """Marca la factura como bancarizada (el cliente pagó por medio financiero) + guarda la constancia."""
+        self.ensure_one()
+        payload = payload or {}
+        self.l10n_pe_ne_bancarizacion = "bancarizado"
+        if payload.get("constancia"):
+            self.l10n_pe_ne_bancarizacion_constancia = payload["constancia"]
+        if payload.get("fecha"):
+            self.l10n_pe_ne_bancarizacion_fecha = payload["fecha"]
+        if payload.get("medio"):
+            self.l10n_pe_ne_bancarizacion_medio = payload["medio"]
+        return {"ok": True, "bancarizacion": self.l10n_pe_ne_bancarizacion}
+
     def _l10n_pe_document_type(self):
         """Código SUNAT del comprobante: 01 Factura, 03 Boleta, 07 NC, 08 ND."""
         self.ensure_one()
@@ -5890,7 +5903,7 @@ class AccountMove(models.Model):
     @api.model
     def l10n_pe_ne_quick_list(self, query=None, desde=None, hasta=None, estado=None, tipo=None,
                               forma_pago=None, monto_min=None, monto_max=None, serie=None,
-                              moneda=None, limit=100, offset=None):
+                              moneda=None, bancarizacion=None, limit=100, offset=None):
         """Lista de comprobantes emitidos (sin los blobs), para la UI. Filtros
         opcionales: query (cliente/RUC/correlativo), rango de fechas (desde/hasta),
         estado del facturador (por_enviar/en_proceso/enviado/anulado/rechazado/error),
@@ -5928,6 +5941,8 @@ class AccountMove(models.Model):
             domain.append(("currency_id.name", "=", moneda))
         if forma_pago:
             domain.append(("l10n_pe_ne_forma_pago", "=", forma_pago))
+        if bancarizacion:
+            domain.append(("l10n_pe_ne_bancarizacion", "=", bancarizacion))
         if mmin is not None:
             domain.append(("amount_total", ">=", mmin))
         if mmax is not None:
@@ -5969,6 +5984,7 @@ class AccountMove(models.Model):
                 "serie": m.l10n_pe_ne_serie_emit or m.l10n_pe_serie or "",
                 "correlativo": m.l10n_pe_ne_corr_emit or "",
                 "estado": m.l10n_pe_biller_state,
+                "bancarizacion": m.l10n_pe_ne_bancarizacion,
                 "total": m.amount_total,
                 "moneda": m.currency_id.name or "PEN",
                 "cliente": m.partner_id.name or "",

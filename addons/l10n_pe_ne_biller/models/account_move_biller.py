@@ -1576,6 +1576,9 @@ class AccountMove(models.Model):
                     etq += " Vence %s" % venc.date().strftime("%d/%m/%Y")
                 etqs.append(etq)
             desc = "%s | %s" % (desc, " · ".join(etqs))
+        reg = (line.product_id.l10n_pe_ne_registro_sanitario or "").strip()
+        if reg:
+            desc = "%s · Reg. San. %s" % (desc, reg)
         return desc
 
     def _l10n_pe_detalle(self):
@@ -5099,6 +5102,7 @@ class AccountMove(models.Model):
             "fraccionable": (p.l10n_pe_ne_unidades_por_empaque or 0.0) > 0,
             "unidadesPorEmpaque": p.l10n_pe_ne_unidades_por_empaque or 0.0,
             "unidadFraccion": p.l10n_pe_ne_unidad_fraccion or "",
+            "registroSanitario": p.l10n_pe_ne_registro_sanitario or "",
             # "bien" | "servicio" — el vocabulario del negocio, no el de Odoo (consu/service).
             # 'combo' no lo usa esta app; si apareciera, se trata como bien (es tangible).
             "tipo": "servicio" if p.type == "service" else "bien",
@@ -5314,6 +5318,8 @@ class AccountMove(models.Model):
             vals["l10n_pe_ne_cod_producto_sunat"] = (producto.get("codSunat") or "").strip() or False
         if "detraCod" in producto:
             vals["l10n_pe_ne_detraccion_cod"] = (producto.get("detraCod") or "").strip() or False
+        if "registroSanitario" in producto:
+            vals["l10n_pe_ne_registro_sanitario"] = (producto.get("registroSanitario") or "").strip() or False
         if producto.get("percepTasa") is not None:
             vals["l10n_pe_ne_percepcion_tasa"] = _percep_float(producto.get("percepTasa"))
         if "unidad" in producto:

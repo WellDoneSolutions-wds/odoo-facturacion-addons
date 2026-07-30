@@ -35,6 +35,28 @@ class ProductTemplate(models.Model):
         help="Código de producto SUNAT (UNSPSC, catálogo 25). Aparece en la guía como "
              "bien normalizado.")
 
+    # Fraccionamiento (farma/perecibles): el producto se compra/stockea en un empaque (caja,
+    # blíster) pero se puede vender por unidad. `unidades_por_empaque` es el factor (ej. 30
+    # tabletas por caja); `unidad_fraccion` es el código SUNAT de la sub-unidad al vender
+    # fraccionado (ej. NIU). 0 = no fraccionable.
+    l10n_pe_ne_unidades_por_empaque = fields.Float(
+        string="Unidades por empaque", digits=(12, 4), default=0.0,
+        help="Fraccionamiento: cuántas unidades trae el empaque (caja/blíster). Al vender "
+             "fraccionado, el stock descuenta cantidad/este factor del empaque. 0 = no fracciona.")
+    l10n_pe_ne_unidad_fraccion = fields.Char(
+        string="Unidad de fracción (cat.03)",
+        help="Código SUNAT de la sub-unidad al vender fraccionado (ej. NIU). Vacío = NIU.")
+
+    l10n_pe_ne_registro_sanitario = fields.Char(
+        string="Registro sanitario (DIGEMID)",
+        help="Farma: código de registro sanitario DIGEMID del producto. Si está, se anota en la "
+             "descripción del ítem del comprobante (trazabilidad). Vacío = no se emite.")
+
+    l10n_pe_ne_controlado = fields.Boolean(
+        string="Producto controlado (psicotrópico/estupefaciente)",
+        help="Farma: sustancia controlada por DIGEMID. Su venta EXIGE receta retenida (número + "
+             "colegiatura del médico); se bloquea la emisión sin esos datos y se anotan en la línea.")
+
     l10n_pe_ne_detraccion_cod = fields.Char(
         string="Sujeto a detracción (cat. 54)",
         help="Código del bien/servicio en el catálogo 54 de SUNAT (SPOT). Vacío = no "

@@ -27,8 +27,24 @@ def agrupar_ventas(ventas):
         moneda = (v.get("moneda") or "PEN").upper()
         monto_total = _r2(v.get("total"))
         if moneda != "PEN":
+            # H1 (integridad): el efectivo en moneda extranjera SÍ entra a por_medio, bajo una
+            # clave namespaced por moneda ('Efectivo USD'), para que se cuente en el arqueo y un
+            # faltante en dólares descuadre. El namespacing evita contaminar el efectivo en soles
+            # (y el guard de retiro, que lee por_medio['Efectivo']). Sin tipo de cambio: cada
+            # moneda cuadra contra su propio conteo físico. countUsd/totalUsd se preservan.
             count_usd += 1
             total_usd = _r2(total_usd + monto_total)
+            medios = v.get("medios") or []
+            forma = v.get("formaPago") or "Contado"
+            if medios:
+                for mp in medios:
+                    base = (mp.get("medio") or EFECTIVO).strip() or EFECTIVO
+                    clave = "%s %s" % (base, moneda)
+                    por_medio[clave] = _r2(por_medio.get(clave, 0.0) + _r2(mp.get("monto")))
+            elif forma == "Contado":
+                clave = "%s %s" % (EFECTIVO, moneda)
+                por_medio[clave] = _r2(por_medio.get(clave, 0.0) + monto_total)
+            # Crédito en USD sin medios: por cobrar, no suma a ningún medio (igual que en PEN).
             continue
         count += 1
         total = _r2(total + monto_total)

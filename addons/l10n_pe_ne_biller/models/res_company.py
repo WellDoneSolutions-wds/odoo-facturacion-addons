@@ -197,6 +197,13 @@ class ResCompany(models.Model):
         string='API key del facturador', groups='base.group_system', copy=False,
         help="API key de autenticación de este emisor ante el microservicio (header X-Api-Key). "
              "Debe coincidir con la registrada en el servidor para el RUC de la compañía.")
+    # D-4 (integridad): un retiro de caja por encima de este monto exige voucher/n° de depósito
+    # y fecha (contraparte documental). Un retiro solo resta del efectivo esperado; sin respaldo,
+    # sacar plata y registrar 'retiro' deja el arqueo cuadrado. Default S/300 (caja chica pasa;
+    # el retiro significativo pide respaldo). Configurable por RUC.
+    l10n_pe_ne_retiro_umbral = fields.Monetary(
+        string='Umbral de retiro con voucher', currency_field='currency_id', default=300.0,
+        help="Retiros de caja por encima de este monto exigen número de voucher/depósito y fecha.")
     l10n_pe_ne_agente_percepcion = fields.Boolean(
         string="Agente de percepción",
         help="Marcar SOLO si SUNAT designó a la empresa como agente de percepción del IGV "
@@ -219,6 +226,57 @@ class ResCompany(models.Model):
         help="'A favor del consumidor' (recomendado) siempre redondea hacia abajo; 'más cercano' "
              "redondea al 0.10 más próximo (el empate .05 sube).",
     )
+    # UIT vigente (Unidad Impositiva Tributaria): base de los umbrales de la DJ Informativa de
+    # Precios de Transferencia (V4). Cambia por decreto cada año → editable. Default 2026 = S/ 5350.
+    l10n_pe_ne_uit = fields.Monetary(
+        string="UIT vigente", currency_field="currency_id", default=5350.0,
+        help="Unidad Impositiva Tributaria del ejercicio. Base de los umbrales de precios de "
+        "transferencia: Reporte Local a 2300 UIT de ingresos y 400 UIT de operaciones con vinculadas.")
+
+    @api.model
+    def l10n_pe_ne_vinculadas_umbrales(self, ejercicio=None):
+        """Umbrales de la DJ Informativa de Precios de Transferencia (V4). Devuelve, para el
+        ejercicio (año, default el actual), los ingresos devengados y las operaciones con partes
+        vinculadas, y si superan los umbrales que obligan a presentar:
+          - Reporte Local: ingresos devengados > 2300 UIT.
+          - Operaciones con vinculadas / paraísos fiscales > 400 UIT.
+        Los importes se suman en la moneda del comprobante (mezclar PEN/USD es aproximado, MVP)."""
+        company = self.env.company
+        year = int(ejercicio) if ejercicio else fields.Date.context_today(self).year
+        d0 = fields.Date.to_date("%04d-01-01" % year)
+        d1 = fields.Date.to_date("%04d-12-31" % year)
+        Move = self.env["account.move"].sudo()
+        base = [
+            ("company_id", "=", company.id),
+            ("move_type", "in", ("out_invoice", "out_refund")),
+            ("state", "=", "posted"),
+            ("invoice_date", ">=", d0), ("invoice_date", "<=", d1),
+            ("l10n_pe_biller_state", "not in", ("por_enviar", "rechazado", False)),
+        ]
+        # Las notas de crédito (out_refund) restan; por eso se firman por el signo del tipo.
+        def _neto(moves):
+            return round(sum(
+                (m.amount_total if m.move_type == "out_invoice" else -m.amount_total)
+                for m in moves), 2)
+        ingresos = _neto(Move.search(base))
+        vinc_moves = Move.search(base + [("partner_id.l10n_pe_ne_parte_vinculada", "=", True)])
+        operaciones = _neto(vinc_moves)
+        uit = company.l10n_pe_ne_uit or 0.0
+        umbral_reporte = round(2300 * uit, 2)
+        umbral_operaciones = round(400 * uit, 2)
+        return {
+            "ejercicio": year,
+            "uit": uit,
+            "ingresos": ingresos,
+            "operacionesVinculadas": operaciones,
+            "umbralReporteLocal": umbral_reporte,
+            "umbralOperaciones": umbral_operaciones,
+            # Obligado al Reporte Local si los ingresos superan 2300 UIT Y hay operaciones con
+            # vinculadas por encima de 400 UIT (criterio SUNAT combinado del Reporte Local).
+            "obligadoReporteLocal": ingresos > umbral_reporte and operaciones > umbral_operaciones,
+            "superaOperaciones": operaciones > umbral_operaciones,
+            "moneda": company.currency_id.name or "PEN",
+        }
 
     @api.model
     def l10n_pe_ne_provision_tenant(self, vals):
@@ -308,7 +366,10 @@ class ResCompany(models.Model):
         Company = self.env['res.company'].sudo()
         out = []
         for c in Company.search([], order='name', limit=limit, offset=offset or 0):
-            emisores = Users.search([('company_id', '=', c.id), ('group_ids', 'in', grp.id)])
+            # all_group_ids (no group_ids): incluye a quien tiene emisor por IMPLICACIÓN de un
+            # rol (cajero/vendedor/… implican emisor). Con group_ids (solo explícitos) un usuario
+            # con solo un rol quedaría invisible en el panel de emisores (V6 del pentest).
+            emisores = Users.search([('company_id', '=', c.id), ('all_group_ids', 'in', grp.id)])
             out.append({
                 'companyId': c.id,
                 'company': c.name,

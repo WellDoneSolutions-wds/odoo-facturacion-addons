@@ -8,6 +8,10 @@ class TestBillerDetraccion(TransactionCase):
     def setUp(self):
         super().setUp()
         self.company = self.env.company
+        # Una empresa que emite con detracción tiene su cuenta del Banco de la Nación
+        # configurada (sin ella SUNAT rechaza y la validación pre-emisión la bloquea). Los
+        # tests de precedencia de cuenta la sobreescriben en el comprobante.
+        self.company.l10n_pe_ne_cuenta_detraccion = '00-000-000000'
         self.igv = self.env['account.tax'].search([
             ('company_id', '=', self.company.id), ('type_tax_use', '=', 'sale'),
             ('l10n_pe_edi_tax_code', '=', '1000')], limit=1)

@@ -5,18 +5,17 @@ from odoo import fields
 from odoo.tests import TransactionCase, tagged
 from odoo.exceptions import UserError
 
+from .common import L10nPeSeedMixin
+
 
 @tagged('post_install', '-at_install')
-class TestBillerBaja(TransactionCase):
+class TestBillerBaja(L10nPeSeedMixin, TransactionCase):
     """Comunicación de baja (RA): anula un comprobante ya enviado vía /generator/resumenBaja.
     ID RA-AAAAMMDD-correlativo; ReferenceDate = emisión del doc anulado; IssueDate = fecha de la baja."""
 
     def setUp(self):
-        super().setUp()
+        super().setUp()  # L10nPeSeedMixin siembra RUC de la compañía + IGV (self.igv)
         self.company = self.env.company
-        self.igv = self.env['account.tax'].search([
-            ('company_id', '=', self.company.id), ('type_tax_use', '=', 'sale'),
-            ('l10n_pe_edi_tax_code', '=', '1000')], limit=1)
         self.ruc_type = self.env['l10n_latam.identification.type'].search(
             [('l10n_pe_vat_code', '=', '6')], limit=1)
         self.dni_type = self.env['l10n_latam.identification.type'].search(

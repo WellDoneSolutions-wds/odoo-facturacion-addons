@@ -15,7 +15,7 @@ except ImportError:  # pragma: no cover
     boto3 = None
 
 from odoo import _, api, fields, models
-from odoo.exceptions import UserError
+from odoo.exceptions import AccessError, UserError
 from odoo.tools import float_round, html2plaintext
 
 from ..tools.amount_to_words import leyenda_monto
@@ -62,6 +62,22 @@ TAX_CODE_MAP = {
     ),  # Gratuita (retiro/transferencia gratuita)
 }
 DEFAULT_TAX_CODE = "1000"  # Sin tax reconocida -> gravado IGV (caso más común).
+
+# Tasas OFICIALES de detracción (SPOT) por código de bien/servicio (cat. 54). Guard autoritativo
+# del backend: el front (detracciones.ts) las valida al capturar, pero esto cubre masiva/API/bypass.
+# Ej.: contratos de CONSTRUCCIÓN = 030 (4%), NO 037 (12% "demás servicios"). Código 028 (transporte
+# de pasajeros) no lleva tasa fija → se omite. Regulatorio: cambia por resolución SUNAT (mantener en
+# sync con el front). Un código fuera de esta tabla no dispara el aviso.
+DETRACCION_TASAS = {
+    # Servicios (Anexo 3)
+    "012": 12.0, "019": 10.0, "020": 12.0, "021": 10.0, "022": 12.0, "024": 10.0,
+    "025": 10.0, "026": 10.0, "027": 4.0, "030": 4.0, "037": 12.0, "099": 8.0,
+    # Bienes (Anexo 2)
+    "001": 10.0, "002": 4.0, "003": 4.0, "004": 4.0, "005": 4.0, "007": 10.0,
+    "008": 4.0, "009": 10.0, "010": 15.0, "011": 10.0, "014": 4.0, "016": 10.0,
+    "017": 4.0, "023": 4.0, "031": 10.0, "032": 10.0, "034": 10.0, "035": 1.0,
+    "036": 1.0, "039": 10.0, "040": 4.0, "041": 15.0,
+}
 
 # Código de unidad de medida de SUNAT (cat. 03 / UN-ECE Rec. 20) por XMLID de la unidad estándar
 # de Odoo. Mapeo replicado de l10n_pe_edi (enterprise). Se resuelve en runtime porque las UoM base
@@ -161,6 +177,10 @@ class AccountMoveLine(models.Model):
         help="Código de unidad de medida SUNAT de la línea (ej. NIU, KGM, ZZ). "
         "Si está vacío se deriva de la unidad de medida del producto.",
     )
+    l10n_pe_ne_fraccionado = fields.Boolean(
+        string="Vendido fraccionado", copy=False,
+        help="Farma: esta línea se vende por la sub-unidad del producto (fraccionamiento). La "
+        "cantidad va en sub-unidades y el stock descuenta cantidad/unidades_por_empaque del empaque.")
     l10n_pe_ne_cod_producto_sunat = fields.Char(
         string="Cód. producto SUNAT (cat.25)",
         copy=False,
@@ -386,9 +406,25 @@ class AccountMove(models.Model):
             )
         return out
 
+    # ==================================================== MODELO DE DINERO (L3)
+    # Cuatro magnitudes, una definición autoritativa cada una. Confundirlas fue la raíz del
+    # rechazo 3265 (el neto pendiente incluía gratuitos). Las invariantes se fijan por test
+    # en test_modelo_dinero.py.
+    #
+    #   amount_total            total contable (Odoo). INCLUYE los bienes gratuitos.
+    #   _l10n_pe_importe_cobrar total − anticipo − desc. que NO afecta IGV − gratuitos.
+    #                           = lo que el cliente PAGA = mtoImpVenta (PayableAmount).
+    #   _l10n_pe_detraccion_base total − desc. que NO afecta IGV. Importe de la OPERACIÓN para
+    #                           el SPOT (incluye gratuitos y NO resta anticipo; distinto criterio).
+    #   _l10n_pe_neto_pendiente importe_cobrar − detracción − inicial al contado − retención de
+    #                           garantía − amortización de adelanto − penalidad − monto cubierto.
+    #                           = saldo a CRÉDITO (lo que suman las cuotas) / copago del paciente.
+    #
+    # Invariantes (SUNAT + negocio):  neto_pendiente ≤ importe_cobrar ≤ amount_total ;
+    #   importe_cobrar ≥ 0 ; detracción ≥ 0 ; sum(cuotas) == neto pendiente del crédito.
     def _l10n_pe_importe_cobrar(self):
         """Importe neto a cobrar = total − anticipo aplicado − descuento que no afecta el IGV −
-        bienes gratuitos (lo que el cliente paga)."""
+        bienes gratuitos (lo que el cliente paga). Ver «MODELO DE DINERO» arriba."""
         self.ensure_one()
         ant = self._l10n_pe_anticipo()
         return round(
@@ -635,6 +671,345 @@ class AccountMove(models.Model):
                     % (line.name or line.product_id.display_name or "?")
                 )
 
+    # ==================================================== L1 · validación pre-emisión
+    # Motor de reglas SUNAT: valida el comprobante ANTES de enviarlo y devuelve findings
+    # accionables (nivel 'error' | 'aviso'). Reemplaza el faultCode críptico (p.ej. 3265)
+    # por un mensaje que el emisor sí puede arreglar. Fuente única para (a) el guard duro de
+    # la emisión y (b) un futuro pre-flight de la SPA. Cada regla es un método _regla_*; sumar
+    # una regla = agregarla a la tupla de _l10n_pe_ne_validaciones.
+    def _l10n_pe_ne_validaciones(self):
+        """[{'code','campo','nivel','mensaje'}]. 'error' bloquea la emisión; 'aviso' informa
+        (lo consume el pre-flight de la SPA) y no bloquea."""
+        self.ensure_one()
+        findings = []
+        for regla in (
+            self._l10n_pe_ne_regla_neto_pendiente,      # SUNAT 3265
+            self._l10n_pe_ne_regla_cuotas_suma,
+            self._l10n_pe_ne_regla_deducciones_exceden, # neto a cobrar no puede ser negativo
+            self._l10n_pe_ne_regla_estado_grupo,        # SUNAT 3146-3149
+            self._l10n_pe_ne_regla_estado_conformidad,  # venta al Estado: acta de recepción
+            self._l10n_pe_ne_regla_vinculada_valor_mercado,  # vinculadas: recordar valor de mercado
+            self._l10n_pe_ne_regla_detraccion_cuenta,   # SPOT: cta. Banco de la Nación
+            self._l10n_pe_ne_regla_detraccion_monto,    # SPOT: mtoDetraccion > 0
+            self._l10n_pe_ne_regla_detraccion_tasa,     # SPOT: tasa oficial del código
+            self._l10n_pe_ne_regla_exportacion_pais,    # 0200: país del no domiciliado
+            self._l10n_pe_ne_regla_boleta_doc,          # boleta > S/700 con documento
+            self._l10n_pe_ne_regla_vencidos,            # farma/perecibles: lote vencido
+            self._l10n_pe_ne_regla_convenio_cubierto,   # convenio: cubierto ≤ importe a cobrar
+            self._l10n_pe_ne_regla_controlado_receta,   # farma: controlado exige receta retenida
+            self._l10n_pe_ne_regla_linea_valor_cero,    # SUNAT 2028: línea onerosa con importe 0
+        ):
+            findings += regla() or []
+        return findings
+
+    def _l10n_pe_ne_regla_neto_pendiente(self):
+        """SUNAT 3265: el neto pendiente de pago a crédito no puede superar el importe a cobrar
+        del comprobante (que ya excluye gratuitos, anticipo y descuento que no afecta el IGV).
+        Invariante del modelo de dinero: si se viola, SUNAT rechaza con 3265."""
+        if self.l10n_pe_ne_forma_pago != "Credito":
+            return []
+        neto = self._l10n_pe_credito_pendiente()
+        cobrar = self._l10n_pe_importe_cobrar()
+        if neto > cobrar + 0.005:
+            return [{
+                "code": "3265", "campo": "datoPago/mtoNetoPendientePago", "nivel": "error",
+                "mensaje": _(
+                    "El monto neto pendiente de pago a crédito (S/ %(neto).2f) supera el "
+                    "importe a cobrar del comprobante (S/ %(cobrar).2f). Revisa las cuotas, la "
+                    "inicial al contado o los ítems gratuitos."
+                ) % {"neto": neto, "cobrar": cobrar},
+            }]
+        return []
+
+    def _l10n_pe_ne_regla_cuotas_suma(self):
+        """Aviso: las cuotas tecleadas no suman el neto a cobrar; se ajustarán a este al emitir."""
+        if self.l10n_pe_ne_forma_pago != "Credito":
+            return []
+        cuotas = [c for c in (self.l10n_pe_ne_cuotas or []) if (c or {}).get("monto")]
+        if not cuotas:
+            return []
+        suma = round(sum(float(c["monto"]) for c in cuotas), 2)
+        neto = self._l10n_pe_credito_pendiente()
+        if abs(suma - neto) > 0.01:
+            return [{
+                "code": "cuotas-suma", "campo": "cuotas", "nivel": "aviso",
+                "mensaje": _(
+                    "Las cuotas suman S/ %(suma).2f pero el neto a cobrar es S/ %(neto).2f; se "
+                    "ajustarán a este último al emitir."
+                ) % {"suma": suma, "neto": neto},
+            }]
+        return []
+
+    def _l10n_pe_ne_regla_estado_grupo(self):
+        """SUNAT 3146-3149: los 4 datos de Ventas al Estado (cat. 55) van como GRUPO. Si están
+        algunos pero no los 4, la emisión los OMITE todos → aviso para no perder el dato en
+        silencio."""
+        datos = [
+            self.l10n_pe_ne_estado_expediente, self.l10n_pe_ne_estado_unidad_ejecutora,
+            self.l10n_pe_ne_estado_proceso_seleccion, self.l10n_pe_ne_estado_contrato,
+        ]
+        llenos = [bool((v or "").strip()) for v in datos]
+        if any(llenos) and not all(llenos):
+            return [{
+                "code": "3146", "campo": "AdditionalItemProperty (Estado)", "nivel": "aviso",
+                "mensaje": _(
+                    "Ventas al Estado: llenaste %(n)d de 4 datos del proceso (expediente, "
+                    "unidad ejecutora, proceso de selección y contrato). SUNAT los exige como "
+                    "grupo, así que se omitirán TODOS. Complétalos o déjalos vacíos."
+                ) % {"n": sum(llenos)},
+            }]
+        return []
+
+    def _l10n_pe_ne_regla_deducciones_exceden(self):
+        """Las deducciones contractuales (retención de garantía, amortización de adelanto,
+        penalidad) + la detracción + la inicial + el monto cubierto por convenio no pueden dejar
+        el neto a cobrar en negativo: significaría que el comprobante 'devuelve' dinero. Bloquea."""
+        if self._l10n_pe_neto_pendiente() < -0.005:
+            return [{
+                "code": "deducciones-exceden", "campo": "neto a cobrar", "nivel": "error",
+                "mensaje": _(
+                    "Las deducciones del comprobante (retención de garantía, amortización de "
+                    "adelanto, penalidad, detracción, inicial y convenio) superan el importe a "
+                    "cobrar (S/ %(cobrar).2f): el neto a cobrar quedaría negativo. Revísalas."
+                ) % {"cobrar": self._l10n_pe_importe_cobrar()},
+            }]
+        return []
+
+    def _l10n_pe_ne_regla_estado_conformidad(self):
+        """Venta al Estado: la entidad exige un acta de conformidad/recepción como requisito previo
+        a facturar. Si los 4 datos del proceso están completos pero falta la conformidad, avisa
+        (no bloquea: hay casos —adelantos, valorizaciones a cuenta— sin acta todavía)."""
+        datos = [
+            self.l10n_pe_ne_estado_expediente, self.l10n_pe_ne_estado_unidad_ejecutora,
+            self.l10n_pe_ne_estado_proceso_seleccion, self.l10n_pe_ne_estado_contrato,
+        ]
+        if all((v or "").strip() for v in datos) and not (self.l10n_pe_ne_conformidad or "").strip():
+            return [{
+                "code": "estado-conformidad", "campo": "conformidad", "nivel": "aviso",
+                "mensaje": _(
+                    "Venta al Estado sin acta de conformidad/recepción. La entidad suele exigirla "
+                    "como sustento antes de facturar; regístrala si ya la tienes."
+                ),
+            }]
+        return []
+
+    def _l10n_pe_ne_regla_vinculada_valor_mercado(self):
+        """Precios de transferencia (V2): si el comprobante va a una parte vinculada, avisa para
+        que el emisor confirme que el precio pactado es de mercado (art. 32-A LIR). No bloquea —no
+        hay fuente de valor de mercado en el sistema—: es un recordatorio para el sustento de la DJ.
+        Con parte no domiciliada, la operación entra a precios de transferencia sin umbral."""
+        p = self.partner_id
+        if not p or not p.l10n_pe_ne_parte_vinculada:
+            return []
+        extra = _(" (no domiciliada: entra a precios de transferencia sin umbral de país)") \
+            if p.l10n_pe_ne_no_domiciliada else ""
+        return [{
+            "code": "vinculada-valor-mercado", "campo": "cliente/parteVinculada", "nivel": "aviso",
+            "mensaje": _(
+                "Operación con parte vinculada «%(nombre)s»%(extra)s. Verifica que el precio sea de "
+                "valor de mercado (art. 32-A LIR) y guarda el sustento para la DJ de precios de "
+                "transferencia."
+            ) % {"nombre": p.name or "", "extra": extra},
+        }]
+
+    def _l10n_pe_ne_regla_detraccion_cuenta(self):
+        """SPOT: si el comprobante está sujeto a detracción, la cuenta del Banco de la Nación es
+        obligatoria (cbc:ID de cac:PaymentMeans → ctaBancoNacionDetraccion). Va la del comprobante
+        o, si no, la de la compañía; vacía = SUNAT rechaza el depósito de detracción."""
+        if not self.l10n_pe_ne_detraccion:
+            return []
+        cuenta = (
+            self.l10n_pe_ne_detraccion_cuenta
+            or self.company_id.l10n_pe_ne_cuenta_detraccion
+            or ""
+        ).strip()
+        if not cuenta:
+            return [{
+                "code": "detraccion-cuenta", "campo": "ctaBancoNacionDetraccion", "nivel": "error",
+                "mensaje": _(
+                    "La operación está sujeta a detracción pero no tiene número de cuenta del "
+                    "Banco de la Nación. Cárgala en el comprobante o en los datos de la empresa."
+                ),
+            }]
+        return []
+
+    def _l10n_pe_ne_regla_detraccion_monto(self):
+        """SPOT: el monto de la detracción debe ser mayor a 0. Si la tasa es 0 (o el código no
+        lleva tasa, p.ej. transporte de pasajeros 028) o el importe es tan chico que redondea a 0,
+        el mtoDetraccion sale en 0 y SUNAT rechaza."""
+        if not self.l10n_pe_ne_detraccion:
+            return []
+        if self._l10n_pe_detraccion_monto() <= 0:
+            return [{
+                "code": "detraccion-monto", "campo": "mtoDetraccion", "nivel": "error",
+                "mensaje": _(
+                    "La detracción da un monto de S/ 0.00. Revisa la tasa (%(tasa)s%%) o el "
+                    "importe de la operación: el monto de la detracción debe ser mayor a 0."
+                ) % {"tasa": self._l10n_pe_fmt(self.l10n_pe_ne_detraccion_rate or 0.0)},
+            }]
+        return []
+
+    def _l10n_pe_ne_regla_detraccion_tasa(self):
+        """SPOT: avisa si la tasa de detracción no coincide con la OFICIAL del código (cat. 54).
+        Ej.: contratos de construcción (030) = 4%, no 12%. Es un AVISO —la tabla cambia por
+        resolución SUNAT y el contador confirma la tasa—; un código fuera de la tabla no dispara."""
+        if not self.l10n_pe_ne_detraccion:
+            return []
+        code = (self.l10n_pe_ne_detraccion_code or "").strip()
+        oficial = DETRACCION_TASAS.get(code)
+        if oficial is None:
+            return []
+        if abs((self.l10n_pe_ne_detraccion_rate or 0.0) - oficial) > 0.01:
+            return [{
+                "code": "detraccion-tasa", "campo": "porDetraccion", "nivel": "aviso",
+                "mensaje": _(
+                    "La tasa de detracción (%(tasa)s%%) no coincide con la oficial del código "
+                    "%(code)s (%(of)s%%). Verifícala antes de emitir."
+                ) % {"tasa": self._l10n_pe_fmt(self.l10n_pe_ne_detraccion_rate or 0.0),
+                     "code": code, "of": self._l10n_pe_fmt(oficial)},
+            }]
+        return []
+
+    def _l10n_pe_ne_regla_exportacion_pais(self):
+        """Exportación (tipOperacion 0200 = todas las líneas con afectación 9995): SUNAT exige el
+        país del adquirente NO DOMICILIADO (codPaisCliente del AdditionalHeader). Sin país en el
+        cliente el dato se omite del XML y la exportación se rechaza/observa."""
+        if self._l10n_pe_tipo_operacion() != "0200":
+            return []
+        if not (self.partner_id.country_id.code or "").strip():
+            return [{
+                "code": "exportacion-pais", "campo": "codPaisCliente", "nivel": "error",
+                "mensaje": _(
+                    "Es una operación de exportación pero el cliente no tiene país. SUNAT exige "
+                    "el país del adquirente no domiciliado: edítalo en el cliente y vuelve a "
+                    "emitir."
+                ),
+            }]
+        return []
+
+    def _l10n_pe_ne_regla_boleta_doc(self):
+        """Boleta (03) mayor a S/ 700: SUNAT (Rgto. de Comprobantes de Pago, art. 8) exige
+        identificar al adquirente con su documento cuando el importe SUPERA los S/ 700. Sin
+        documento (consumidor final) la boleta se rechaza. Acepta cualquier documento válido —
+        DNI/RUC/CE/pasaporte viajan en `vat`."""
+        if self._l10n_pe_document_type() != "03":
+            return []
+        if (self.amount_total or 0.0) > 700 and not (self.partner_id.vat or "").strip():
+            return [{
+                "code": "boleta-700-doc", "campo": "cliente/numDoc", "nivel": "error",
+                "mensaje": _(
+                    "Una boleta mayor a S/ 700 requiere el documento de identidad del cliente "
+                    "(DNI, RUC, carné de extranjería o pasaporte)."
+                ),
+            }]
+        return []
+
+    def _l10n_pe_ne_regla_vencidos(self, hoy=None):
+        """Farma / perecibles: avisa si la venta despachó un lote VENCIDO. Lee el lote que la
+        salida de stock reservó (FEFO: el que caduca antes sale primero); si ya venció, el
+        negocio está entregando producto caducado. Es un AVISO —control de negocio/DIGEMID, no
+        una regla de SUNAT—: no bloquea la emisión, pero salta en el pre-flight para que quien
+        despacha lo vea antes de entregar. Solo aplica a ventas (out_invoice)."""
+        if self.move_type != "out_invoice":
+            return []
+        hoy = hoy or self._l10n_pe_ne_today_lima()
+        smls = self.env["stock.move.line"].search(
+            [("move_id.l10n_pe_ne_move_id", "=", self.id)]
+        )
+        vencidos = []
+        for sml in smls:
+            venc = sml.lot_id.expiration_date
+            if venc and venc.date() < hoy:
+                vencidos.append(
+                    "%s (lote %s, venció %s)"
+                    % (sml.product_id.display_name, sml.lot_id.name, venc.date())
+                )
+        if vencidos:
+            return [{
+                "code": "vencido", "campo": "stock.lot", "nivel": "aviso",
+                "mensaje": _(
+                    "Se está despachando producto VENCIDO: %s. Revisa el lote antes de entregar."
+                ) % "; ".join(vencidos),
+            }]
+        return []
+
+    def _l10n_pe_ne_regla_convenio_cubierto(self):
+        """Convenio/tercero pagador: el monto cubierto por el tercero no puede superar el importe a
+        cobrar del comprobante (dejaría el copago del paciente en negativo)."""
+        cubierto = self.l10n_pe_ne_monto_cubierto or 0.0
+        if cubierto <= 0:
+            return []
+        cobrar = self._l10n_pe_importe_cobrar()
+        if cubierto > cobrar + 0.005:
+            return [{
+                "code": "convenio-cubierto", "campo": "montoCubierto", "nivel": "error",
+                "mensaje": _(
+                    "El monto cubierto por el convenio (S/ %(cub).2f) supera el importe a cobrar "
+                    "del comprobante (S/ %(cob).2f). El copago del paciente no puede ser negativo."
+                ) % {"cub": cubierto, "cob": cobrar},
+            }]
+        return []
+
+    def _l10n_pe_ne_tiene_controlado(self):
+        """True si alguna línea de producto es una sustancia controlada (DIGEMID)."""
+        return any(l.product_id.l10n_pe_ne_controlado for l in self._l10n_pe_product_lines())
+
+    def _l10n_pe_ne_regla_controlado_receta(self):
+        """Farma: la venta de un producto CONTROLADO (psicotrópico/estupefaciente) exige receta
+        retenida — número de receta + colegiatura (CMP) del médico. Sin esos datos se bloquea."""
+        if not self._l10n_pe_ne_tiene_controlado():
+            return []
+        if not (self.l10n_pe_ne_receta_numero or "").strip() or \
+           not (self.l10n_pe_ne_receta_colegiatura or "").strip():
+            return [{
+                "code": "controlado-receta", "campo": "receta", "nivel": "error",
+                "mensaje": _(
+                    "La venta incluye un producto controlado: se requiere la receta retenida "
+                    "(número de receta y colegiatura CMP del médico)."
+                ),
+            }]
+        return []
+
+    def _l10n_pe_ne_regla_linea_valor_cero(self):
+        """SUNAT 2028: una línea de operación ONEROSA (gravada 1000, exonerada 9997, inafecta 9998,
+        exportación 9995, IVAP 1016) no puede tener importe 0 — el valor de venta queda vacío y SUNAT
+        rechaza con 'errorCode 2028 (nodo: /)'. Solo la línea GRATUITA (9996) admite valor 0 (su
+        importe es referencial). Convierte el 2028 críptico en un mensaje accionable: poné precio o
+        marcá la línea como gratuita."""
+        # La NC de corrección por error en la descripción (motivo 03) lleva sus líneas a valor 0 por
+        # diseño —solo corrige texto, no montos— y SUNAT la acepta: esta regla no aplica.
+        if (self.l10n_pe_motivo_code or "").strip() == "03":
+            return []
+        malas = []
+        for line in self._l10n_pe_product_lines():
+            (_tip_afe, cod_tri, _nt, _ct, _cc), _por = self._l10n_pe_tax_info(line)
+            if cod_tri == "9996":  # gratuito: el valor 0 es válido (precio referencial aparte)
+                continue
+            base, _igv, _isc, _icb = self._l10n_pe_line_amounts(line)
+            if base <= 0.005:
+                malas.append(line.product_id.display_name or line.name or _("(ítem sin nombre)"))
+        if malas:
+            return [{
+                "code": "2028", "campo": "detalle/mtoValorVentaItem", "nivel": "error",
+                "mensaje": _(
+                    "Estas líneas están gravadas/afectas pero su importe es S/ 0.00, y SUNAT las "
+                    "rechaza (error 2028): %(items)s. Ponles precio, o si no se cobran, márcalas "
+                    "como gratuitas (bonificación)."
+                ) % {"items": ", ".join(malas)},
+            }]
+        return []
+
+    def _l10n_pe_ne_asegurar_valido(self):
+        """Guard de emisión: corta con los errores accionables ANTES de enviar a SUNAT. Los
+        avisos no bloquean (los consume el pre-flight de la SPA)."""
+        self.ensure_one()
+        errores = [f for f in self._l10n_pe_ne_validaciones() if f["nivel"] == "error"]
+        if errores:
+            detalle = "\n".join("• [%s] %s" % (e["code"], e["mensaje"]) for e in errores)
+            raise UserError(
+                _("El comprobante no cumple una regla de SUNAT:\n%s") % detalle
+            )
+
     def _l10n_pe_relacionados(self):
         """Documentos relacionados de la factura: guía de remisión (indDocRelacionado 1,
         DespatchDocumentReference) y/o comprobante de anticipo (indDocRelacionado 2)."""
@@ -785,16 +1160,32 @@ class AccountMove(models.Model):
         )
 
     def _l10n_pe_neto_pendiente(self):
-        """Neto pendiente de pago = base de la operación − detracción (si aplica). Con detracción
-        el cliente solo paga el neto; el monto detraído se deposita en el Banco de la Nación,
-        así que el pendiente/cuotas van sobre el neto, no sobre el total. La base ya resta el
-        descuento que no afecta el IGV (mismo criterio que la base de detracción y el front)."""
+        """Neto pendiente de pago = lo que el cliente REALMENTE paga a crédito. Parte del importe
+        a cobrar (que ya excluye los bienes GRATUITOS, el anticipo aplicado y el descuento que no
+        afecta el IGV), menos la detracción (va al Banco de la Nación) y menos la inicial ya pagada
+        al contado. Base ≠ base de detracción: aquella es el importe de la operación (con gratuitos
+        y sin restar anticipo); usarla aquí hacía mtoNetoPendientePago > mtoImpVenta cuando había una
+        línea gratuita (p.ej. total 2950 con gratuito 790 → neto 2950 > payable 2160) → rechazo SUNAT
+        3265 ('El Monto neto pendiente de pago debe ser menor o igual al Importe total del comprobante')."""
         self.ensure_one()
         det = self._l10n_pe_detraccion_monto() if self.l10n_pe_ne_detraccion else 0.0
-        # Venta con inicial al contado: el saldo a crédito (lo que suman las cuotas) es el total
-        # menos la detracción y menos la inicial ya pagada.
+        # Venta con inicial al contado: el saldo a crédito (lo que suman las cuotas) es el importe
+        # a cobrar menos la detracción, la inicial ya pagada y la retención de garantía de obra
+        # (el cliente la retiene y la libera al final del contrato; se cobra menos AHORA).
         inicial = self.l10n_pe_ne_inicial_contado or 0.0
-        return round(self._l10n_pe_detraccion_base() - det - inicial, 2)
+        return round(
+            self._l10n_pe_importe_cobrar() - det - inicial
+            - self._l10n_pe_ne_retencion_garantia_monto()
+            - (self.l10n_pe_ne_amortizacion_adelanto or 0.0)
+            - (self.l10n_pe_ne_penalidad or 0.0)
+            - (self.l10n_pe_ne_monto_cubierto or 0.0), 2)
+
+    def _l10n_pe_ne_retencion_garantia_monto(self):
+        """Monto de la retención de garantía (obra) = % sobre el importe a cobrar. 0 si no aplica.
+        No toca el total ni el IGV del comprobante; solo reduce el neto a cobrar de la valorización."""
+        self.ensure_one()
+        rate = self.l10n_pe_ne_retencion_garantia_rate or 0.0
+        return round(self._l10n_pe_importe_cobrar() * rate / 100.0, 2) if rate else 0.0
 
     def _l10n_pe_adicional_cabecera(self):
         """Bloque adicional de la cabecera: detracción y/o total a cobrar de la percepción."""
@@ -937,6 +1328,19 @@ class AccountMove(models.Model):
         help="Número de orden de compra del cliente (opcional). Se emite como "
         "cac:OrderReference/cbc:ID (documento relacionado ind. 3), típico en ventas B2B.",
     )
+    # DUA/DAM de exportación (QA-023). NO va al XML de la factura: la Declaración Aduanera de
+    # Mercancías la genera ADUANAS *después* del comprobante comercial (por eso la exportación se
+    # emite sin ella — QA-024) y el XSD SUNAT de la factura de exportación no tiene un campo para
+    # el número de DUA. Se guarda como dato del ERP (data-of-record) para el archivo/reporte del
+    # exportador y para poder asociarla luego. Es un Char informativo (sin efecto contable), así que
+    # queda editable aun con el comprobante ya emitido/posteado — es lo que pide QA-024.
+    l10n_pe_ne_dua = fields.Char(
+        string="N° DUA/DAM (exportación)",
+        copy=False,
+        help="Número de la Declaración Aduanera de Mercancías (DUA/DAM) de la exportación. "
+        "Opcional y editable después de emitir: aduanas la numera tras el comprobante. No se "
+        "envía a SUNAT en el XML de la factura; queda como referencia en el ERP.",
+    )
     l10n_pe_ne_placa = fields.Char(
         string="Placa del vehículo",
         copy=False,
@@ -971,6 +1375,52 @@ class AccountMove(models.Model):
         help="Contrato al que pertenece esta valorización. El total facturado no puede superar "
         "el valor del contrato.",
     )
+    # N° de valorización dentro del contrato (1ª, 2ª, …). Se fija al emitir desde la valorización;
+    # 0 = el comprobante no es una valorización de obra.
+    l10n_pe_ne_valorizacion_nro = fields.Integer(
+        string="N° de valorización", copy=False, default=0,
+        help="Orden de esta valorización dentro del contrato (facturación por avance de obra).")
+    l10n_pe_ne_retencion_garantia_rate = fields.Float(
+        string="Retención de garantía %", copy=False,
+        help="Retención de fiel cumplimiento (obra): % que el cliente retiene de la valorización "
+        "y libera al final del contrato. NO es tributo ni descuento —no cambia el total ni el "
+        "IGV del comprobante—: solo reduce el neto a cobrar de esta valorización.")
+    l10n_pe_ne_amortizacion_adelanto = fields.Monetary(
+        string="Amortización de adelanto", copy=False, currency_field="currency_id",
+        help="Obra: parte del adelanto (directo/de materiales) que la entidad ya pagó y recupera "
+        "en ESTA valorización. NO es el anticipo SUNAT (doc A/B): es una deducción contractual "
+        "que no cambia el total ni el IGV, solo reduce el neto a cobrar y amortiza el adelanto.")
+    # Penalidad del contrato (venta al Estado / obra): descuento fijo (S/) que la entidad aplica por
+    # incumplimiento (plazos, calidad). Como la retención y la amortización, es una deducción
+    # CONTRACTUAL: reduce el neto a cobrar de esta valorización/comprobante, no el total ni el IGV.
+    l10n_pe_ne_penalidad = fields.Monetary(
+        string="Penalidad del contrato", copy=False, currency_field="currency_id",
+        help="Venta al Estado / obra: penalidad (S/) que la entidad descuenta por incumplimiento. "
+        "Deducción contractual: reduce el neto a cobrar, no el total ni el IGV del comprobante.")
+    # Conformidad / acta de recepción (venta al Estado): número o referencia del acta que la entidad
+    # emite como requisito previo a facturar. Dato de registro del ERP (como la DUA): NO va al XML
+    # firmado —el UBL no tiene campo— y queda editable aun con el comprobante emitido.
+    l10n_pe_ne_conformidad = fields.Char(
+        string="Conformidad / acta de recepción (Estado)", copy=False,
+        help="Venta al Estado: N° o referencia del acta de conformidad/recepción previa a facturar. "
+        "Dato del ERP para el sustento del expediente; no se envía a SUNAT en el XML.")
+    # Convenio / tercero pagador (farma: SIS, aseguradora). El comprobante va al PACIENTE por el
+    # total; la parte cubierta por el tercero reduce el neto que paga el paciente (copago) y queda
+    # como cuenta por cobrar al tercero. No cambia el total ni el IGV del comprobante.
+    l10n_pe_ne_tercero_pagador = fields.Char(
+        string="Tercero pagador (convenio)", copy=False,
+        help="Nombre del tercero que cubre parte de la venta (SIS, aseguradora, convenio).")
+    l10n_pe_ne_monto_cubierto = fields.Monetary(
+        string="Monto cubierto por el tercero", copy=False, currency_field="currency_id",
+        help="Parte del importe a cobrar que paga el tercero (convenio). Reduce el neto del "
+        "paciente (copago); no cambia el total ni el IGV.")
+    # Receta retenida (farma): obligatoria cuando el comprobante vende un producto controlado.
+    l10n_pe_ne_receta_numero = fields.Char(
+        string="N° de receta", copy=False,
+        help="Número de la receta retenida (venta de productos controlados).")
+    l10n_pe_ne_receta_colegiatura = fields.Char(
+        string="Colegiatura del médico (CMP)", copy=False,
+        help="N° de colegiatura (CMP) del médico que prescribe (venta de productos controlados).")
     l10n_pe_ne_forma_pago = fields.Selection(
         [("Contado", "Contado"), ("Credito", "Crédito")],
         default="Contado",
@@ -1216,6 +1666,16 @@ class AccountMove(models.Model):
                 return TAX_CODE_MAP[tax.l10n_pe_edi_tax_code], tax.amount
         return TAX_CODE_MAP[DEFAULT_TAX_CODE], 0.0
 
+    @staticmethod
+    def _l10n_pe_ne_bolsas(qty):
+        """Nº de bolsas para el ICBPER. SUNAT cuenta la bolsa como unidad DISCRETA
+        (ctdBolsasTriIcbperItem es entero; no existe fracción de bolsa), así que la cantidad
+        se lleva al entero. Redondeo comercial (mitad hacia arriba) para coincidir con el
+        front (Math.round) y que el total del carrito == el total emitido. Fuente ÚNICA del
+        conteo de bolsas: base, IGV, ICBPER por ítem y ctdBolsas salen todos de aquí."""
+        n = float(qty or 0.0)
+        return int(n + 0.5) if n >= 0 else -int(-n + 0.5)
+
     def _l10n_pe_icbper_tax(self, line):
         """La tax ICBPER (impuesto a las bolsas, cat. 05 = 7152) de la línea, si la trae. Es una
         tax de monto fijo (amount_type='fixed') = soles por bolsa."""
@@ -1237,7 +1697,7 @@ class AccountMove(models.Model):
         total_tax = line.price_total - line.price_subtotal
         icbper_tax = self._l10n_pe_icbper_tax(line)
         icbper = (
-            round(int(round(line.quantity or 0)) * icbper_tax.amount, 2)
+            round(self._l10n_pe_ne_bolsas(line.quantity) * icbper_tax.amount, 2)
             if icbper_tax
             else 0.0
         )
@@ -1257,9 +1717,12 @@ class AccountMove(models.Model):
         )
 
     def _l10n_pe_unit_code(self, line):
-        """Código de unidad SUNAT (cat. 03) de la línea: override por línea, luego el guardado en el
-        producto (POS/masiva no mandan unidad por línea), luego override manual en la UoM, si no el
-        mapeo por XMLID de la unidad estándar de Odoo, si no 'NIU'."""
+        """Código de unidad SUNAT (cat. 03) de la línea: si es venta fraccionada, la sub-unidad del
+        producto; luego override por línea, el guardado en el producto (POS/masiva no mandan unidad
+        por línea), override manual en la UoM, mapeo por XMLID de la unidad estándar de Odoo, si no
+        'NIU'."""
+        if line.l10n_pe_ne_fraccionado:
+            return line.product_id.l10n_pe_ne_unidad_fraccion or DEFAULT_UNIT_CODE
         if line.l10n_pe_ne_unit_code:
             return line.l10n_pe_ne_unit_code
         if line.product_id.l10n_pe_ne_unit_code:
@@ -1274,13 +1737,44 @@ class AccountMove(models.Model):
 
     _L10N_PE_ANTICIPO_PREFIX = "PAGO ANTICIPADO"
 
+    def _l10n_pe_ne_lotes_linea(self, line):
+        """(nombre, vencimiento) de los lotes que la salida de stock reservó para el producto de
+        la línea, SOLO si el producto rastrea vencimiento (farma/perecibles). Vacío si no aplica.
+        Sirve para anotar lote y caducidad en la descripción del ítem (trazabilidad y canje)."""
+        prod = line.product_id
+        if not prod or not prod.use_expiration_date:
+            return []
+        smls = self.env["stock.move.line"].search([
+            ("move_id.l10n_pe_ne_move_id", "=", self.id),
+            ("product_id", "=", prod.id),
+        ])
+        return [(sml.lot_id.name, sml.lot_id.expiration_date) for sml in smls if sml.lot_id]
+
     def _l10n_pe_des_item(self, line):
         """Descripción del ítem para el XML. En un comprobante marcado como pago anticipado
         (doc. A) antepone 'PAGO ANTICIPADO' para que el documento identifique la operación sin
-        depender de una leyenda cat. 52 (que no existe para anticipos)."""
+        depender de una leyenda cat. 52 (que no existe para anticipos). En productos que rastrean
+        vencimiento (farma/perecibles) anexa el lote y la caducidad despachados, para que queden
+        en el comprobante (XML y PDF) sin campos nuevos ni cambios en el micro/plantilla."""
         desc = line.name or line.product_id.display_name or ""
         if self.l10n_pe_ne_es_anticipo and not desc.startswith(self._L10N_PE_ANTICIPO_PREFIX):
             desc = ("%s - %s" % (self._L10N_PE_ANTICIPO_PREFIX, desc)).strip(" -")
+        lotes = self._l10n_pe_ne_lotes_linea(line)
+        if lotes:
+            etqs = []
+            for nombre, venc in lotes:
+                etq = "Lote %s" % nombre
+                if venc:
+                    etq += " Vence %s" % venc.date().strftime("%d/%m/%Y")
+                etqs.append(etq)
+            desc = "%s | %s" % (desc, " · ".join(etqs))
+        reg = (line.product_id.l10n_pe_ne_registro_sanitario or "").strip()
+        if reg:
+            desc = "%s · Reg. San. %s" % (desc, reg)
+        if line.product_id.l10n_pe_ne_controlado and (self.l10n_pe_ne_receta_numero or "").strip():
+            desc = "%s · Receta %s (CMP %s)" % (
+                desc, self.l10n_pe_ne_receta_numero.strip(),
+                (self.l10n_pe_ne_receta_colegiatura or "").strip())
         return desc
 
     def _l10n_pe_detalle(self):
@@ -1370,7 +1864,7 @@ class AccountMove(models.Model):
                         "codTriIcbper": "7152",
                         "nomTributoIcbperItem": "ICBPER",
                         "codTipTributoIcbperItem": "OTH",
-                        "ctdBolsasTriIcbperItem": str(int(round(qty))),
+                        "ctdBolsasTriIcbperItem": str(self._l10n_pe_ne_bolsas(qty)),
                         "mtoTriIcbperUnidad": fmt(icbper_tax.amount),
                         "mtoTriIcbperItem": fmt(icbper),
                     }
@@ -1717,18 +2211,8 @@ class AccountMove(models.Model):
         self.ensure_one()
         self._l10n_pe_check_lineas_impuesto()
         self._l10n_pe_check_anticipo()
-        # Boleta > S/700 exige el documento de identidad del cliente (SUNAT la rechaza sin él en prod).
+        self._l10n_pe_ne_asegurar_valido()   # L1: reglas SUNAT (3265, boleta>700, detracción, …)
         _logger.info("Product lines: %s", len(self._l10n_pe_product_lines()))
-        if (
-            self._l10n_pe_document_type() == "03"
-            and (self.amount_total or 0.0) > 700
-            and not (self.partner_id.vat or "").strip()
-        ):
-            raise UserError(
-                _(
-                    "Una boleta mayor a S/ 700 requiere el documento de identidad del cliente."
-                )
-            )
         req = {
             "id": self._l10n_pe_id_block(with_document_type=True),
             "emisor": self._l10n_pe_emisor(),
@@ -2632,10 +3116,11 @@ class AccountMove(models.Model):
 
     # ------------------------------------------- API ligera (BFF NE Express, /json/2)
     @api.model
-    def l10n_pe_ne_quick_emit(self, payload):
+    def l10n_pe_ne_quick_emit(self, payload, enviar=True):
         """Emite un comprobante desde un payload PLANO (sin contexto contable previo): crea/halla el
         cliente, arma el account.move con sus líneas (impuesto por código cat-05), lo postea y lo envía a
-        SUNAT vía el facturador. Devuelve el resultado. Lo consume el BFF stateless por /json/2 — así la
+        SUNAT vía el facturador. Devuelve el resultado. Con `enviar=False` arma y postea pero NO envía y
+        devuelve el account.move (lo usa el pre-flight para validar sin emitir). Lo consume el BFF por /json/2 — así la
         lógica de negocio queda en Odoo (fuente única) y el dato vive en Odoo (upgrade sin migración)."""
         company = self.env.company
         journal = self.env["account.journal"].search(
@@ -2706,9 +3191,16 @@ class AccountMove(models.Model):
             )
             d = float(ln.get("descuento") or 0)
             disc = round(100.0 * (1 - (1 - d / 100.0) * (1 - g / 100.0)), 6) if g else d
+            qty = float(ln.get("cantidad") or 1)
+            if ln.get("icbper"):
+                # La bolsa es unidad discreta: normalizar la cantidad al entero DESDE EL ORIGEN.
+                # Así Odoo computa la base y la tax fija del ICBPER (nº bolsas × monto) sobre el
+                # MISMO conteo entero que va al XML, y el reparto IGV/ICBPER del ítem no se
+                # descuadra cuando llega una cantidad con decimales (SUNAT valida por ítem).
+                qty = float(self._l10n_pe_ne_bolsas(qty))
             lvals = {
                 "name": ln.get("descripcion") or (prod.name if prod else "ITEM"),
-                "quantity": float(ln.get("cantidad") or 1),
+                "quantity": qty,
                 # Motivo 03: importe 0 (solo se corrige la descripción, no el monto).
                 "price_unit": 0.0 if es_correccion else float(ln.get("precioUnitario") or 0),
                 "discount": 0.0 if es_correccion else disc,
@@ -2722,6 +3214,15 @@ class AccountMove(models.Model):
                 lvals["l10n_pe_ne_cod_producto_sunat"] = ln["codSunat"]
             if ln.get("afectacionGratuita"):
                 lvals["l10n_pe_ne_afectacion_gratuita"] = ln["afectacionGratuita"]
+            if ln.get("fraccionar"):
+                # Farma: vender por sub-unidad. Requiere el factor del producto (unidades por
+                # empaque); sin él no hay cómo descontar el stock del empaque.
+                if not (prod and prod.l10n_pe_ne_unidades_por_empaque > 0):
+                    raise UserError(_(
+                        "«%s» no se puede vender fraccionado: configura las unidades por empaque "
+                        "en el producto."
+                    ) % ((ln.get("descripcion") or "").strip() or (prod.name if prod else "ITEM")))
+                lvals["l10n_pe_ne_fraccionado"] = True
             lines.append((0, 0, lvals))
         # Otros cargos (que afectan la base imponible): se agregan como una línea gravada adicional, así
         # suben gravada/IGV/total con la maquinaria de líneas ya validada (no se prorratea el desc. global).
@@ -2864,7 +3365,8 @@ class AccountMove(models.Model):
         proj = move.l10n_pe_ne_proyecto_id
         if proj:
             otras = move.amount_total or 0.0  # esta valorización
-            if round(proj.facturado + otras, 2) > round(proj.valor_total or 0.0, 2) + 0.01:
+            total = round(proj.valor_total or 0.0, 2)
+            if round(proj.facturado + otras, 2) > total + 0.01:
                 raise UserError(_(
                     "Esta valorización (%s) haría que lo facturado del contrato «%s» supere su "
                     "valor total. Facturado: %s · Contrato: %s · Esta: %s."
@@ -2873,8 +3375,55 @@ class AccountMove(models.Model):
                     self._l10n_pe_fmt(proj.facturado), self._l10n_pe_fmt(proj.valor_total),
                     self._l10n_pe_fmt(otras),
                 ))
+            # Emitir DESDE la valorización: se numera (las previas del contrato + 1; esta aún no
+            # está enviada, no cuenta) y, si el emisor no puso observación propia, se compone la
+            # glosa con el avance acumulado del contrato para que el comprobante lo declare.
+            move.l10n_pe_ne_valorizacion_nro = self.env["account.move"].sudo().search_count([
+                ("l10n_pe_ne_proyecto_id", "=", proj.id),
+                ("l10n_pe_biller_state", "in", ("enviado", "en_proceso")),
+            ]) + 1
+            pct = round((proj.facturado + otras) / total * 100.0, 2) if total else 0.0
+            if not (move.narration or "").strip():
+                move.narration = _(
+                    "Valorización N° %(n)s — avance acumulado %(pct)s%% del contrato «%(c)s»"
+                ) % {"n": move.l10n_pe_ne_valorizacion_nro,
+                     "pct": self._l10n_pe_fmt(pct), "c": proj.name}
+        if not enviar:
+            # Pre-flight: el comprobante quedó armado y posteado pero NO se envía a SUNAT.
+            # El llamador (l10n_pe_ne_preflight) valida y revierte la transacción.
+            return move
         move.action_l10n_pe_send_to_biller()
         return move.l10n_pe_ne_quick_result()
+
+    @api.model
+    def l10n_pe_ne_preflight(self, payload):
+        """Valida un payload SIN emitir ni persistir. Arma el comprobante EXACTAMENTE como
+        quick_emit (misma lógica, misma fidelidad), corre el motor de validaciones L1 y REVIERTE
+        todo con un SAVEPOINT — no deja comprobante, producto ni movimiento de stock. Devuelve
+        [{code, campo, nivel, mensaje}] para que la SPA muestre avisos/errores ANTES de emitir.
+
+        Cualquier UserError del armado (tax faltante, saldo de NC, avance de obra…) se devuelve
+        como un finding bloqueante, así el pre-flight refleja también esos cortes."""
+        # Savepoint GESTIONADO por Odoo (cr.savepoint): nombres únicos + limpieza de caché en el
+        # rollback. Se fuerza el rollback lanzando un centinela DESPUÉS de extraer los findings
+        # (dicts planos que sobreviven al rollback). Con un SAVEPOINT manual + invalidate_all, una
+        # segunda llamada en la misma transacción reventaba en el cómputo de impuestos del create.
+        class _Revert(Exception):
+            pass
+
+        findings = []
+        try:
+            with self.env.cr.savepoint():
+                try:
+                    move = self.l10n_pe_ne_quick_emit(dict(payload or {}), enviar=False)
+                    findings = move._l10n_pe_ne_validaciones()
+                except UserError as e:
+                    findings = [{"code": "bloqueo", "campo": "", "nivel": "error",
+                                 "mensaje": str(e)}]
+                raise _Revert()
+        except _Revert:
+            pass
+        return findings
 
     def _l10n_pe_ne_check_numero_libre(self, serie, correlativo):
         """Impide reutilizar un número fiscal (serie+correlativo) ya emitido/anulado en
@@ -2994,6 +3543,15 @@ class AccountMove(models.Model):
         """Anula un comprobante ya emitido a SUNAT: boletas por Resumen Diario (RC, tipEstado 3),
         facturas/NC/ND por Comunicación de Baja (RA). payload: {id | serie+correlativo, motivo}.
         Lo consume el BFF por /json/2."""
+        # H-5: el modelo es la autoridad, no solo el controller. /ne/api/anular ya devuelve
+        # 403 sin este grupo, pero el gate tiene que vivir también aquí para que ninguna vía
+        # (backend, tests, un futuro endpoint) pueda saltárselo. Ver
+        # docs/procesos-negocio/decision-alta-usuarios.md y hallazgos.md (H6).
+        # NOTA (hueco conocido): el botón "Comunicar Baja" del backend llama directo a
+        # action_l10n_pe_send_baja y no pasa por aquí; cerrarlo (groups= en la vista o gate
+        # en el modelo) queda para un cambio validado con la suite de tests.
+        if not self.env.user.has_group('l10n_pe_ne_biller.group_l10n_pe_ne_anulacion'):
+            raise AccessError(_("No tienes permiso para anular comprobantes."))
         payload = payload or {}
         move = self._l10n_pe_ne_quick_origin(payload.get("comprobante") or payload)
         move.l10n_pe_ne_baja_motivo = (
@@ -3048,7 +3606,14 @@ class AccountMove(models.Model):
             return ""
         P = self.env["res.partner"].sudo()
         data = None
-        for fetch in (P._l10n_pe_query_external_db, P._l10n_pe_query_sunat):
+        # getattr: si el addon l10n_pe_partner_lookup NO está instalado, _l10n_pe_query_external_db
+        # no existe en res.partner; se omite en vez de reventar con AttributeError (degradación con
+        # gracia — este método NUNCA bloquea la emisión). Acceder al atributo directo en la tupla
+        # lanzaba ANTES del try. (Hallazgo del run real en Odoo 19.)
+        for fetch in (getattr(P, "_l10n_pe_query_external_db", None),
+                      getattr(P, "_l10n_pe_query_sunat", None)):
+            if not fetch:
+                continue
             try:
                 data = fetch(num)
             except Exception:  # noqa: BLE001 — fuente no configurada / red: seguimos
@@ -3649,6 +4214,55 @@ class AccountMove(models.Model):
             ],
             order="invoice_date, id",
         )
+
+    @api.model
+    def l10n_pe_ne_reporte_vinculadas(self, ejercicio=None):
+        """Reporte de operaciones con partes vinculadas del ejercicio (año, default el actual) —
+        sustento de la DJ Informativa de Precios de Transferencia / Reporte Local (V1). Lista los
+        comprobantes emitidos a clientes marcados como parte vinculada, agrupados por cliente, con
+        el tipo de vínculo, si es no domiciliada y el total (las NC restan). Aislado por compañía."""
+        company = self.env.company
+        year = int(ejercicio) if ejercicio else fields.Date.context_today(self).year
+        d0 = fields.Date.to_date("%04d-01-01" % year)
+        d1 = fields.Date.to_date("%04d-12-31" % year)
+        moves = self.search(
+            [
+                ("company_id", "=", company.id),
+                ("move_type", "in", ("out_invoice", "out_refund")),
+                ("state", "=", "posted"),
+                ("invoice_date", ">=", d0), ("invoice_date", "<=", d1),
+                ("l10n_pe_biller_state", "not in", ("por_enviar", "rechazado", False)),
+                ("partner_id.l10n_pe_ne_parte_vinculada", "=", True),
+            ],
+            order="partner_id, invoice_date, id",
+        )
+        tipos = dict(self.env["res.partner"]._fields["l10n_pe_ne_tipo_vinculo"].selection)
+        por_cliente = {}
+        total = 0.0
+        for m in moves:
+            p = m.partner_id
+            g = por_cliente.setdefault(p.id, {
+                "cliente": p.name or "", "numDoc": p.vat or "",
+                "tipoVinculo": p.l10n_pe_ne_tipo_vinculo or "",
+                "tipoVinculoNombre": tipos.get(p.l10n_pe_ne_tipo_vinculo, ""),
+                "noDomiciliada": p.l10n_pe_ne_no_domiciliada,
+                "pais": p.country_id.code or "", "comprobantes": 0, "total": 0.0,
+            })
+            signo = 1.0 if m.move_type == "out_invoice" else -1.0
+            g["comprobantes"] += 1
+            g["total"] = round(g["total"] + signo * (m.amount_total or 0.0), 2)
+            total += signo * (m.amount_total or 0.0)
+        items = sorted(por_cliente.values(), key=lambda x: -x["total"])
+        return {
+            "ejercicio": year,
+            "items": items,
+            "clientes": len(items),
+            "comprobantes": len(moves),
+            "total": round(total, 2),
+            "moneda": company.currency_id.name or "PEN",
+            # Cruce con los umbrales de obligación (V4) para que el reporte diga si hay que presentar.
+            "umbrales": self.env["res.company"].l10n_pe_ne_vinculadas_umbrales(year),
+        }
 
     @api.model
     def l10n_pe_ne_ple_ventas(self, periodo):
@@ -4435,6 +5049,17 @@ class AccountMove(models.Model):
             lote.expiration_date = linea.l10n_pe_ne_vence
         return lote
 
+    def _l10n_pe_ne_stock_qty(self, line):
+        """Cantidad a mover en la UoM del producto (el empaque). Normal = |cantidad|. Fraccionada
+        = |cantidad| / unidades_por_empaque: la línea va en sub-unidades pero el stock se lleva en
+        empaques, así vender 5 unidades de una caja de 30 descuenta 5/30 de caja."""
+        qty = abs(line.quantity or 0.0)
+        if line.l10n_pe_ne_fraccionado:
+            factor = line.product_id.l10n_pe_ne_unidades_por_empaque or 0.0
+            if factor > 0:
+                return qty / factor
+        return qty
+
     def _l10n_pe_ne_stock_aplicar(self, lineas, origen, destino, reversa=False, con_lote=False):
         """Motor común: crea y valida los movimientos de `lineas` entre dos ubicaciones.
 
@@ -4456,7 +5081,7 @@ class AccountMove(models.Model):
             moves |= self.env["stock.move"].create(
                 {
                     "product_id": l.product_id.id,
-                    "product_uom_qty": abs(l.quantity),
+                    "product_uom_qty": self._l10n_pe_ne_stock_qty(l),
                     "product_uom": l.product_uom_id.id,
                     "location_id": origen.id,
                     "location_dest_id": destino.id,
@@ -4718,6 +5343,13 @@ class AccountMove(models.Model):
             "taxCode": (tax.l10n_pe_edi_tax_code or "1000") if tax else "1000",
             "unidad": p.l10n_pe_ne_unit_code or "",
             "icbper": icbper,
+            # Fraccionamiento (farma): el producto se puede vender por sub-unidad. El front muestra
+            # el toggle "fraccionar" solo cuando `fraccionable`; `unidadFraccion` es la sub-unidad SUNAT.
+            "fraccionable": (p.l10n_pe_ne_unidades_por_empaque or 0.0) > 0,
+            "unidadesPorEmpaque": p.l10n_pe_ne_unidades_por_empaque or 0.0,
+            "unidadFraccion": p.l10n_pe_ne_unidad_fraccion or "",
+            "registroSanitario": p.l10n_pe_ne_registro_sanitario or "",
+            "controlado": bool(p.l10n_pe_ne_controlado),
             # "bien" | "servicio" — el vocabulario del negocio, no el de Odoo (consu/service).
             # 'combo' no lo usa esta app; si apareciera, se trata como bien (es tangible).
             "tipo": "servicio" if p.type == "service" else "bien",
@@ -4751,6 +5383,8 @@ class AccountMove(models.Model):
             "pais": p.country_id.code or "",
             "exceptuadoPercepcion": p.l10n_pe_ne_exceptuado_percepcion,
             "parteVinculada": p.l10n_pe_ne_parte_vinculada,
+            "tipoVinculo": p.l10n_pe_ne_tipo_vinculo or "",
+            "noDomiciliada": p.l10n_pe_ne_no_domiciliada,
         }
 
     def _l10n_pe_ne_ident_type(self, tipoDoc):
@@ -4781,6 +5415,7 @@ class AccountMove(models.Model):
             ("direccion", "street"),
             ("exceptuadoPercepcion", "l10n_pe_ne_exceptuado_percepcion"),
             ("parteVinculada", "l10n_pe_ne_parte_vinculada"),
+            ("tipoVinculo", "l10n_pe_ne_tipo_vinculo"),
         ):
             if key in c:
                 vals[field] = c.get(key) or False
@@ -4933,6 +5568,10 @@ class AccountMove(models.Model):
             vals["l10n_pe_ne_cod_producto_sunat"] = (producto.get("codSunat") or "").strip() or False
         if "detraCod" in producto:
             vals["l10n_pe_ne_detraccion_cod"] = (producto.get("detraCod") or "").strip() or False
+        if "registroSanitario" in producto:
+            vals["l10n_pe_ne_registro_sanitario"] = (producto.get("registroSanitario") or "").strip() or False
+        if "controlado" in producto:
+            vals["l10n_pe_ne_controlado"] = bool(producto.get("controlado"))
         if producto.get("percepTasa") is not None:
             vals["l10n_pe_ne_percepcion_tasa"] = _percep_float(producto.get("percepTasa"))
         if "unidad" in producto:
@@ -5842,14 +6481,41 @@ class AccountMove(models.Model):
             move.l10n_pe_ne_estado_unidad_ejecutora = (ve.get("unidadEjecutora") or "").strip()
             move.l10n_pe_ne_estado_proceso_seleccion = (ve.get("procesoSeleccion") or "").strip()
             move.l10n_pe_ne_estado_contrato = (ve.get("contrato") or "").strip()
+            # Conformidad / acta de recepción (opcional): dato de registro, no va al XML.
+            move.l10n_pe_ne_conformidad = (ve.get("conformidad") or "").strip() or False
         # Guía de remisión referenciada (DespatchDocumentReference).
         if payload.get("guiaRef"):
             move.l10n_pe_ne_guia_ref = payload["guiaRef"]
             if payload.get("guiaTipo"):
                 move.l10n_pe_ne_guia_tipo = payload["guiaTipo"]
+        # DUA/DAM de exportación (QA-023): dato del ERP, NO va al XML (ver l10n_pe_ne_dua). Opcional
+        # —la exportación se emite sin ella (QA-024)— y solo se guarda si el front la mandó.
+        if payload.get("dua"):
+            move.l10n_pe_ne_dua = str(payload["dua"]).strip()
         # Proyecto/contrato (avance de obra).
         if payload.get("proyectoId"):
             move.l10n_pe_ne_proyecto_id = int(payload["proyectoId"])
+        # Retención de garantía (fiel cumplimiento de obra): % que el cliente retiene y libera al
+        # final. Reduce el neto a cobrar; no toca el total ni el IGV.
+        if payload.get("retencionGarantia"):
+            move.l10n_pe_ne_retencion_garantia_rate = float(
+                (payload["retencionGarantia"] or {}).get("tasa") or 0)
+        # Amortización de adelanto de obra (deducción contractual, no anticipo SUNAT).
+        if payload.get("amortizacionAdelanto"):
+            move.l10n_pe_ne_amortizacion_adelanto = float(payload["amortizacionAdelanto"] or 0)
+        # Penalidad del contrato (Estado/obra): descuento fijo por incumplimiento; reduce el neto.
+        if payload.get("penalidad"):
+            move.l10n_pe_ne_penalidad = float(payload["penalidad"] or 0)
+        # Convenio / tercero pagador (SIS/aseguradora): la parte cubierta reduce el copago del paciente.
+        if payload.get("convenio"):
+            c = payload["convenio"] or {}
+            move.l10n_pe_ne_tercero_pagador = (c.get("tercero") or "").strip() or False
+            move.l10n_pe_ne_monto_cubierto = float(c.get("montoCubierto") or 0)
+        # Receta retenida (venta de productos controlados).
+        if payload.get("receta"):
+            r = payload["receta"] or {}
+            move.l10n_pe_ne_receta_numero = (r.get("numero") or "").strip() or False
+            move.l10n_pe_ne_receta_colegiatura = (r.get("colegiatura") or "").strip() or False
         fp = payload.get("formaPago") or {}
         if fp.get("tipo") == "Credito" or fp.get("cuotas"):
             move.l10n_pe_ne_forma_pago = "Credito"
@@ -6079,6 +6745,37 @@ class AccountMove(models.Model):
             "formaPago": self.l10n_pe_ne_forma_pago or "Contado",
             "cuotas": self.l10n_pe_ne_cuotas or [],
             "docOrigen": ("%s %s-%s" % (ot, os_, on)) if on else "",
+            # DUA/DAM de exportación (QA-023): referencia del ERP para el detalle. Vacía mientras
+            # aduanas no la haya numerado (se emite sin ella, QA-024).
+            "dua": self.l10n_pe_ne_dua or "",
+            # Avance de obra: N° de valorización de este comprobante y el estado del contrato
+            # (avance acumulado y saldo) para mostrarlo en el detalle. None si no es valorización.
+            "valorizacionNro": self.l10n_pe_ne_valorizacion_nro or None,
+            "proyecto": self.l10n_pe_ne_proyecto_id._l10n_pe_ne_dict()
+            if self.l10n_pe_ne_proyecto_id else None,
+            # Retención de garantía de obra: % y monto retenido de ESTA valorización (None si no
+            # aplica). Reduce el neto a cobrar; no cambia el total del comprobante.
+            "retencionGarantia": {
+                "tasa": self.l10n_pe_ne_retencion_garantia_rate,
+                "monto": self._l10n_pe_ne_retencion_garantia_monto(),
+            } if self.l10n_pe_ne_retencion_garantia_rate else None,
+            # Amortización de adelanto de obra recuperada en esta valorización (None si no aplica).
+            "amortizacionAdelanto": self.l10n_pe_ne_amortizacion_adelanto or None,
+            # Penalidad del contrato descontada en este comprobante (None si no aplica).
+            "penalidad": self.l10n_pe_ne_penalidad or None,
+            # Conformidad / acta de recepción (venta al Estado). "" si no se registró.
+            "conformidad": self.l10n_pe_ne_conformidad or "",
+            # Convenio (tercero pagador): quién cubre, cuánto, y el copago que paga el paciente.
+            "convenio": {
+                "tercero": self.l10n_pe_ne_tercero_pagador or "",
+                "montoCubierto": self.l10n_pe_ne_monto_cubierto,
+                "copago": round(max(0.0, self._l10n_pe_importe_cobrar() - (self.l10n_pe_ne_monto_cubierto or 0.0)), 2),
+            } if self.l10n_pe_ne_monto_cubierto else None,
+            # Receta retenida (productos controlados): número + colegiatura del médico. None si no aplica.
+            "receta": {
+                "numero": self.l10n_pe_ne_receta_numero or "",
+                "colegiatura": self.l10n_pe_ne_receta_colegiatura or "",
+            } if self.l10n_pe_ne_receta_numero else None,
             "anticipos": self._l10n_pe_ne_anticipos_list(),
             "lineas": lineas,
             "notasCredito": [
@@ -6099,7 +6796,11 @@ class AccountMove(models.Model):
                 "inafecta": round(b["inafecto"], 2),
                 "igv": round(b["igv"], 2),
                 "icbper": round(b["icbper"], 2),
-                "total": round(b["total"], 2),
+                # Total = importe a COBRAR (lo que paga el cliente), no amount_total: excluye los
+                # bienes gratuitos, el anticipo aplicado y el descuento que no afecta el IGV. Así el
+                # "Total" del detalle == la suma de su propio desglose (gravada+exo+ina+IGV+ICBPER) y
+                # no confunde con un total inflado por una línea gratuita (== el mtoImpVenta emitido).
+                "total": round(self._l10n_pe_importe_cobrar(), 2),
             },
         }
 

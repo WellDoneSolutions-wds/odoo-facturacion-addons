@@ -63,6 +63,18 @@ class TestHarnessVerticales(L10nPeSeedMixin, EnvioSincronoMixin, TransactionCase
             ('boleta · mayor a S/700 con documento', {
                 'tipoDoc': '03', 'moneda': 'PEN', 'serie': 'B001', 'cliente': self._DNI,
                 'lineas': [{'descripcion': 'TELEVISOR', 'cantidad': 1, 'precioUnitario': 800, 'taxCode': '1000'}]}),
+            ('peso · balanza en KGM con 3 decimales (QA-020)', {
+                'tipoDoc': '03', 'moneda': 'PEN', 'serie': 'B001', 'cliente': self._DNI,
+                'lineas': [{'descripcion': 'POLLO', 'cantidad': 18.375, 'precioUnitario': 9.80,
+                            'taxCode': '1000', 'unidad': 'KGM'}]}),
+            ('ferretería · venta por metro y metro cuadrado + kardex', {
+                'tipoDoc': '01', 'moneda': 'PEN', 'serie': 'F001', 'cliente': self._RUC,
+                'lineas': [
+                    {'descripcion': 'TUBO PVC', 'cantidad': 12.5, 'precioUnitario': 8.50,
+                     'taxCode': '1000', 'unidad': 'MTR'},
+                    {'descripcion': 'MALLA', 'cantidad': 3.25, 'precioUnitario': 24, 'taxCode': '1000',
+                     'unidad': 'MTK'},
+                ]}),
         ]
 
     def test_corpus_valido(self):

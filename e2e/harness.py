@@ -115,7 +115,22 @@ def _line_vals(line):
     if line.get('fraccionar'):
         pvals['l10n_pe_ne_unidades_por_empaque'] = float(line.get('factor', 30))
         pvals['l10n_pe_ne_unidad_fraccion'] = line.get('unidad_fraccion', 'NIU')
+    if line.get('lote'):
+        # Perecible / farma: bien rastreado por lote con vencimiento. La salida reserva el lote
+        # por FEFO y F1 anota "Lote X · FV ..." en la descripción del ítem (XML + PDF).
+        pvals['is_storable'] = True
+        pvals['tracking'] = 'lot'
+        pvals['use_expiration_date'] = True
     prod = env['product.product'].create(pvals)
+    if line.get('lote'):
+        lt = line['lote']
+        loc = env['stock.warehouse'].search(
+            [('company_id', '=', env.company.id)], limit=1).lot_stock_id
+        lot = env['stock.lot'].create({
+            'name': lt.get('name', 'L-PER'), 'product_id': prod.id,
+            'company_id': env.company.id, 'expiration_date': lt['vence']})
+        env['stock.quant']._update_available_quantity(
+            prod, loc, float(lt.get('qty', 100)), lot_id=lot)
     taxes = []
     tax_kind = line.get('tax', 'gravado')
     if tax_kind == 'ivap':

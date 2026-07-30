@@ -75,6 +75,18 @@ class TestHarnessVerticales(L10nPeSeedMixin, EnvioSincronoMixin, TransactionCase
                     {'descripcion': 'MALLA', 'cantidad': 3.25, 'precioUnitario': 24, 'taxCode': '1000',
                      'unidad': 'MTK'},
                 ]}),
+            ('maderera · venta por volumen en metro cúbico (MTQ)', {
+                'tipoDoc': '01', 'moneda': 'PEN', 'serie': 'F001', 'cliente': self._RUC,
+                'lineas': [{'descripcion': 'MADERA TORNILLO', 'cantidad': 2.125, 'precioUnitario': 1800,
+                            'taxCode': '1000', 'unidad': 'MTQ'}]}),
+            ('textil · tela por metro y prendas por docena (DZN)', {
+                'tipoDoc': '01', 'moneda': 'PEN', 'serie': 'F001', 'cliente': self._RUC,
+                'lineas': [
+                    {'descripcion': 'TELA DRILL', 'cantidad': 15.75, 'precioUnitario': 12,
+                     'taxCode': '1000', 'unidad': 'MTR'},
+                    {'descripcion': 'POLOS', 'cantidad': 2.5, 'precioUnitario': 180, 'taxCode': '1000',
+                     'unidad': 'DZN'},
+                ]}),
         ]
 
     def test_corpus_valido(self):

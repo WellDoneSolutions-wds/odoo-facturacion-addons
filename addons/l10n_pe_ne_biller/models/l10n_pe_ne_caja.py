@@ -102,6 +102,18 @@ class L10nPeNeCajaSesion(models.Model):
                 "formaPago": m.l10n_pe_ne_forma_pago or "Contado",
                 "medios": m.l10n_pe_ne_medios_pago or [],
             })
+        # Notas de venta (no-CPE) cobradas en esta sesión: son plata real -> entran al arqueo igual
+        # que las ventas de account.move. Amarradas por caja_sesion_id; excluye anuladas. Total =
+        # líneas + redondeo de efectivo. Contado (una nota de venta se cobra al momento).
+        notas = self.env["l10n_pe_ne.nota_venta"].search([
+            ("caja_sesion_id", "=", self.id), ("estado", "!=", "anulada")])
+        for nv in notas:
+            out.append({
+                "total": (nv.amount_total or 0.0) + (nv.redondeo or 0.0),
+                "moneda": nv.currency_id.name or "PEN",
+                "formaPago": "Contado",
+                "medios": nv.medios_pago or [],
+            })
         return out
 
     def _l10n_pe_ne_ingresos_retiros(self):

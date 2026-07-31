@@ -18,6 +18,28 @@ def set_uom_precision_3(env):
         prec.digits = 3
 
 
+def set_discount_precision_6(env):
+    """Sube la precisión del descuento (%) a 6 decimales.
+
+    El descuento por ítem viaja al facturador como PORCENTAJE (account.move.line.discount), no como
+    monto. Cuando el usuario teclea un descuento en S/ (monto fijo), la SPA lo convierte a un % de
+    precisión completa para reproducir el monto exacto (p.ej. S/10 sobre 760 = 1.3157894…%). Con la
+    precisión por defecto de Odoo (2), ese % se truncaba a 1.32 y el total emitido salía 749.97 en vez
+    de 750.00 — se cobraba 0.03 de menos y el comprobante no coincidía con la vista previa.
+
+    El propio código de emisión YA asume más precisión: combina descuento de línea + global con
+    round(…, 6) y emite el factor por ítem con 5 decimales (AllowanceCharge/porVariable, SUNAT 3290).
+    A 6 el % viaja íntegro y el total reproduce EXACTO lo tecleado; un descuento que ya era un % de
+    ≤2 decimales queda idéntico. Ver tests/test_descuento.py::test_descuento_monto_fijo_reproduce_total_exacto.
+
+    El record core `product.decimal_discount` es noupdate, así que un data XML no lo pisa: se ajusta
+    por código (idempotente, solo sube, nunca baja) — mismo patrón que set_uom_precision_3.
+    """
+    prec = env['decimal.precision'].search([('name', '=', 'Discount')], limit=1)
+    if prec and prec.digits < 6:
+        prec.digits = 6
+
+
 def post_init_hook(env):
     """Al INSTALAR el addon en una BD nueva, deja al admin (base.user_admin)
     dentro del grupo 'Anulación de comprobantes NE Express' para que pueda operar
@@ -36,3 +58,4 @@ def post_init_hook(env):
     if admin and group:
         admin.write({'group_ids': [(4, group.id)]})
     set_uom_precision_3(env)
+    set_discount_precision_6(env)

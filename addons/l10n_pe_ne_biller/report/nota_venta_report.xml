@@ -5,10 +5,13 @@
         <field name="name">Nota de venta ticket 80mm</field>
         <field name="format">custom</field>
         <field name="page_width">80</field>
-        <field name="page_height">0</field>
+        <!-- Alto CONCRETO (no 0): con page_height=0 Odoo omite el arg de alto y wkhtmltopdf cae a A4
+             (el ticket "flotaba" arriba-izquierda de una hoja gigante). 150mm cubre la gran mayoría
+             de tickets en una pagina; los muy largos paginan (normal en rollo termico). -->
+        <field name="page_height">150</field>
         <field name="orientation">Portrait</field>
-        <field name="margin_top">4</field>
-        <field name="margin_bottom">4</field>
+        <field name="margin_top">3</field>
+        <field name="margin_bottom">3</field>
         <field name="margin_left">3</field>
         <field name="margin_right">3</field>
         <field name="dpi">96</field>
@@ -189,46 +192,58 @@
     </template>
 
     <!-- ============================ TICKET 80mm ============================ -->
+    <!-- basic_layout: necesario para el charset UTF-8 (html_container solo produce mojibake en á/·).
+         NADA de <table>: el CSS de reportes de Odoo (report_assets_common) bordea las celdas y hace
+         parecer planilla. Se maquetan las filas con <div> + float:right + overflow:hidden (patrón
+         100% soportado por wkhtmltopdf, inmune a cualquier CSS de tablas). -->
     <template id="report_nota_venta_ticket">
         <t t-call="web.html_container">
             <t t-foreach="docs" t-as="o">
                 <t t-call="web.basic_layout">
-                    <div class="page" style="font-family: Arial, Helvetica, sans-serif; color:#111; font-size:11px; width:74mm;">
-                        <t t-set="sym" t-value="o.currency_id.symbol or o.currency_id.name"/>
-                        <t t-set="a_pagar" t-value="round((o.amount_total or 0) + (o.redondeo or 0), 2)"/>
-                        <t t-set="pagado" t-value="sum(float(m.get('monto') or 0) for m in (o.medios_pago or []))"/>
-                        <t t-set="vuelto" t-value="round(pagado - a_pagar, 2)"/>
-                        <div style="text-align:center;">
-                            <div style="font-weight:bold; font-size:13px;" t-esc="o.company_id.name"/>
-                            <div t-if="o.company_id.vat">RUC: <span t-esc="o.company_id.vat"/></div>
-                            <div style="border:1px solid #000; padding:2px; margin:4px 0; font-weight:bold; font-size:10px;">
-                                NOTA DE VENTA · SIN VALOR TRIBUTARIO<br/>NO ES COMPROBANTE DE PAGO
-                            </div>
-                            <div style="font-weight:bold;" t-esc="o.name"/>
-                            <div t-esc="o.fecha.strftime('%d/%m/%Y') if o.fecha else ''"/>
-                        </div>
-                        <div style="border-top:1px dashed #000; margin:5px 0;"/>
-                        <div>Cliente: <span t-esc="o.partner_id.name or o.cliente_nombre or 'Cliente varios'"/></div>
-                        <div style="border-top:1px dashed #000; margin:5px 0;"/>
-                        <table style="width:100%; border-collapse:collapse; font-size:10px;">
-                            <tr t-foreach="o.line_ids" t-as="l">
-                                <td style="border:0; vertical-align:top;">
-                                    <span t-esc="'%.2f' % l.cantidad"/> x <span t-esc="l.descripcion"/>
-                                </td>
-                                <td style="border:0; text-align:right; vertical-align:top; white-space:nowrap;"><span t-esc="sym"/> <span t-esc="'%.2f' % l.subtotal"/></td>
-                            </tr>
-                        </table>
-                        <div style="border-top:1px dashed #000; margin:5px 0;"/>
-                        <table style="width:100%; border-collapse:collapse; font-size:11px;">
-                            <tr t-if="o.amount_tax"><td style="border:0;">IGV (18%)</td><td style="border:0; text-align:right;"><span t-esc="sym"/> <span t-esc="'%.2f' % o.amount_tax"/></td></tr>
-                            <tr><td style="border:0; font-weight:bold;">TOTAL</td><td style="border:0; text-align:right; font-weight:bold;"><span t-esc="sym"/> <span t-esc="'%.2f' % o.amount_total"/></td></tr>
-                            <tr t-foreach="o.medios_pago" t-as="m"><td style="border:0;"><span t-esc="m.get('medio') or ''"/></td><td style="border:0; text-align:right;"><span t-esc="sym"/> <span t-esc="'%.2f' % float(m.get('monto') or 0)"/></td></tr>
-                            <tr t-if="o.redondeo"><td style="border:0;">A pagar efectivo</td><td style="border:0; text-align:right;"><span t-esc="sym"/> <span t-esc="'%.2f' % a_pagar"/></td></tr>
-                            <tr t-if="vuelto &gt; 0"><td style="border:0;">Vuelto</td><td style="border:0; text-align:right;"><span t-esc="sym"/> <span t-esc="'%.2f' % vuelto"/></td></tr>
-                        </table>
-                        <div style="border-top:1px dashed #000; margin:5px 0;"/>
-                        <div style="text-align:center; font-size:9px; color:#444;">Documento interno · sin validez tributaria ante SUNAT</div>
+                <t t-set="sym" t-value="o.currency_id.symbol or o.currency_id.name"/>
+                <t t-set="a_pagar" t-value="round((o.amount_total or 0) + (o.redondeo or 0), 2)"/>
+                <t t-set="pagado" t-value="sum(float(m.get('monto') or 0) for m in (o.medios_pago or []))"/>
+                <t t-set="vuelto" t-value="round(pagado - a_pagar, 2)"/>
+                <div class="page" style="font-family:'DejaVu Sans',Arial,sans-serif; color:#000; width:100%; font-size:11px; line-height:1.35;">
+                    <!-- Encabezado del negocio -->
+                    <div style="text-align:center;">
+                        <div style="font-weight:bold; font-size:14px;" t-esc="o.company_id.name"/>
+                        <div t-if="o.company_id.vat" style="font-size:11px;">RUC <span t-esc="o.company_id.vat"/></div>
+                        <div t-if="o.company_id.street" style="font-size:10px; color:#333;" t-esc="o.company_id.street"/>
+                        <div style="margin:6px 0 3px; font-weight:bold; font-size:12px; letter-spacing:0.5px;">NOTA DE VENTA</div>
+                        <div style="font-weight:bold; font-size:13px;" t-esc="o.name"/>
+                        <div style="font-size:10px;" t-esc="o.fecha.strftime('%d/%m/%Y') if o.fecha else ''"/>
                     </div>
+                    <div style="border-top:1px dashed #000; margin:6px 0 4px;"/>
+                    <div style="font-size:10px;">Cliente: <span t-esc="o.partner_id.name or o.cliente_nombre or 'Cliente varios'"/><t t-if="o.partner_id.vat"> · <span t-esc="o.partner_id.vat"/></t></div>
+                    <div style="border-top:1px dashed #000; margin:4px 0;"/>
+                    <!-- Ítems: descripción arriba; luego "cantidad x P.U." a la izq. y subtotal a la der. -->
+                    <t t-foreach="o.line_ids" t-as="l">
+                        <t t-set="qty" t-value="('%d' % l.cantidad) if l.cantidad == int(l.cantidad) else ('%.3f' % l.cantidad).rstrip('0').rstrip('.')"/>
+                        <div style="margin-top:3px; font-size:10px;" t-esc="l.descripcion"/>
+                        <div style="overflow:hidden; font-size:10px; color:#333;">
+                            <span style="float:right; font-weight:bold; color:#000; white-space:nowrap;"><span t-esc="sym"/> <span t-esc="'%.2f' % l.subtotal"/></span>
+                            <span t-esc="qty"/> x <span t-esc="sym"/> <span t-esc="'%.2f' % l.precio_unitario"/><t t-if="not l.afecto_igv"> <span style="color:#888;">(no grav.)</span></t>
+                        </div>
+                    </t>
+                    <div style="border-top:1px dashed #000; margin:4px 0;"/>
+                    <!-- Totales -->
+                    <div t-if="o.amount_op_gravada" style="overflow:hidden;"><span style="float:right;"><span t-esc="sym"/> <span t-esc="'%.2f' % o.amount_op_gravada"/></span>Op. gravada</div>
+                    <div t-if="o.amount_op_no_gravada" style="overflow:hidden;"><span style="float:right;"><span t-esc="sym"/> <span t-esc="'%.2f' % o.amount_op_no_gravada"/></span>Op. no gravada</div>
+                    <div t-if="o.amount_tax" style="overflow:hidden;"><span style="float:right;"><span t-esc="sym"/> <span t-esc="'%.2f' % o.amount_tax"/></span>IGV (18%)</div>
+                    <div style="overflow:hidden; border-top:1px solid #000; margin-top:2px; padding-top:2px; font-weight:bold; font-size:13px;"><span style="float:right;"><span t-esc="sym"/> <span t-esc="'%.2f' % o.amount_total"/></span>TOTAL</div>
+                    <!-- Pago recibido + vuelto -->
+                    <div style="border-top:1px dashed #000; margin:5px 0 4px;"/>
+                    <t t-foreach="o.medios_pago" t-as="m">
+                        <div style="overflow:hidden; font-size:10px;"><span style="float:right;"><span t-esc="sym"/> <span t-esc="'%.2f' % float(m.get('monto') or 0)"/></span><span t-esc="m.get('medio') or 'Efectivo'"/></div>
+                    </t>
+                    <div t-if="o.redondeo" style="overflow:hidden; font-size:10px;"><span style="float:right;"><span t-esc="sym"/> <span t-esc="'%.2f' % a_pagar"/></span>A pagar (efectivo)</div>
+                    <div t-if="vuelto &gt; 0" style="overflow:hidden; font-weight:bold;"><span style="float:right;"><span t-esc="sym"/> <span t-esc="'%.2f' % vuelto"/></span>Vuelto</div>
+                    <!-- Leyenda legal (obligatoria: no es CPE) -->
+                    <div style="border:1.5px solid #000; text-align:center; font-weight:bold; font-size:10px; margin:8px 0 4px; padding:3px;">SIN VALOR TRIBUTARIO<br/>NO ES COMPROBANTE DE PAGO</div>
+                    <div style="text-align:center; font-size:9px; color:#555;">Documento interno · no válido ante SUNAT</div>
+                    <div t-if="o.notas" style="border-top:1px dashed #000; margin:5px 0 0; font-size:9px; color:#555;"><span t-esc="o.notas"/></div>
+                </div>
                 </t>
             </t>
         </t>

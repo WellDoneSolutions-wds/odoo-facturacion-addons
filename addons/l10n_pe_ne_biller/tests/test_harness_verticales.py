@@ -87,6 +87,14 @@ class TestHarnessVerticales(L10nPeSeedMixin, EnvioSincronoMixin, TransactionCase
                     {'descripcion': 'POLOS', 'cantidad': 2.5, 'precioUnitario': 180, 'taxCode': '1000',
                      'unidad': 'DZN'},
                 ]}),
+            ('servicios · por hora (HUR) y por día (DAY)', {
+                'tipoDoc': '01', 'moneda': 'PEN', 'serie': 'F001', 'cliente': self._RUC,
+                'lineas': [
+                    {'descripcion': 'CONSULTORIA', 'cantidad': 4.5, 'precioUnitario': 120,
+                     'taxCode': '1000', 'unidad': 'HUR'},
+                    {'descripcion': 'ALQUILER EQUIPO', 'cantidad': 15, 'precioUnitario': 80,
+                     'taxCode': '1000', 'unidad': 'DAY'},
+                ]}),
         ]
 
     def test_corpus_valido(self):

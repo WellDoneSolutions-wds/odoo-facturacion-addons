@@ -4,6 +4,9 @@ from . import res_company
 from . import account_journal
 from . import account_move_biller
 from . import account_move_ple
+from . import account_move_negocio
+from . import account_move_cliente
+from . import account_move_producto
 from . import account_move_api
 from . import account_move_emision
 from . import account_move_payload

@@ -4,6 +4,10 @@ from . import res_company
 from . import account_journal
 from . import account_move_biller
 from . import account_move_ple
+from . import account_move_baja
+from . import account_move_pdf
+from . import account_move_compras
+from . import account_move_importacion
 from . import stock_move_biller
 from . import account_payment_retencion
 from . import l10n_pe_ne_gasto

@@ -96,3 +96,13 @@ class TestNotaVenta(TransactionCase):
             'medios': [{'medio': 'Efectivo', 'monto': 100.0}]})['id'])
         nv.l10n_pe_ne_set_estado_nota_venta('anulada')
         self.assertFalse(any(v['total'] == 100.0 for v in ses._l10n_pe_ne_ventas_planas()))
+
+    # ---------------------------------------------------------------- Task 5: PDF
+    def test_pdf_render_a4_y_ticket(self):
+        # El PDF (A4 y ticket) renderiza sin excepción y devuelve base64 no vacío.
+        nv = self.NV.l10n_pe_ne_quick_venta({
+            'items': [{'descripcion': 'X', 'cantidad': 1, 'precio': 118.0}],
+            'medios': [{'medio': 'Efectivo', 'monto': 120.0}], 'redondeo': 0.0})
+        rec = self.NV.browse(nv['id'])
+        self.assertTrue(rec.l10n_pe_ne_get_pdf_b64('A4'))
+        self.assertTrue(rec.l10n_pe_ne_get_pdf_b64('TICKET'))

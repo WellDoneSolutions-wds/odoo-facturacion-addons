@@ -36,6 +36,7 @@ _VIS_MENU = {
     # Emitir
     "vePos": ("puedeCobrar",),                             # Venta rápida = cobrar (POS)
     "veCaja": ("puedeCobrar", "puedeSupervisar"),          # supervisor: aprueba descuadres
+    "veNotasVenta": ("puedeCobrar", "puedeSupervisar"),    # venta de mostrador sin comprobante (caja)
     "veEmitir": ("puedeSupervisar",),                      # decisión negocio: emisión manual
     "veComprobantes": ("puedeCotizar", "puedeCobrar", "puedeDespachar",
                        "puedeSupervisar", "esContador"),   # consulta multi-rol; acciones gateadas

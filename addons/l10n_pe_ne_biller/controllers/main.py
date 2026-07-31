@@ -153,6 +153,10 @@ class L10nPeNeApi(http.Controller):
         u = self._user(uid)
         return request.env["l10n_pe_ne.cotizacion"].with_user(uid).with_company(u.company_id)
 
+    def _nota_venta(self, uid):
+        u = self._user(uid)
+        return request.env["l10n_pe_ne.nota_venta"].with_user(uid).with_company(u.company_id)
+
     def _guia(self, uid):
         u = self._user(uid)
         return request.env["l10n_pe_ne.guia_remision"].with_user(uid).with_company(u.company_id)
@@ -1320,6 +1324,92 @@ class L10nPeNeApi(http.Controller):
         return self._run(
             lambda: self._cotizacion(uid).l10n_pe_ne_delete_cotizacion(int(rec_id))
         )
+
+    # ------------------------------------------------------------- notas de venta
+    # Venta REAL cobrada SIN comprobante SUNAT (documento interno, NO CPE). Modelo
+    # l10n_pe_ne.nota_venta. Alimenta la caja. No hay DELETE: una venta se ANULA (estado).
+    @http.route("/ne/api/notas-venta", **_GET)
+    def list_notas_venta(self, q=None, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        try:
+            pg = self._page_args(kw)
+            res = self._nota_venta(uid).l10n_pe_ne_list_notas_venta(
+                query=q or None,
+                limit=pg["limit"] if pg else 100,
+                offset=pg["offset"] if pg else None,
+            )
+            if pg:
+                res = {**res, "page": pg["page"], "pageSize": pg["pageSize"]}
+            return self._json(res)
+        except Exception as e:  # noqa: BLE001
+            return self._fail(e)
+
+    @http.route("/ne/api/notas-venta", **_POST)
+    def create_nota_venta(self, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(
+            lambda: self._nota_venta(uid).l10n_pe_ne_quick_venta(self._body())
+        )
+
+    @http.route("/ne/api/notas-venta/<int:rec_id>", **_PUT)
+    def update_nota_venta(self, rec_id, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(
+            lambda: self._nota_venta(uid).l10n_pe_ne_update_nota_venta(
+                dict(self._body(), id=int(rec_id))
+            )
+        )
+
+    @http.route("/ne/api/notas-venta/<int:rec_id>/detalle", **_GET)
+    def nota_venta_detalle(self, rec_id, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        try:
+            nv = self._nota_venta(uid).browse(rec_id).exists()
+            if not nv:
+                return self._err("Nota de venta no encontrada", 404)
+            return self._json(nv.l10n_pe_ne_nota_venta_detalle())
+        except Exception as e:  # noqa: BLE001
+            return self._fail(e)
+
+    @http.route("/ne/api/notas-venta/<int:rec_id>/estado", **_POST)
+    def nota_venta_estado(self, rec_id, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+
+        def op():
+            nv = self._nota_venta(uid).browse(int(rec_id)).exists()
+            if not nv:
+                raise UserError("Nota de venta no encontrada.")
+            return nv.l10n_pe_ne_set_estado_nota_venta((self._body() or {}).get("estado") or "")
+
+        return self._run(op)
+
+    @http.route("/ne/api/notas-venta/<int:rec_id>/pdf", **_GET)
+    def nota_venta_pdf(self, rec_id, formato=None, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        try:
+            nv = self._nota_venta(uid).browse(rec_id).exists()
+            if not nv:
+                return self._err("Nota de venta no encontrada", 404)
+            report = ("l10n_pe_ne_biller.action_report_nota_venta_ticket"
+                      if formato == "TICKET" else "l10n_pe_ne_biller.action_report_nota_venta")
+            pdf, _ctype = nv.env["ir.actions.report"]._render_qweb_pdf(report, res_ids=nv.ids)
+            return request.make_response(pdf, headers=[
+                ("Content-Type", "application/pdf"),
+                ("Content-Disposition", 'inline; filename="%s.pdf"' % nv.name)])
+        except Exception as e:  # noqa: BLE001
+            return self._fail(e)
 
     # -------------------------------------------------------- guías de remisión
     # GRE Remitente (tipo 09). Documento de traslado, NO es un comprobante account.move.

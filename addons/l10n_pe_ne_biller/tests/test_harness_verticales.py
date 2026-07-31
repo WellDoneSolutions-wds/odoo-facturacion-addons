@@ -95,6 +95,12 @@ class TestHarnessVerticales(L10nPeSeedMixin, EnvioSincronoMixin, TransactionCase
                     {'descripcion': 'ALQUILER EQUIPO', 'cantidad': 15, 'precioUnitario': 80,
                      'taxCode': '1000', 'unidad': 'DAY'},
                 ]}),
+            ('alquiler · arrendamiento con detracción 019 (10%)', {
+                'tipoDoc': '01', 'moneda': 'PEN', 'serie': 'F001', 'cliente': self._RUC,
+                'lineas': [{'descripcion': 'ALQUILER LOCAL · Alquiler del 01/07/2026 al 31/07/2026',
+                            'cantidad': 1, 'precioUnitario': 3000, 'taxCode': '1000', 'unidad': 'ZZ'}],
+                'detraccion': {'codBien': '019', 'tasa': 10, 'cuentaBN': '00-123-456789'},
+                'formaPago': {'tipo': 'Credito', 'cuotas': [{'fecha': '2026-12-31', 'monto': 3186}]}}),
         ]
 
     def test_corpus_valido(self):

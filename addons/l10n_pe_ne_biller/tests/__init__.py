@@ -25,3 +25,4 @@ from . import test_peso_ferreteria
 from . import test_maderera_textil
 from . import test_liquidacion
 from . import test_servicios_tiempo
+from . import test_alquiler

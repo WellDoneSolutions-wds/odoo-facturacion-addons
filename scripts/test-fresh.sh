@@ -26,10 +26,10 @@ DBARGS="--db_host=db --db_user=$DBUSER --db_password=$DBPASS --http-port=8899 --
 run() { docker exec "$ODOO_CT" odoo -d "$DB" $DBARGS --stop-after-init "$@"; }
 
 echo ">> [1/4] BD fresca: $DB (drop + create)"
-# Cierra conexiones colgadas (una corrida anterior interrumpida deja sesiones) antes del DROP.
-docker exec "$DB_CT" psql -U "$DBUSER" -d postgres -c \
-  "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='$DB' AND pid<>pg_backend_pid();" >/dev/null 2>&1 || true
-docker exec "$DB_CT" psql -U "$DBUSER" -d postgres -c "DROP DATABASE IF EXISTS $DB;" >/dev/null
+# WITH (FORCE): termina conexiones colgadas y dropea atómico (Postgres 13+). Una corrida
+# anterior interrumpida (o el pool de odoo) deja sesiones; sin FORCE el DROP falla con
+# "database is being accessed by other users".
+docker exec "$DB_CT" psql -U "$DBUSER" -d postgres -c "DROP DATABASE IF EXISTS $DB WITH (FORCE);" >/dev/null
 docker exec "$DB_CT" psql -U "$DBUSER" -d postgres -c "CREATE DATABASE $DB OWNER $DBUSER;" >/dev/null
 
 echo ">> [2/4] instalar módulos ($MODULES) sin demo"
@@ -48,6 +48,6 @@ echo "-----------------------------------------------------------------"
 echo "$OUT" | grep -iE 'of [0-9]+ tests' | tail -1
 
 if [ "${KEEP:-0}" != "1" ]; then
-  docker exec "$DB_CT" psql -U "$DBUSER" -d postgres -c "DROP DATABASE IF EXISTS $DB;" >/dev/null
+  docker exec "$DB_CT" psql -U "$DBUSER" -d postgres -c "DROP DATABASE IF EXISTS $DB WITH (FORCE);" >/dev/null
   echo ">> BD $DB borrada (KEEP=1 para conservarla)"
 fi

@@ -3,13 +3,13 @@ from unittest.mock import patch
 from odoo.exceptions import UserError
 from odoo.tests import TransactionCase, tagged
 
-from .common import EnvioSincronoMixin
+from .common import L10nPeSeedMixin, EnvioSincronoMixin
 
 _TARGET = 'odoo.addons.l10n_pe_ne_biller.models.account_move_biller.requests.post'
 
 
 @tagged('post_install', '-at_install')
-class TestBillerTaxFaltante(EnvioSincronoMixin, TransactionCase):
+class TestBillerTaxFaltante(L10nPeSeedMixin, EnvioSincronoMixin, TransactionCase):
     """Emisión cuando la tax de la afectación NO existe en el plan de la compañía.
 
     Caso real (demo): la BD solo tenía el IGV (1000). Una boleta exonerada (9997)

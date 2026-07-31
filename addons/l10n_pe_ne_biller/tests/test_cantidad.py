@@ -1,8 +1,9 @@
 from odoo.tests import TransactionCase, tagged
+from .common import L10nPeSeedMixin
 
 
 @tagged('post_install', '-at_install')
-class TestBillerCantidad(TransactionCase):
+class TestBillerCantidad(L10nPeSeedMixin, TransactionCase):
     """Cantidad con 3 decimales para la venta al peso de balanza (QA-020): no se trunca a 2.
     Antes, con la precisión de UoM de Odoo en 2, 18.375 kg se emitía como 18.38 y el total salía
     S/ 180.13 en vez de los S/ 180.08 del peso exacto."""

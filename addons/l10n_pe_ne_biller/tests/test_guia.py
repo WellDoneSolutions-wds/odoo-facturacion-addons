@@ -5,10 +5,11 @@ from unittest.mock import patch
 
 from odoo.exceptions import UserError
 from odoo.tests import TransactionCase, tagged
+from .common import L10nPeSeedMixin
 
 
 @tagged("post_install", "-at_install")
-class TestGuiaBase(TransactionCase):
+class TestGuiaBase(L10nPeSeedMixin, TransactionCase):
     def setUp(self):
         super().setUp()
         self.Guia = self.env["l10n_pe_ne.guia_remision"]

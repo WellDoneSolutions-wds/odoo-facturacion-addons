@@ -2,10 +2,11 @@ import base64
 
 from odoo.exceptions import UserError
 from odoo.tests import TransactionCase, tagged
+from .common import L10nPeSeedMixin
 
 
 @tagged('post_install', '-at_install')
-class TestPleCompras(TransactionCase):
+class TestPleCompras(L10nPeSeedMixin, TransactionCase):
     """PLE 8.1 (Registro de Compras).
 
     ⚠ La ESTRUCTURA está pendiente de validación contable: los anexos de SUNAT con el layout

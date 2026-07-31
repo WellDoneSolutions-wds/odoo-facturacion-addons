@@ -1,8 +1,9 @@
 from odoo.tests import TransactionCase, tagged
+from .common import L10nPeSeedMixin
 
 
 @tagged('post_install', '-at_install')
-class TestOrdenCompra(TransactionCase):
+class TestOrdenCompra(L10nPeSeedMixin, TransactionCase):
     """Orden de compra del cliente → cac:OrderReference (documento relacionado indDocRelacionado 3).
 
     Debe ir PRIMERO en la lista de relacionados: en el UBL Invoice el OrderReference precede a

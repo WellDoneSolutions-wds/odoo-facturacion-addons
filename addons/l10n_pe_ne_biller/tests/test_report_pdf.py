@@ -4,6 +4,7 @@ import zipfile
 from unittest.mock import patch
 
 from odoo.tests import TransactionCase, tagged
+from .common import L10nPeSeedMixin
 from odoo.exceptions import UserError
 
 _TARGET = 'odoo.addons.l10n_pe_ne_biller.models.account_move_biller.requests.post'
@@ -20,7 +21,7 @@ def _cdr_zip_b64():
 
 
 @tagged('post_install', '-at_install')
-class TestBillerReportPdf(TransactionCase):
+class TestBillerReportPdf(L10nPeSeedMixin, TransactionCase):
     """Representación impresa (PDF) y descargas: el addon pide el PDF al micro (/report/pdf) con el
     XML firmado, lo cachea como adjunto y expone acciones de descarga. El micro se mockea."""
 

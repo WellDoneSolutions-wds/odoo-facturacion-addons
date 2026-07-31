@@ -23,15 +23,37 @@ class TestBillerDescuento(TransactionCase):
             'l10n_latam_identification_type_id': ruc_type.id})
         self.product = self.env['product.product'].create({'name': 'PROD', 'default_code': 'P1'})
 
-    def _move(self, discount):
+    def _move(self, discount, price_unit=500.0, quantity=1.0):
         move = self.env['account.move'].create({
             'move_type': 'out_invoice', 'partner_id': self.partner.id, 'invoice_date': '2026-06-20',
             'l10n_pe_serie': 'F001', 'l10n_pe_correlativo': '1',
-            'invoice_line_ids': [(0, 0, {'product_id': self.product.id, 'quantity': 1.0,
-                                         'price_unit': 500.0, 'discount': discount,
+            'invoice_line_ids': [(0, 0, {'product_id': self.product.id, 'quantity': quantity,
+                                         'price_unit': price_unit, 'discount': discount,
                                          'tax_ids': [(6, 0, self.igv.ids)]})]})
         move.action_post()
         return move
+
+    def test_descuento_monto_fijo_reproduce_total_exacto(self):
+        """Descuento por ítem tecleado en S/ (monto fijo), no como %: S/10 sobre un precio de
+        760 c/IGV. La SPA convierte ese monto a un % de PRECISIÓN COMPLETA (10/760 =
+        1.3157894…%) justamente para que el total emitido reproduzca EXACTO lo que el usuario
+        tecleó y previsualizó (750.00). Con la precisión decimal 'Discount' por defecto de Odoo
+        (2), el % se truncaba a 1.32 y el total salía 749.97 — se cobraba 0.03 de menos y el
+        emitido no coincidía con la vista previa. Fijamos el total al céntimo.
+
+        precio_unit sin IGV = valorBase(760,'1000') = 760/1.18 (la SPA lo manda SIN redondear).
+        discount            = descuentoPct(S/10 sobre bruto 760) = (10/760)*100."""
+        precio_sin_igv = 760.0 / 1.18                 # = 644.0677966…  (como manda la SPA)
+        desc_pct = (10.0 / 760.0) * 100.0             # = 1.3157894…%   (monto fijo -> %)
+        payload = self._move(desc_pct, price_unit=precio_sin_igv)._l10n_pe_build_invoice_request()
+        d = payload['detalle'][0]
+        self.assertEqual(d['mtoValorVentaItem'], '635.59')   # base neta gravada (no 635.57)
+        self.assertEqual(d['mtoIgvItem'], '114.41')          # IGV sobre el neto (no 114.40)
+        cab = payload['cabecera']
+        self.assertEqual(cab['sumTotValVenta'], '635.59')    # gravada de cabecera
+        self.assertEqual(cab['sumTotTributos'], '114.41')    # IGV de cabecera
+        # El importe que PAGA el cliente == lo tecleado (760 - 10), al céntimo:
+        self.assertEqual(cab['sumImpVenta'], '750.00')       # antes del fix: 749.97
 
     def test_descuento_item(self):
         payload = self._move(10.0)._l10n_pe_build_invoice_request()

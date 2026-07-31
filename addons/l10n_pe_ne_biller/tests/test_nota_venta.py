@@ -41,3 +41,37 @@ class TestNotaVenta(TransactionCase):
         self.assertEqual(nv.amount_total, 50.0)
         self.assertEqual(nv.amount_tax, 0.0)
         self.assertEqual(nv.amount_op_no_gravada, 50.0)
+
+    # ---------------------------------------------------------------- Task 2: API
+    def test_quick_venta_registrada_y_medios(self):
+        nv = self.NV.l10n_pe_ne_quick_venta({
+            'clienteId': self.partner.id,
+            'items': [{'descripcion': 'X', 'cantidad': 2, 'precio': 59.0, 'afectoIgv': True}],
+            'medios': [{'medio': 'Efectivo', 'monto': 118.0}], 'redondeo': 0.0})
+        rec = self.NV.browse(nv['id'])
+        self.assertEqual(rec.estado, 'registrada')
+        self.assertEqual(rec.amount_total, 118.0)
+        self.assertEqual(rec.medios_pago, [{'medio': 'Efectivo', 'monto': 118.0}])
+
+    def test_quick_venta_cliente_opcional(self):
+        nv = self.NV.l10n_pe_ne_quick_venta({
+            'items': [{'descripcion': 'X', 'cantidad': 1, 'precio': 10.0}]})
+        rec = self.NV.browse(nv['id'])
+        self.assertFalse(rec.partner_id)
+        self.assertEqual(rec.l10n_pe_ne_nota_venta_detalle()['cliente'], 'Cliente varios')
+
+    def test_anular_y_inmutable(self):
+        nv = self._nota(estado='registrada')
+        nv.l10n_pe_ne_set_estado_nota_venta('anulada')
+        self.assertEqual(nv.estado, 'anulada')
+        with self.assertRaises(UserError):
+            nv.l10n_pe_ne_set_estado_nota_venta('registrada')
+
+    def test_convertida_bloquea_update(self):
+        nv = self._nota(estado='registrada')
+        move = self.env['account.move'].create({'move_type': 'out_invoice', 'partner_id': self.partner.id})
+        nv.l10n_pe_ne_vincular_comprobante(move.id)
+        self.assertEqual(nv.estado, 'convertida')
+        self.assertEqual(nv.comprobante_id, move)
+        with self.assertRaises(UserError):
+            self.NV.l10n_pe_ne_update_nota_venta({'id': nv.id, 'items': [{'descripcion': 'Y', 'cantidad': 1, 'precio': 5}]})

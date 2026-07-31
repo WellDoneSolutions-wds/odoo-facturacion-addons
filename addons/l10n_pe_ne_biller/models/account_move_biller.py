@@ -4461,6 +4461,53 @@ class AccountMove(models.Model):
         }
 
     @api.model
+    def l10n_pe_ne_reporte_vinculadas_csv(self, ejercicio=None):
+        """Descarga el reporte de operaciones con partes vinculadas como CSV — el sustento que el
+        contador presenta con la Declaración Jurada (Reporte Local, precios de transferencia).
+
+        Devuelve {filename, contentB64, count}, mismo contrato que los PLE. CSV separado por ';'
+        (Excel es-PE) y en UTF-8 con BOM para que las tildes (vínculo, país) salgan bien. Lleva
+        una cabecera con el cruce de umbrales (¿obligado al Reporte Local?) y la tabla por cliente."""
+        rep = self.l10n_pe_ne_reporte_vinculadas(ejercicio)
+        u = rep["umbrales"]
+        mon = rep["moneda"]
+
+        def celda(v):
+            # Escapa comillas/;/salto de línea para un CSV robusto.
+            s = "" if v is None else str(v)
+            return '"%s"' % s.replace('"', '""') if any(c in s for c in ';"\n') else s
+
+        def fila(*vals):
+            return ";".join(celda(v) for v in vals)
+
+        fmt = self._l10n_pe_fmt   # 2 decimales
+        si_no = lambda b: _("Sí") if b else _("No")
+        lineas = [
+            fila(_("Reporte de operaciones con partes vinculadas")),
+            fila(_("Ejercicio"), rep["ejercicio"]),
+            fila(_("UIT"), fmt(u["uit"])),
+            fila(_("Ingresos del ejercicio"), fmt(u["ingresos"]), _("Umbral Reporte Local (2300 UIT)"), fmt(u["umbralReporteLocal"])),
+            fila(_("Operaciones con vinculadas"), fmt(u["operacionesVinculadas"]), _("Umbral operaciones (400 UIT)"), fmt(u["umbralOperaciones"])),
+            fila(_("Obligado a presentar Reporte Local"), si_no(u["obligadoReporteLocal"])),
+            "",
+            fila(_("Documento"), _("Cliente"), _("Tipo de vínculo"), _("Cód. vínculo"),
+                 _("No domiciliada"), _("País"), _("Comprobantes"), _("Total (%s)") % mon),
+        ]
+        for it in rep["items"]:
+            lineas.append(fila(
+                it["numDoc"], it["cliente"], it["tipoVinculoNombre"], it["tipoVinculo"],
+                si_no(it["noDomiciliada"]), it["pais"], it["comprobantes"], fmt(it["total"])))
+        lineas.append(fila("", _("TOTAL"), "", "", "", "", rep["comprobantes"], fmt(rep["total"])))
+
+        content = "﻿" + "\r\n".join(lineas) + "\r\n"
+        ruc = self.env.company.vat or ""
+        return {
+            "filename": "vinculadas-%s-%s.csv" % (ruc, rep["ejercicio"]),
+            "contentB64": base64.b64encode(content.encode("utf-8")).decode("ascii"),
+            "count": rep["clientes"],
+        }
+
+    @api.model
     def l10n_pe_ne_ple_ventas(self, periodo):
         """Genera el PLE 14.1 (Registro de Ventas) del periodo YYYYMM desde los
         comprobantes emitidos (01/03/07/08) de la compañía actual. Devuelve

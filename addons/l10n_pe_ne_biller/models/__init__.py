@@ -4,6 +4,11 @@ from . import res_company
 from . import account_journal
 from . import account_move_biller
 from . import account_move_ple
+from . import account_move_api
+from . import account_move_emision
+from . import account_move_payload
+from . import account_move_helpers
+from . import account_move_validacion
 from . import account_move_baja
 from . import account_move_pdf
 from . import account_move_compras

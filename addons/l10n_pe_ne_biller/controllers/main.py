@@ -671,6 +671,17 @@ class L10nPeNeApi(http.Controller):
         except Exception as e:  # noqa: BLE001
             return self._fail(e)
 
+    @http.route("/ne/api/reportes/vinculadas/export", **_GET)
+    def reporte_vinculadas_export(self, ejercicio=None, **kw):
+        """CSV del reporte de vinculadas (sustento DJ) — {filename, contentB64, count}."""
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        try:
+            return self._json(self._move(uid).l10n_pe_ne_reporte_vinculadas_csv(ejercicio))
+        except Exception as e:  # noqa: BLE001
+            return self._fail(e)
+
     @http.route("/ne/api/reportes/export", **_GET)
     def export(self, tipo="ventas", periodo=None, **kw):
         """Centro de descargas: exporta ventas|productos|clientes a XLSX (base64)."""

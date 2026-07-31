@@ -1,3 +1,5 @@
+import base64
+
 from odoo.tests import TransactionCase, tagged
 
 from .common import L10nPeSeedMixin
@@ -132,3 +134,25 @@ class TestVinculadas(L10nPeSeedMixin, TransactionCase):
         self.assertTrue(item['noDomiciliada'])  # país CL
         self.assertAlmostEqual(item['total'], round((500 + 700) * 1.18, 2), delta=0.02)
         self.assertIn('umbrales', rep)  # cruza con V4
+
+    # ---- Export DJ (CSV) -----------------------------------------------------------------
+    def test_export_csv_lleva_cabecera_de_umbrales_y_la_tabla(self):
+        vinc = self._partner('VINC-CSV SA', '2010007106', vinculada=True, tipo='03', pais='CL')
+        self._emitido(vinc, 500)
+        self._emitido(vinc, 700)
+        res = self.Move.l10n_pe_ne_reporte_vinculadas_csv(2026)
+        self.assertEqual(res['count'], 1)
+        self.assertTrue(res['filename'].endswith('-2026.csv'))
+        csv = base64.b64decode(res['contentB64']).decode('utf-8')
+        self.assertTrue(csv.startswith('﻿'))                 # BOM para Excel
+        self.assertIn('Reporte de operaciones con partes vinculadas', csv)
+        self.assertIn('Obligado a presentar Reporte Local', csv)
+        self.assertIn('VINC-CSV SA', csv)                          # fila del cliente
+        self.assertIn('%.2f' % round((500 + 700) * 1.18, 2), csv)  # total del cliente
+        self.assertIn('TOTAL', csv)                                # fila de totales
+
+    def test_export_csv_vacio_no_revienta(self):
+        res = self.Move.l10n_pe_ne_reporte_vinculadas_csv(2026)
+        self.assertEqual(res['count'], 0)
+        csv = base64.b64decode(res['contentB64']).decode('utf-8')
+        self.assertIn('Documento', csv)   # la tabla existe aunque no haya filas

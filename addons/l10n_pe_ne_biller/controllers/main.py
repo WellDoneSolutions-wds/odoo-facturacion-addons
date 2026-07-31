@@ -757,6 +757,9 @@ class L10nPeNeApi(http.Controller):
                 return self._payment(uid).l10n_pe_ne_quick_retencion(payload)
             if tipo == "40":
                 return self._payment(uid).l10n_pe_ne_quick_percepcion(payload)
+            if tipo == "04":
+                # Liquidación de compra: es una COMPRA que además se emite a SUNAT.
+                return self._move(uid).l10n_pe_ne_emitir_liquidacion(payload)
             return self._move(uid).l10n_pe_ne_quick_emit(payload)
 
         return self._run(op)

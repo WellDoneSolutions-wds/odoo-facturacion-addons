@@ -260,6 +260,14 @@ class AccountMove(models.Model):
     l10n_pe_ne_tipo_doc = fields.Char(
         string="Tipo doc. emitido", copy=False, readonly=True
     )
+    # Liquidación de compra (comprobante tipo 04): la emite el COMPRADOR (con RUC) cuando le
+    # compra a un productor/vendedor SIN RUC (agropecuario, recolección, artesanía). Es una
+    # COMPRA (in_invoice): la mercadería ENTRA al stock y va al PLE de compras; pero además se
+    # emite electrónicamente a SUNAT como SelfBilledInvoice. El flag marca ese cruce.
+    l10n_pe_ne_liquidacion = fields.Boolean(
+        string="Liquidación de compra", copy=False,
+        help="Marca esta compra como Liquidación de compra electrónica (tipo 04): se emite a "
+             "SUNAT como comprobante, con el proveedor sin RUC (DNI) como vendedor.")
     l10n_pe_ne_serie_emit = fields.Char(
         string="Serie emitida", copy=False, readonly=True
     )
@@ -1632,8 +1640,13 @@ class AccountMove(models.Model):
         return raw, name, ct
 
     def _l10n_pe_document_type(self):
-        """Código SUNAT del comprobante: 01 Factura, 03 Boleta, 07 NC, 08 ND."""
+        """Código SUNAT del comprobante: 01 Factura, 03 Boleta, 04 Liquidación de compra, 07 NC,
+        08 ND."""
         self.ensure_one()
+        # Liquidación de compra: es un in_invoice (compra) que igual se emite a SUNAT como 04.
+        # Va primero porque para un in_invoice el resto del método devolvería '03' por defecto.
+        if self.l10n_pe_ne_liquidacion:
+            return "04"
         if self.move_type == "out_refund":
             return "07"
         if self.move_type == "out_invoice" and self.debit_origin_id:
@@ -1656,8 +1669,12 @@ class AccountMove(models.Model):
 
     def _l10n_pe_serie_prefix(self):
         """Letra que SUNAT exige en la serie: F para Factura (01) y sus notas, B para Boleta (03)
-        y las suyas. En NC/ND manda la familia del documento afectado, no el partner."""
+        y las suyas, E para Liquidación de compra (04). En NC/ND manda la familia del documento
+        afectado, no el partner."""
         self.ensure_one()
+        # La liquidación de compra electrónica usa serie que empieza con 'E' (4 posiciones).
+        if self.l10n_pe_ne_liquidacion:
+            return "E"
         origin = self.reversed_entry_id or self.debit_origin_id
         if origin:
             tipo = origin.l10n_pe_ne_tipo_doc or origin._l10n_pe_document_type()
@@ -1712,11 +1729,12 @@ class AccountMove(models.Model):
         sistema (F001/B001 y las notas FC01/FD01/BC01/BD01). No se usa el histórico de series
         ya emitidas a propósito: una serie inventada usada por error no debe volverse 'válida'."""
         self.ensure_one()
-        validas = {"F001", "B001", "FC01", "FD01", "BC01", "BD01"}
+        # E001 = serie por defecto de la liquidación de compra electrónica (tipo 04).
+        validas = {"F001", "B001", "FC01", "FD01", "BC01", "BD01", "E001"}
         journals = self.env["account.journal"].sudo().search(
             [
                 ("company_id", "=", self.company_id.id),
-                ("type", "=", "sale"),
+                ("type", "in", ("sale", "purchase")),
                 ("l10n_pe_ne_serie", "!=", False),
             ]
         )
@@ -1725,6 +1743,8 @@ class AccountMove(models.Model):
             if len(base) >= 2 and base[0] in ("F", "B"):
                 validas.add("F" + base[1:])
                 validas.add("B" + base[1:])
+            elif len(base) >= 2 and base[0] == "E":
+                validas.add(base)
         return validas
 
     def _l10n_pe_product_lines(self):
@@ -3467,6 +3487,96 @@ class AccountMove(models.Model):
         if not enviar:
             # Pre-flight: el comprobante quedó armado y posteado pero NO se envía a SUNAT.
             # El llamador (l10n_pe_ne_preflight) valida y revierte la transacción.
+            return move
+        move.action_l10n_pe_send_to_biller()
+        return move.l10n_pe_ne_quick_result()
+
+    @api.model
+    def l10n_pe_ne_emitir_liquidacion(self, payload, enviar=True):
+        """Emite una Liquidación de compra (tipo 04) desde un payload plano de la SPA.
+
+        A diferencia de quick_emit (venta), la liquidación es una COMPRA: la emite el comprador
+        (con RUC) a un productor/vendedor SIN RUC (con DNI). Por eso el move es un `in_invoice`,
+        la mercadería ENTRA al stock (kardex de compra → PLE de compras) y el pasivo queda a favor
+        del productor; pero además se emite electrónicamente a SUNAT como SelfBilledInvoice — la
+        plantilla del facturador intercambia los roles (el emisor va como Customer, el productor
+        como Supplier), así que el payload reusa el mismo build de factura.
+
+        `enviar=False` arma y postea sin enviar (lo usa el pre-flight)."""
+        company = self.env.company
+        journal = self.env["account.journal"].search(
+            [("type", "=", "purchase"), ("company_id", "=", company.id)], limit=1)
+        if not journal:
+            raise UserError(_("No hay diario de compras configurado para la compañía."))
+        productor = self._l10n_pe_ne_quick_partner(
+            payload.get("proveedor") or payload.get("cliente") or {})
+        # La liquidación es a un vendedor SIN RUC (productor agropecuario/recolector/artesano):
+        # SUNAT rechaza una liquidación a un RUC. Se corta con un mensaje claro.
+        if (productor.l10n_latam_identification_type_id.l10n_pe_vat_code or "") == "6":
+            raise UserError(_(
+                "La liquidación de compra es para un vendedor SIN RUC (con DNI u otro documento). "
+                "«%s» tiene RUC; para comprarle usa el registro de compras normal."
+            ) % (productor.display_name or ""))
+        lines = []
+        for ln in payload.get("lineas") or []:
+            # La liquidación de compra siempre compra BIENES tangibles (agropecuario, recolección,
+            # artesanía) que ENTRAN al inventario: el producto auto-creado lleva stock por defecto
+            # (a diferencia de una venta, donde is_storable arranca en False).
+            ln = dict(ln)
+            ln.setdefault("llevaStock", True)
+            tax = self._l10n_pe_ne_tax_by_code(ln.get("taxCode"))
+            if not tax:
+                raise UserError(_(
+                    "No hay un impuesto de venta con código SUNAT %(code)s configurado para la "
+                    "compañía (línea «%(linea)s»)."
+                ) % {"code": ln.get("taxCode") or "1000",
+                     "linea": (ln.get("descripcion") or "").strip() or "ITEM"})
+            prod = self._l10n_pe_ne_quick_product(ln, tax, create=True, precio_con_igv=False)
+            lvals = {
+                "name": ln.get("descripcion") or (prod.name if prod else "ITEM"),
+                "quantity": float(ln.get("cantidad") or 1),
+                "price_unit": float(ln.get("precioUnitario") or 0),
+                "discount": float(ln.get("descuento") or 0),
+                "tax_ids": [(6, 0, tax.ids)],
+            }
+            if prod:
+                lvals["product_id"] = prod.id
+            if ln.get("unidad"):
+                lvals["l10n_pe_ne_unit_code"] = ln["unidad"]
+            if ln.get("codSunat"):
+                lvals["l10n_pe_ne_cod_producto_sunat"] = ln["codSunat"]
+            lines.append((0, 0, lvals))
+        if not lines:
+            raise UserError(_("La liquidación necesita al menos una línea."))
+        doc04 = self.env.ref("l10n_pe.document_type04", raise_if_not_found=False)
+        vals = {
+            "move_type": "in_invoice",
+            "partner_id": productor.id,
+            "journal_id": journal.id,
+            "invoice_date": payload.get("fechaEmision") or self._l10n_pe_ne_today_lima(),
+            "l10n_pe_serie": payload.get("serie") or "E001",
+            "l10n_pe_ne_liquidacion": True,
+            "invoice_line_ids": lines,
+        }
+        if doc04:
+            vals["l10n_latam_document_type_id"] = doc04.id
+        if payload.get("correlativo"):
+            vals["l10n_pe_correlativo"] = str(payload["correlativo"])
+        moneda = self._l10n_pe_ne_quick_currency(payload.get("moneda"))
+        if moneda:
+            vals["currency_id"] = moneda.id
+        move = self.env["account.move"].create(vals)
+        # Un in_invoice (compra) exige el número de documento ANTES de postear. En una liquidación
+        # ese número es la serie-correlativo que asigna el COMPRADOR (no un proveedor): se fija el
+        # correlativo fiscal ya, y se refleja en l10n_latam_document_number para la contabilidad.
+        move._l10n_pe_check_serie()
+        move._l10n_pe_ne_assign_numero()
+        move.l10n_latam_document_number = "%s-%s" % (
+            move.l10n_pe_ne_serie_emit, move.l10n_pe_ne_corr_emit)
+        move.action_post()
+        # Kardex: la mercadería comprada ENTRA al stock (misma mecánica que una compra normal).
+        move._l10n_pe_ne_mover_stock_compra()
+        if not enviar:
             return move
         move.action_l10n_pe_send_to_biller()
         return move.l10n_pe_ne_quick_result()

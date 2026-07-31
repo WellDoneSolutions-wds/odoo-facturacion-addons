@@ -123,10 +123,12 @@ class TestBillerTaxFaltante(L10nPeSeedMixin, EnvioSincronoMixin, TransactionCase
     def test_linea_precio_cero_sin_tax_no_bloquea(self):
         """La NC motivo 03 (corrección de texto) emite líneas de importe 0: sin base
         imponible no hay 3111 posible y no debe bloquearse."""
+        # Motivo 03 (corrección de texto): la regla SUNAT 2028 (gravada con importe 0) NO aplica,
+        # porque estas líneas van a valor 0 por diseño. La NC 07 es el tipo real de la corrección.
         move = self.env['account.move'].create({
-            'move_type': 'out_invoice', 'partner_id': self.partner.id,
-            'invoice_date': '2026-06-20', 'l10n_pe_serie': 'F001',
-            'l10n_pe_correlativo': '78',
+            'move_type': 'out_refund', 'partner_id': self.partner.id,
+            'invoice_date': '2026-06-20', 'l10n_pe_serie': 'FC01',
+            'l10n_pe_correlativo': '78', 'l10n_pe_motivo_code': '03',
             'invoice_line_ids': [
                 (0, 0, {'product_id': self.product.id, 'quantity': 1.0,
                         'price_unit': 100.0,
@@ -135,7 +137,7 @@ class TestBillerTaxFaltante(L10nPeSeedMixin, EnvioSincronoMixin, TransactionCase
                         'price_unit': 0.0, 'tax_ids': [(6, 0, [])]}),
             ]})
         move.action_post()
-        move._l10n_pe_build_invoice_request()   # no debe levantar
+        move._l10n_pe_build_invoice_request()   # motivo 03 con líneas en 0: no debe levantar
 
     # -- anticipo sobre operación con tax auto-creada: mensaje claro, no XML inválido --------
 

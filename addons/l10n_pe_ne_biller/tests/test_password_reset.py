@@ -137,7 +137,7 @@ class TestPasswordResetRoutes(HttpCase):
         old_token = self.env['res.users.apikeys'].with_user(user).sudo()._generate('l10n_pe_ne', 'test', False)
         r = self.url_open(
             '/ne/api/change-password',
-            data=json.dumps({'current': 'oldpass12', 'new': 'nuevapass99'}),
+            data=json.dumps({'current': 'oldpass12', 'new': 'NuevaPass99'}),
             headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ' + old_token},
         )
         self.assertEqual(r.status_code, 200)

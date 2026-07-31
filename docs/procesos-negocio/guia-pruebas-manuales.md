@@ -144,23 +144,31 @@ mezcla taller y terminados, se separan en dos órdenes (decisión de negocio).*
    ✔ *Verifica*: el siguiente adelanto vuelve a ser recibo interno (sin comprobante) — Vía B
    intacta.
 
-### E5 · Segregación por rol — qué ve (y qué NO) cada uno
+### E5 · Segregación por rol — el menú COMPLETO por rol (matriz H-3b)
 
-Entra con cada usuario y verifica su mundo:
+La matriz revisada con negocio vive en **[menu-por-rol.md](menu-por-rol.md)** y el spec
+`e2e/menu-por-rol.spec.ts` la fija en regresión. Entra con cada usuario y verifica que ve
+EXACTAMENTE esto (y nada más):
 
-| Usuario | Ve en el nav | NO ve | Detalle clave |
-|---|---|---|---|
-| `vendedor1` | Cotizaciones, Órdenes | Venta rápida, Caja | sin pestañas de cobro/despacho; su modal de Nueva orden NO tiene campos de adelanto |
-| `cajero1` | + Venta rápida, Caja | Equipo, Políticas | Cotizaciones SÍ está en su nav (su cola vive adentro) |
-| `operario1` | Órdenes | pestañas de caja | solo Tomar/Terminar |
-| `despachador1` | Cotizaciones | pestaña de cobro | solo Cola de despacho |
-| `contador1` | todo en lectura | ningún botón de acción | listas cargan, cero acciones |
-| `supervisor1` | + Políticas | — | anula con motivo |
-| `duenio1` | + Equipo | — | alta/roles/desactivar |
+| Usuario | Ve en el nav | Detalle clave |
+|---|---|---|
+| `vendedor1` | Comprobantes 👁, Cotizaciones, Órdenes, Clientes, Productos 👁 | NADA de caja, emisión, guías, reportes ni compras; su modal de Nueva orden no tiene campos de adelanto |
+| `cajero1` | + Venta rápida, Caja, Gastos | Cotizaciones/Órdenes SÍ (sus bandejas de cobro viven adentro) |
+| `operario1` | SOLO Órdenes | ni dinero, ni puerta, ni reportes — y las secciones vacías del nav ni se pintan |
+| `despachador1` | Comprobantes 👁, Cotizaciones (su Cola de despacho CN-01 vive adentro), Órdenes, Guías, Productos 👁, Compras, Frecuentes | recepciona y entrega; jamás cobra |
+| `contador1` | Comprobantes 👁 + los 4 reportes (Análisis, Libros, Vinculadas, Descargas) | solo lectura: listas cargan, cero acciones |
+| `supervisor1` | TODO menos Venta rápida (el POS es cobrar; él aprueba) + Políticas | incluye Nuevo comprobante y Emisión masiva — decisión de negocio; el CTA del topbar sigue el mismo gate |
+| `duenio1` | lo del supervisor + Equipo | hereda por implicación; alta/roles/desactivar |
+| `modal` | lo del supervisor + Venta rápida (por su rol caja) | sin Equipo (no es dueño) ni Componentes UI (no es admin) |
+
+✔ *Retrocompatibilidad* (decisión en [menu-por-rol.md](menu-por-rol.md)): quedan FUERA de la
+matriz — sin claves `ve*`, menú operativo completo — el legacy solo-`emisor`, el
+solo-`anulación` y el usuario sin grupos NE; el admin de plataforma también. Fijado en el
+backend (`test_menu_legacy_emisor_sin_claves`, `test_menu_admin_plataforma_sin_claves`).
 
 ✔ *Negativo transversal*: pega a mano una URL que "no te toca" (ej. `/cotizaciones?tab=cobro`
 como operario): la página carga pero **sin los botones**, y cualquier POST forzado rebota en el
-backend con 403.
+backend con 403 — el menú es UX, el muro es el endpoint.
 
 ### E6 · Caja — conteo ciego, arqueo por medio, voucher, gastos
 

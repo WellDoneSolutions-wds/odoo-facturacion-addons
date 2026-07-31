@@ -538,15 +538,19 @@ class TestOrdenTrabajoViaA(EnvioSincronoMixin, TransactionCase):
         final = orden.factura_final_id
         self.assertTrue(final)
         # el final trae el anticipo con su total y su doc en formato SERIE-00000000, derivado del
-        # comprobante del anticipo REALMENTE emitido.
-        self.assertEqual(final.l10n_pe_ne_anticipo_total, orden.adelanto_monto)
+        # comprobante del anticipo REALMENTE emitido. (a648145 movió los escalares
+        # l10n_pe_ne_anticipo_total/doc/tipo/origen_id a la lista JSON l10n_pe_ne_anticipos —
+        # una regularización puede traer N anticipos; aquí hay exactamente uno.)
+        ants = final._l10n_pe_ne_anticipos_list()
+        self.assertEqual(len(ants), 1)
+        self.assertEqual(ants[0]["monto"], orden.adelanto_monto)
         doc_esperado = "%s-%s" % (ant.l10n_pe_ne_serie_emit, (ant.l10n_pe_ne_corr_emit or "").zfill(8))
-        self.assertEqual(final.l10n_pe_ne_anticipo_doc, doc_esperado)
-        self.assertRegex(final.l10n_pe_ne_anticipo_doc, r"^F\d{3}-\d{8}$")   # factura → serie F
-        self.assertEqual(final.l10n_pe_ne_anticipo_tipo, "02")              # RUC → factura (cat. 12)
+        self.assertEqual(ants[0]["doc"], doc_esperado)
+        self.assertRegex(ants[0]["doc"], r"^F\d{3}-\d{8}$")   # factura → serie F
+        self.assertEqual(ants[0]["tipo"], "02")               # RUC → factura (cat. 12)
         # Modelo formal: la regularización ENLAZA el doc. A (origen) y consume su saldo — la
         # validación del biller impediría aplicar este anticipo otra vez.
-        self.assertEqual(final.l10n_pe_ne_anticipo_origen_id, ant)
+        self.assertEqual(ants[0]["origenId"], ant.id)
         self.assertEqual(ant.l10n_pe_ne_anticipo_aplicado, orden.adelanto_monto)
         self.assertEqual(ant.l10n_pe_ne_anticipo_saldo, 0.0)
         # contrato del biller (test_anticipo): el XML descuenta el anticipo y lo informa.

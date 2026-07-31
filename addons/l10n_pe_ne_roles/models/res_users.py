@@ -25,6 +25,43 @@ _ROL_CAP = {
     "l10n_pe_ne_roles.group_l10n_pe_ne_duenio": "esDuenio",
 }
 
+# ─────────────────────────────────────────────────── H-3b · menú por rol
+# Visibilidad de cada ÍTEM del menú de la SPA (matriz revisada con negocio,
+# docs/procesos-negocio/menu-por-rol.md): clave `ve*` -> capacidades que la encienden.
+# Se computa desde las caps de _ROL_CAP ya resueltas, así el dueño hereda TODO lo del
+# supervisor vía implied_ids sin listarlo aquí. El menú es UX: el muro real sigue siendo
+# el has_group de cada endpoint. La SPA oculta un ítem SOLO si su cap viene en false
+# EXPLÍCITO (ausente ≠ prohibido), de modo que estas claves son retro y forward compatibles.
+_VIS_MENU = {
+    # Emitir
+    "vePos": ("puedeCobrar",),                             # Venta rápida = cobrar (POS)
+    "veCaja": ("puedeCobrar", "puedeSupervisar"),          # supervisor: aprueba descuadres
+    "veEmitir": ("puedeSupervisar",),                      # decisión negocio: emisión manual
+    "veComprobantes": ("puedeCotizar", "puedeCobrar", "puedeDespachar",
+                       "puedeSupervisar", "esContador"),   # consulta multi-rol; acciones gateadas
+    # Cotizaciones y Órdenes son páginas multi-rol: el conjunto incluye a TODOS los roles con
+    # una bandeja ADENTRO. El despachador tiene la suya en Cotizaciones (tab Cola de despacho,
+    # CN-01) — quitárselo repetiría el hallazgo histórico del cajero, esta vez con él.
+    "veCotizaciones": ("puedeCotizar", "puedeCobrar", "puedeDespachar", "puedeSupervisar"),
+    "veOrdenes": ("puedeCotizar", "puedeCobrar", "puedeTaller",
+                  "puedeDespachar", "puedeSupervisar"),
+    "veGuias": ("puedeDespachar", "puedeSupervisar"),
+    "veMasivo": ("puedeSupervisar",),
+    # Reportes
+    "veAnalisis": ("puedeSupervisar", "esContador"),
+    "veLibros": ("puedeSupervisar", "esContador"),
+    "veVinculadas": ("puedeSupervisar", "esContador"),
+    "veDescargas": ("puedeSupervisar", "esContador"),
+    # Mantenimientos
+    "veClientes": ("puedeCotizar", "puedeCobrar", "puedeSupervisar"),
+    "veProductos": ("puedeCotizar", "puedeCobrar", "puedeDespachar", "puedeSupervisar"),
+    "veCompras": ("puedeDespachar", "puedeSupervisar"),    # despacho recepciona; supervisor aprueba
+    "veGastos": ("puedeCobrar", "puedeSupervisar"),
+    "veSeries": ("puedeSupervisar",),
+    "veFrecuentes": ("puedeDespachar", "puedeSupervisar"),
+    "veNegocio": ("puedeSupervisar",),
+}
+
 # WHITELIST — los ÚNICOS grupos que un dueño puede otorgar. Vive en Python (cambiarla exige PR +
 # review + deploy, no un UPDATE). NO contiene 'duenio' (así set_roles no puede clonar ni destituir
 # a un dueño) ni 'emisor' (es la base implícita, no un rol asignable). clave de rol -> xmlid.
@@ -58,6 +95,21 @@ class ResUsers(models.Model):
             perfil[clave] = self.has_group(xmlid)
         # H-4: la SPA muestra la pantalla de Equipo solo al dueño.
         perfil["puedeGestionarEquipo"] = perfil.get("esDuenio", False)
+        # H-3b: visibilidad del menú por rol. SOLO para usuarios con algún rol NE de la
+        # matriz. Quedan FUERA (sin claves ve* → ausente ≠ prohibido → menú operativo
+        # completo, decisión documentada en docs/procesos-negocio/menu-por-rol.md):
+        #   - el legacy solo-`emisor` (tenants pre-roles) y el solo-`anulación` (implica
+        #     emisor): pre-roles ese perfil veía todo; ocultarle el menú sería regresión;
+        #   - el admin de plataforma — system O erp_manager, el mismo par que este addon
+        #     trata como admin en los choke points de H-4 (isAdmin del biller solo cubre
+        #     system, por eso el has_group extra);
+        #   - un usuario sin ningún grupo NE: ve el menú pero cada endpoint le rebota — el
+        #     muro es el backend, y "sin rol" no debe adivinar una matriz que no tiene.
+        if (not perfil.get("isAdmin")
+                and not self.has_group("base.group_erp_manager")
+                and any(perfil.get(c) for c in _ROL_CAP.values())):
+            for clave, fuentes in _VIS_MENU.items():
+                perfil[clave] = any(perfil.get(f) for f in fuentes)
         return perfil
 
     # ─────────────────────────────────────────────────── H-4 · choke points

@@ -37,6 +37,14 @@ class AccountMove(models.Model):
                 raise UserError(_(
                     "La cotización %s ya fue convertida en el comprobante %s; no se puede emitir otro."
                 ) % (cot.name or cot.id, cot._l10n_pe_ne_comprobante_numero() or "—"))
+        # Idem para una nota de venta ya convertida (no duplicar la venta).
+        nvid = payload.get("notaVentaId")
+        if nvid:
+            nv = self.env["l10n_pe_ne.nota_venta"].browse(int(nvid)).exists()
+            if nv and nv.estado == "convertida":
+                raise UserError(_(
+                    "La nota de venta %s ya fue convertida en el comprobante %s; no se puede emitir otro."
+                ) % (nv.name or nv.id, nv._l10n_pe_ne_comprobante_numero() or "—"))
         tipo = payload.get("tipoDoc") or "01"
         # NC motivo 03 = "Corrección por error en la descripción": SOLO corrige el texto,
         # NO cambia importes. La nota va con importe 0.00 (la factura original conserva su
@@ -259,6 +267,9 @@ class AccountMove(models.Model):
             cot = self.env["l10n_pe_ne.cotizacion"].browse(int(cotid)).exists()
             if cot:
                 cot.l10n_pe_ne_vincular_comprobante(move.id)
+        # Idem para una nota de venta convertida a comprobante (la marca 'convertida' e inmutable).
+        if payload.get("notaVentaId"):
+            self._l10n_pe_ne_vincular_nota_venta(payload["notaVentaId"], move.id)
         # Avance de obra (QA-039): la suma de las valorizaciones no puede superar el valor total
         # del contrato. Se valida con el move ya posteado (amount_total disponible); si se pasa,
         # el raise revierte la transacción y no se emite.
@@ -414,6 +425,13 @@ class AccountMove(models.Model):
         except _Revert:
             pass
         return findings
+
+    def _l10n_pe_ne_vincular_nota_venta(self, nota_venta_id, move_id):
+        """Vincula el comprobante emitido a la nota de venta de origen (la marca 'convertida' e
+        inmutable). Lo llama quick_emit cuando la emisión vino de 'Convertir a comprobante'."""
+        nv = self.env["l10n_pe_ne.nota_venta"].browse(int(nota_venta_id)).exists()
+        if nv:
+            nv.l10n_pe_ne_vincular_comprobante(int(move_id))
 
     def _l10n_pe_ne_check_numero_libre(self, serie, correlativo):
         """Impide reutilizar un número fiscal (serie+correlativo) ya emitido/anulado en

@@ -106,3 +106,14 @@ class TestNotaVenta(TransactionCase):
         rec = self.NV.browse(nv['id'])
         self.assertTrue(rec.l10n_pe_ne_get_pdf_b64('A4'))
         self.assertTrue(rec.l10n_pe_ne_get_pdf_b64('TICKET'))
+
+    # ---------------------------------------------------------------- Task 6: convertir
+    def test_emitir_desde_nota_vincula(self):
+        # El gancho de quick_emit (notaVentaId) enlaza el comprobante emitido y marca 'convertida'.
+        nv = self._nota(estado='registrada')
+        move = self.env['account.move'].create(
+            {'move_type': 'out_invoice', 'partner_id': self.partner.id})
+        self.env['account.move']._l10n_pe_ne_vincular_nota_venta(nv.id, move.id)
+        nv.invalidate_recordset()
+        self.assertEqual(nv.estado, 'convertida')
+        self.assertEqual(nv.comprobante_id, move)

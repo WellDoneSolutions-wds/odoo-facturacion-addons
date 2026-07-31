@@ -1,8 +1,9 @@
 from odoo.tests import TransactionCase, tagged
+from .common import L10nPeSeedMixin
 
 
 @tagged('post_install', '-at_install')
-class TestBillerCantidad(TransactionCase):
+class TestBillerCantidad(L10nPeSeedMixin, TransactionCase):
     """Cantidad con 3 decimales para la venta al peso de balanza (QA-020): no se trunca a 2.
     Antes, con la precisión de UoM de Odoo en 2, 18.375 kg se emitía como 18.38 y el total salía
     S/ 180.13 en vez de los S/ 180.08 del peso exacto."""
@@ -37,9 +38,11 @@ class TestBillerCantidad(TransactionCase):
         self.assertEqual(move.invoice_line_ids[0].quantity, 18.375)  # no truncada a 18.38
         det = move._l10n_pe_build_invoice_request()['detalle'][0]
         self.assertEqual(det['ctdUnidadItem'], '18.375')
-        # 18.375 × 9.80 = 180.075 (con IGV) → valor de venta 152.61 (no 152.65 de 18.38)
-        self.assertEqual(det['mtoValorVentaItem'], '152.61')
-        self.assertEqual(det['mtoIgvItem'], '27.47')
+        # price_unit 9.80 es el valor unitario SIN IGV (la SPA manda valorBase, no el bruto): el
+        # valor de venta = 18.375 × 9.80 = 180.075 → 180.08 (el peso exacto, no 180.12 de 18.38).
+        # Coincide con la docstring de la clase; el IGV va por encima (180.075 × 18% = 32.41).
+        self.assertEqual(det['mtoValorVentaItem'], '180.08')
+        self.assertEqual(det['mtoIgvItem'], '32.41')
 
     def test_conteo_sigue_en_2_decimales(self):
         """Una unidad de conteo (NIU) mantiene 2 decimales: 2.5 → '2.50'."""

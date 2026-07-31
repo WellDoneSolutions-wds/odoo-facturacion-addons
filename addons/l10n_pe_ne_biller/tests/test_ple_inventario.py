@@ -3,11 +3,11 @@ import base64
 from odoo.exceptions import UserError
 from odoo.tests import TransactionCase, tagged
 
-from .common import EnvioSincronoMixin
+from .common import L10nPeSeedMixin, EnvioSincronoMixin
 
 
 @tagged('post_install', '-at_install')
-class TestPleInventario(EnvioSincronoMixin, TransactionCase):
+class TestPleInventario(L10nPeSeedMixin, EnvioSincronoMixin, TransactionCase):
     """PLE 12.1 — Inventario Permanente en UNIDADES FÍSICAS.
 
     ⚠ La estructura está pendiente de validación contable: los anexos de SUNAT son escaneos.

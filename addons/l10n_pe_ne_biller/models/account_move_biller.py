@@ -7124,6 +7124,36 @@ class AccountMove(models.Model):
         nota = html2plaintext(self.narration or "").strip()
         return ("Observación: " + nota) if nota else ""
 
+    def _l10n_pe_ne_cobro_efectivo(self):
+        """(redondeo, a_pagar, pagado, vuelto) del cobro en efectivo — dato de CAJA, no del XML.
+        El comprobante mantiene amount_total; en efectivo se cobra a_pagar = amount_total + redondeo
+        (redondeo ≤ 0, a favor del consumidor), y el vuelto = pagado − a_pagar. Fuente única para el
+        ticket 80mm y el A4 (que antes solo mostraba los medios, sin el vuelto)."""
+        self.ensure_one()
+        medios = self.l10n_pe_ne_medios_pago or []
+        redondeo = self.l10n_pe_ne_redondeo or 0.0
+        a_pagar = round((self.amount_total or 0.0) + redondeo, 2)
+        pagado = sum(float(m.get("monto") or 0) for m in medios)
+        vuelto = round(pagado - a_pagar, 2)
+        return redondeo, a_pagar, pagado, vuelto
+
+    def _l10n_pe_ne_medios_pago_a4(self):
+        """Texto de medios de pago para el A4 (param MEDIOS_PAGO), enriquecido con el redondeo de
+        efectivo y el vuelto — el ticket 80mm ya los trae en su bloque POS, el A4 solo mostraba los
+        medios. Todos son datos de caja (NO van al XML SUNAT). "" si no hay medios detallados."""
+        self.ensure_one()
+        det = self._l10n_pe_ne_medios_pago_texto()
+        if not det:
+            return ""
+        partes = [det]
+        redondeo, a_pagar, _pagado, vuelto = self._l10n_pe_ne_cobro_efectivo()
+        if redondeo:
+            partes.append("Redondeo S/ %.2f" % redondeo)
+            partes.append("A pagar efectivo S/ %.2f" % a_pagar)
+        if vuelto > 0:
+            partes.append("Vuelto S/ %.2f" % vuelto)
+        return " · ".join(partes)
+
     def _l10n_pe_ne_ticket_adicional(self):
         """Bloque de pago del ticket 80mm (se manda como `adicionalTxt`): medios de pago del
         POS, vuelto, cajero y observación. Estos datos NO van al XML SUNAT (son internos del
@@ -7131,19 +7161,15 @@ class AccountMove(models.Model):
         usa markup html) o "" si no hay nada que mostrar."""
         self.ensure_one()
         partes = []
-        medios = self.l10n_pe_ne_medios_pago or []
         det = self._l10n_pe_ne_medios_pago_texto()
         if det:
             partes.append("Pago: " + det)
             # Redondeo de efectivo (≤ 0): el comprobante mantiene amount_total, pero en efectivo se
             # cobra 'a pagar' = amount_total + redondeo. El vuelto se calcula contra ese importe.
-            redondeo = self.l10n_pe_ne_redondeo or 0.0
-            a_pagar = round((self.amount_total or 0.0) + redondeo, 2)
+            redondeo, a_pagar, _pagado, vuelto = self._l10n_pe_ne_cobro_efectivo()
             if redondeo:
                 partes.append("Redondeo: S/ %.2f" % redondeo)
                 partes.append("A pagar efectivo: S/ %.2f" % a_pagar)
-            pagado = sum(float(m.get("monto") or 0) for m in medios)
-            vuelto = round(pagado - a_pagar, 2)
             if vuelto > 0:
                 partes.append("Vuelto: S/ %.2f" % vuelto)
         if self.invoice_user_id:
@@ -7225,7 +7251,11 @@ class AccountMove(models.Model):
             if contacto:
                 payload["contactoEmisor"] = contacto
         else:
-            # A4: solo la observación (no el bloque POS de pago/vuelto/cajero).
+            # A4: la observación va como adicionalTxt. El bloque POS (medios + redondeo + vuelto) no
+            # tiene recuadro propio en el A4 como en el ticket, pero el A4 sí imprime MEDIOS_PAGO junto
+            # a "Forma de pago" — así que se enriquece con el redondeo/vuelto (el ticket ya los trae en
+            # su bloque). El param MEDIOS_PAGO NO lo usa la plantilla del ticket, no hay duplicación.
+            payload["mediosPago"] = self._l10n_pe_ne_medios_pago_a4()
             obs = self._l10n_pe_ne_observacion_impresa()
             if obs:
                 payload["adicionalTxt"] = obs

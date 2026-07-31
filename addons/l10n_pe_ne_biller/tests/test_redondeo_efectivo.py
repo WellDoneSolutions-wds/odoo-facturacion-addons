@@ -81,6 +81,28 @@ class TestRedondeoEfectivo(TransactionCase):
         self.assertNotIn("Redondeo", txt)
         self.assertNotIn("A pagar efectivo", txt)
 
+    # ---------------------------------------------------------------- A4: medios + vuelto
+    def test_a4_medios_incluye_a_pagar_y_vuelto(self):
+        # El A4 (param MEDIOS_PAGO) antes solo mostraba los medios; ahora trae redondeo/a-pagar/vuelto
+        # (el ticket 80mm ya los tenía). Paga 20.00 un total redondeado a 10.40 -> vuelto 9.60.
+        move = self._factura(redondeo=-0.04, medios=[{"medio": "Efectivo", "monto": 20.0}])
+        txt = move._l10n_pe_ne_medios_pago_a4()
+        self.assertIn("Efectivo", txt)
+        self.assertIn("Redondeo S/ -0.04", txt)
+        self.assertIn("A pagar efectivo S/ 10.40", txt)
+        self.assertIn("Vuelto S/ 9.60", txt)
+
+    def test_a4_sin_medios_devuelve_vacio(self):
+        # Sin medios detallados no se anexa nada a "Forma de pago".
+        self.assertEqual(self._factura()._l10n_pe_ne_medios_pago_a4(), "")
+
+    def test_a4_sin_redondeo_solo_medios(self):
+        # Medio electrónico (Yape) que cubre justo el total: sin redondeo ni vuelto, solo el medio.
+        txt = self._factura(medios=[{"medio": "Yape", "monto": 10.44}])._l10n_pe_ne_medios_pago_a4()
+        self.assertIn("Yape", txt)
+        self.assertNotIn("A pagar efectivo", txt)
+        self.assertNotIn("Vuelto", txt)
+
     # ---------------------------------------------------------------- caja: total cobrado
     def test_caja_suma_redondeo_al_total(self):
         move = self._factura(redondeo=-0.04, medios=[{"medio": "Efectivo", "monto": 10.40}])

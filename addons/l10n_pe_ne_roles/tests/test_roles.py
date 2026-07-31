@@ -83,7 +83,7 @@ class TestRolesPerfil(TransactionCase):
 
     # ─────────────────────────────────────────────── H-3b · menú por rol
     _VE_TODAS = (
-        "vePos", "veCaja", "veEmitir", "veComprobantes", "veCotizaciones",
+        "vePos", "veCaja", "veNotasVenta", "veEmitir", "veComprobantes", "veCotizaciones",
         "veOrdenes", "veGuias", "veMasivo", "veAnalisis", "veLibros",
         "veVinculadas", "veDescargas", "veClientes", "veProductos", "veCompras",
         "veGastos", "veSeries", "veFrecuentes", "veNegocio")
@@ -113,7 +113,7 @@ class TestRolesPerfil(TransactionCase):
         órdenes (el hallazgo del e2e: capar la página entera lo dejaba sin su cola)."""
         p = self._usuario(
             "menu_caja", ["l10n_pe_ne_roles.group_l10n_pe_ne_caja"]).l10n_pe_ne_perfil()
-        self._assert_menu(p, {"vePos", "veCaja", "veComprobantes", "veCotizaciones",
+        self._assert_menu(p, {"vePos", "veCaja", "veNotasVenta", "veComprobantes", "veCotizaciones",
                               "veOrdenes", "veClientes", "veProductos", "veGastos"})
 
     def test_menu_operario(self):

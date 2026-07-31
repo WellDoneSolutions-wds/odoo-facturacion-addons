@@ -75,3 +75,24 @@ class TestNotaVenta(TransactionCase):
         self.assertEqual(nv.comprobante_id, move)
         with self.assertRaises(UserError):
             self.NV.l10n_pe_ne_update_nota_venta({'id': nv.id, 'items': [{'descripcion': 'Y', 'cantidad': 1, 'precio': 5}]})
+
+    # ---------------------------------------------------------------- Task 4: caja
+    def test_nota_venta_alimenta_arqueo(self):
+        # Una nota de venta cobrada en efectivo es plata real -> entra al arqueo de la sesión
+        # abierta (junto con las ventas de account.move). quick_venta la amarra a la sesión.
+        ses = self.env['l10n_pe_ne.caja.sesion'].create({'saldo_inicial': 0.0})  # 'abierta' por default
+        self.NV.l10n_pe_ne_quick_venta({
+            'items': [{'descripcion': 'X', 'cantidad': 1, 'precio': 100.0}],
+            'medios': [{'medio': 'Efectivo', 'monto': 100.0}]})
+        planas = ses._l10n_pe_ne_ventas_planas()
+        self.assertTrue(
+            any(v['total'] == 100.0 and v['medios'] == [{'medio': 'Efectivo', 'monto': 100.0}]
+                for v in planas), planas)
+
+    def test_nota_venta_anulada_no_entra_al_arqueo(self):
+        ses = self.env['l10n_pe_ne.caja.sesion'].create({'saldo_inicial': 0.0})
+        nv = self.NV.browse(self.NV.l10n_pe_ne_quick_venta({
+            'items': [{'descripcion': 'X', 'cantidad': 1, 'precio': 100.0}],
+            'medios': [{'medio': 'Efectivo', 'monto': 100.0}]})['id'])
+        nv.l10n_pe_ne_set_estado_nota_venta('anulada')
+        self.assertFalse(any(v['total'] == 100.0 for v in ses._l10n_pe_ne_ventas_planas()))

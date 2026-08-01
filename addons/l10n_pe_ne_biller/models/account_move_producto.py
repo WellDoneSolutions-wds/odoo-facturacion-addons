@@ -185,42 +185,42 @@ class AccountMove(models.Model):
                 return qty / factor
         return qty
 
-    def _l10n_pe_ne_stock_aplicar(self, lineas, origen, destino, reversa=False, con_lote=False):
-        """Motor común: crea y valida los movimientos de `lineas` entre dos ubicaciones.
+    @api.model
+    def _l10n_pe_ne_stock_crear_moves(self, items, origen, destino, company, *,
+                                      reversa=False, origin="", fecha=False,
+                                      link_field=None, link_id=False):
+        """Motor común de creación+validación de stock.move entre dos ubicaciones. STATELESS: todo
+        entra por args (no lee campos de `self`), así lo comparten el comprobante, la nota de venta
+        y el ajuste de inventario. `items` = lista de dicts
+        {"product": product.product, "qty": float, "uom": uom.uom, "lote": stock.lot|None}.
 
-        Lo comparten la venta (existencias → cliente), la devolución por NC, la reversa de un
-        rechazo y la compra (proveedor → existencias). Lo único que cambia entre ellas son las
-        dos ubicaciones y el sentido; la mecánica —y el "nunca bloquear"— es la misma.
-
-        `con_lote`: la ENTRADA asigna el lote que trae la línea. La salida no lo necesita —
-        Odoo lo asigna al reservar.
+        Devuelve (moves, error|None). NUNCA levanta: el documento de origen ya existe y no puede
+        caerse porque el inventario no cuadre; el llamador decide qué hacer con el error (aviso).
         """
-        self.ensure_one()
-        moves = self.env["stock.move"].browse()
-        lotes = {}
-        for l in lineas:
-            if con_lote:
-                lotes[l.id] = self._l10n_pe_ne_lote_de(l)
-            # Sin 'name': stock.move no lo tiene en Odoo 19 (su `reference` se computa).
-            # `origin` deja el rastro legible; l10n_pe_ne_move_id es el enlace real (por id).
-            moves |= self.env["stock.move"].create(
-                {
-                    "product_id": l.product_id.id,
-                    "product_uom_qty": self._l10n_pe_ne_stock_qty(l),
-                    "product_uom": l.product_uom_id.id,
-                    "location_id": origen.id,
-                    "location_dest_id": destino.id,
-                    "company_id": self.company_id.id,
-                    "origin": self.name or "",
-                    "l10n_pe_ne_move_id": self.id,
-                    "l10n_pe_ne_reversa": reversa,
-                }
-            )
+        Move = self.env["stock.move"]
+        moves = Move.browse()
+        for it in items:
+            # Sin 'name': stock.move no lo tiene en Odoo 19 (su `reference` se computa). `origin`
+            # deja el rastro legible; link_field (l10n_pe_ne_move_id / _nota_venta_id) es el enlace
+            # real (por id).
+            vals = {
+                "product_id": it["product"].id,
+                "product_uom_qty": it["qty"],
+                "product_uom": it["uom"].id,
+                "location_id": origen.id,
+                "location_dest_id": destino.id,
+                "company_id": company.id,
+                "origin": origin or "",
+                "l10n_pe_ne_reversa": reversa,
+            }
+            if link_field:
+                vals[link_field] = link_id
+            moves |= Move.create(vals)
         try:
             moves._action_confirm()
             moves._action_assign()
-            for m, l in zip(moves, lineas):
-                lote = lotes.get(l.id)
+            for m, it in zip(moves, items):
+                lote = it.get("lote")
                 if lote:
                     # Entrada de un producto rastreado: el lote va en la LÍNEA del movimiento
                     # (stock.move_line), no en el move. Sin esto Odoo lanza "debe proporcionar
@@ -238,25 +238,43 @@ class AccountMove(models.Model):
                 m.quantity = m.product_uom_qty
                 m.picked = True
             moves._action_done()
-            # La fecha del movimiento es la del DOCUMENTO, no la de cuando se registró.
-            # Odoo pone `date` = ahora al validar; sin corregirlo, una compra de marzo
-            # cargada en julio caería en el kardex de julio y el libro del periodo saldría
-            # mal. Se escribe después de _action_done porque antes lo pisa él.
-            if self.invoice_date:
-                moves.write({"date": self.invoice_date})
-                moves.move_line_ids.write({"date": self.invoice_date})
+            # La fecha del movimiento es la del DOCUMENTO, no la de cuando se registró (Odoo pone
+            # `date`=ahora al validar; sin corregirlo, una compra de marzo cargada en julio caería
+            # en el kardex de julio). Se escribe después de _action_done porque antes lo pisa él.
+            if fecha:
+                moves.write({"date": fecha})
+                moves.move_line_ids.write({"date": fecha})
         except Exception as e:  # noqa: BLE001 — el documento ya existe: el stock no lo tumba
-            # Se traga a propósito: el comprobante ya es válido ante SUNAT y no puede caerse
-            # porque el inventario no cuadre. Pero se deja RASTRO en el documento, no solo en
-            # el log: un movimiento que no ocurre y nadie ve es un kardex mintiendo en
-            # silencio. El caso típico es un producto rastreado sin existencias en ningún
-            # lote — ahí Odoo no puede inventar de dónde sale.
-            _logger.exception("stock: no se pudo mover el stock de %s: %s", self.name, e)
-            self.l10n_pe_ne_stock_aviso = (
-                _("No se pudo mover el inventario de este documento: %s") % e
-            )[:500]
-            return self.env["stock.move"].browse()
-        self.l10n_pe_ne_stock_aviso = False
+            _logger.exception("stock: no se pudo mover el stock (%s): %s", origin, e)
+            return Move.browse(), str(e)
+        return moves, None
+
+    def _l10n_pe_ne_stock_aplicar(self, lineas, origen, destino, reversa=False, con_lote=False):
+        """Prepara los items de `lineas` (account.move.line) y delega en el motor común.
+
+        Lo comparten la venta (existencias → cliente), la devolución por NC, la reversa de un
+        rechazo y la compra (proveedor → existencias). Lo único que cambia entre ellas son las
+        dos ubicaciones y el sentido; la mecánica —y el "nunca bloquear"— es la misma.
+
+        `con_lote`: la ENTRADA asigna el lote que trae la línea. La salida no lo necesita —
+        Odoo lo asigna al reservar.
+        """
+        self.ensure_one()
+        items = [{
+            "product": l.product_id,
+            "qty": self._l10n_pe_ne_stock_qty(l),
+            "uom": l.product_uom_id,
+            "lote": self._l10n_pe_ne_lote_de(l) if con_lote else None,
+        } for l in lineas]
+        moves, err = self.env["account.move"]._l10n_pe_ne_stock_crear_moves(
+            items, origen, destino, self.company_id, reversa=reversa,
+            origin=self.name or "", fecha=self.invoice_date,
+            link_field="l10n_pe_ne_move_id", link_id=self.id)
+        # Se deja RASTRO en el documento, no solo en el log: un movimiento que no ocurre y nadie ve
+        # es un kardex mintiendo en silencio (caso típico: producto rastreado sin existencias).
+        self.l10n_pe_ne_stock_aviso = (
+            (_("No se pudo mover el inventario de este documento: %s") % err)[:500] if err else False
+        )
         return moves
 
     @api.model

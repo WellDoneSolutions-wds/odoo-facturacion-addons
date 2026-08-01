@@ -28,3 +28,12 @@ class StockMove(models.Model):
         help="Movimiento que revierte al del comprobante rechazado por SUNAT. Se marca para "
         "no reversarlo a su vez: sin esto, la reversa se buscaría a sí misma.",
     )
+    l10n_pe_ne_nota_venta_id = fields.Many2one(
+        "l10n_pe_ne.nota_venta",
+        string="Nota de venta (NE Express)",
+        index=True,
+        ondelete="set null",
+        copy=False,
+        help="Nota de venta cuyo registro generó este movimiento (venta sin comprobante). "
+        "Al convertir la nota a comprobante, el movimiento se re-vincula a l10n_pe_ne_move_id.",
+    )

@@ -315,6 +315,49 @@ class AccountMove(models.Model):
         return {"stock": prod.qty_available, "aviso": (err[:300] if err else False)}
 
     @api.model
+    def _l10n_pe_ne_kardex(self, product_id, desde=None, hasta=None):
+        """Movimientos de stock 'done' de un producto con SALDO acumulado corriente. Cantidad-first
+        (el PLE 12.1 ya valoriza). El documento se deriva del enlace: comprobante / nota / ajuste.
+        Devuelve {"stock": float, "movimientos": [{fecha, documento, tipo, entrada, salida, saldo}]}."""
+        prod = self.env["product.product"].browse(int(product_id)).exists()
+        if not prod:
+            return {"stock": 0.0, "movimientos": []}
+        dom = [("product_id", "=", prod.id), ("state", "=", "done"),
+               ("company_id", "=", self.env.company.id)]
+        if desde:
+            dom.append(("date", ">=", desde))
+        if hasta:
+            dom.append(("date", "<=", str(hasta) + " 23:59:59"))
+        lineas = self.env["stock.move.line"].search(dom, order="date asc, id asc")
+        internas = self.env["stock.location"].search(
+            [("usage", "=", "internal"), ("company_id", "in", [self.env.company.id, False])])
+        movimientos, saldo = [], 0.0
+        for ml in lineas:
+            entra = ml.location_dest_id in internas and ml.location_id not in internas
+            sale = ml.location_id in internas and ml.location_dest_id not in internas
+            if not entra and not sale:
+                continue  # movimiento interno (existencias→existencias): no altera el saldo total
+            qty = ml.quantity
+            entrada = qty if entra else 0.0
+            salida = qty if sale else 0.0
+            saldo += entrada - salida
+            mv = ml.move_id
+            if mv.l10n_pe_ne_move_id:
+                doc = mv.l10n_pe_ne_move_id.name
+            elif mv.l10n_pe_ne_nota_venta_id:
+                doc = mv.l10n_pe_ne_nota_venta_id.name
+            else:
+                doc = mv.origin
+            movimientos.append({
+                "fecha": str(ml.date)[:10] if ml.date else "",
+                "documento": doc or "—",
+                "tipo": "entrada" if entrada else "salida",
+                "entrada": round(entrada, 3), "salida": round(salida, 3),
+                "saldo": round(saldo, 3),
+            })
+        return {"stock": prod.qty_available, "movimientos": movimientos}
+
+    @api.model
     def _l10n_pe_ne_asegurar_fefo(self, wh):
         """Pone la ubicación de existencias en FEFO: sale primero lo que vence antes.
 

@@ -32,6 +32,15 @@ class TestAjusteStock(L10nPeSeedMixin, TransactionCase):
         AM._l10n_pe_ne_ajustar_stock(p.id, "fijar", 0, "conteo")
         self.assertEqual(p.qty_available, 0.0)
 
+    def test_existencia_inicial_al_crear(self):
+        res = self.env["account.move"].l10n_pe_ne_create_producto({
+            "descripcion": "Foco LED", "precio": 12, "llevaStock": True, "tipo": "bien",
+            "existenciaInicial": 25,
+        })
+        p = self.env["product.product"].browse(res["id"])
+        self.assertTrue(p.is_storable)
+        self.assertEqual(p.qty_available, 25.0)
+
     def test_servicio_no_ajusta(self):
         serv = self.env["product.product"].create({
             "name": "Servicio", "type": "consu", "is_storable": False})

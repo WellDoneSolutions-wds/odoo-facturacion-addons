@@ -191,6 +191,11 @@ class AccountMove(models.Model):
             tax,
         )
         _logger.info("p: %s", p)
+        # Existencia inicial (opcional): solo al ALTA y si el producto lleva inventario. Se aplica
+        # como un ajuste "fijar" reusando el motor de stock (deja el stock EN esa cantidad).
+        inicial = float(producto.get("existenciaInicial") or 0)
+        if inicial > 0 and p.is_storable:
+            self._l10n_pe_ne_ajustar_stock(p.id, "fijar", inicial, _("Existencia inicial"))
         return self._l10n_pe_ne_product_dict(p)
 
     @api.model

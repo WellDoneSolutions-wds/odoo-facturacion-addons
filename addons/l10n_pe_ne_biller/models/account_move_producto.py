@@ -278,6 +278,43 @@ class AccountMove(models.Model):
         return moves
 
     @api.model
+    def _l10n_pe_ne_ajustar_stock(self, product_id, modo, cantidad, motivo=""):
+        """Ajuste de inventario por producto contra la ubicación de ajuste (usage='inventory').
+        `modo`: 'fijar' (conteo físico / carga inicial → deja el stock EN `cantidad`, calculando el
+        delta contra qty_available), 'sumar' (corrección/devolución interna) o 'restar' (merma/robo).
+        Reusa el motor _l10n_pe_ne_stock_crear_moves. Nunca levanta.
+        Devuelve {"stock": float, "aviso": str|False}."""
+        prod = self.env["product.product"].browse(int(product_id)).exists()
+        if not prod or not prod.is_storable:
+            return {"stock": prod.qty_available if prod else 0.0,
+                    "aviso": _("El producto no lleva inventario.")}
+        company = self.env.company
+        wh = self.env["stock.warehouse"].search([("company_id", "=", company.id)], limit=1)
+        ajuste = self.env["stock.location"].search(
+            [("usage", "=", "inventory"), ("company_id", "in", [company.id, False])],
+            order="company_id desc", limit=1)
+        if not wh or not ajuste:
+            return {"stock": prod.qty_available,
+                    "aviso": _("Sin almacén o ubicación de ajuste de inventario.")}
+        actual = prod.qty_available
+        qty = abs(float(cantidad or 0.0))
+        if modo == "fijar":
+            delta = round(qty - actual, 4)
+        elif modo == "restar":
+            delta = -qty
+        else:  # sumar
+            delta = qty
+        if not delta:
+            return {"stock": actual, "aviso": False}
+        # delta > 0 = ENTRADA (ajuste → existencias); delta < 0 = SALIDA (existencias → ajuste).
+        entrada = delta > 0
+        origen, destino = (ajuste, wh.lot_stock_id) if entrada else (wh.lot_stock_id, ajuste)
+        items = [{"product": prod, "qty": abs(delta), "uom": prod.uom_id, "lote": None}]
+        _moves, err = self._l10n_pe_ne_stock_crear_moves(
+            items, origen, destino, company, origin=(_("Ajuste: %s") % (motivo or "-"))[:60])
+        return {"stock": prod.qty_available, "aviso": (err[:300] if err else False)}
+
+    @api.model
     def _l10n_pe_ne_asegurar_fefo(self, wh):
         """Pone la ubicación de existencias en FEFO: sale primero lo que vence antes.
 

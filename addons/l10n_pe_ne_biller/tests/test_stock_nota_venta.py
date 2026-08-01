@@ -30,6 +30,29 @@ class TestStockNotaVenta(L10nPeSeedMixin, TransactionCase):
         nv.l10n_pe_ne_set_estado_nota_venta("anulada")
         self.assertEqual(p.qty_available, 10.0, "anular la nota debe reponer 3")
 
+    def test_conversion_no_doble_descuenta(self):
+        p = self._producto(10)
+        res = self.NV.l10n_pe_ne_quick_venta({
+            "items": [{"productId": p.id, "cantidad": 3, "precio": 10.0, "afectoIgv": True}],
+        })
+        nv = self.NV.browse(res["id"])
+        self.assertEqual(p.qty_available, 7.0)
+        # Convertir a comprobante = emitir una boleta con notaVentaId. El stock NO debe volver a
+        # bajar (la mercadería ya salió al registrar la nota); el movimiento se re-vincula.
+        self.env["account.move"].l10n_pe_ne_quick_emit({
+            "tipoDoc": "03", "moneda": "PEN", "notaVentaId": nv.id,
+            "cliente": {"tipoDoc": "0", "numDoc": "", "razonSocial": "VARIOS"},
+            "lineas": [{"descripcion": "Gaseosa", "cantidad": 3, "precioUnitario": 10.0,
+                        "taxCode": "1000", "productId": p.id}],
+        }, enviar=False)
+        self.assertEqual(p.qty_available, 7.0, "convertir NO debe volver a descontar (sería 4)")
+        nv.invalidate_recordset()
+        self.assertEqual(nv.estado, "convertida")
+        moves = self.env["stock.move"].search([("l10n_pe_ne_nota_venta_id", "=", nv.id)])
+        self.assertTrue(moves, "debe existir el movimiento de la nota")
+        self.assertTrue(all(m.l10n_pe_ne_move_id == nv.comprobante_id for m in moves),
+                        "el movimiento de la nota debe re-vincularse al comprobante")
+
     def test_servicio_no_mueve_stock(self):
         # Un producto sin is_storable no debe generar movimientos ni romper el registro.
         serv = self.env["product.product"].create({

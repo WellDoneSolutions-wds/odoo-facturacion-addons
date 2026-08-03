@@ -1,5 +1,8 @@
 # -*- coding: utf-8 -*-
-"""Migración 19.0.1.21.0 (S5): el upgrade sobre una base ya desplegada.
+"""Migración 19.0.1.25.0 (S5): el upgrade sobre una base ya desplegada.
+
+Nació como 19.0.1.21.0 y se renumeró al mergear main, que ya había gastado 21/22/23 en otras
+migraciones. El número es lo único que cambió: el script no se tocó.
 
 Lo que se prueba aquí no es una función: es que un tenant en producción pueda correr
 `-u l10n_pe_ne_biller` sin sorpresas. Tres invariantes, en orden de qué duele más si falla:
@@ -19,13 +22,13 @@ from odoo.tests import TransactionCase, tagged
 
 import odoo.addons.l10n_pe_ne_biller as _biller
 
-_RUTA = Path(_biller.__file__).parent / "migrations" / "19.0.1.21.0" / "pre-migrate.py"
+_RUTA = Path(_biller.__file__).parent / "migrations" / "19.0.1.25.0" / "pre-migrate.py"
 
 
 def _cargar_migracion():
-    """El paquete de migraciones no es importable (la carpeta se llama '19.0.1.21.0' y no hay
+    """El paquete de migraciones no es importable (la carpeta se llama '19.0.1.25.0' y no hay
     __init__.py): se carga por ruta, igual que hace el propio loader de Odoo."""
-    spec = importlib.util.spec_from_file_location("ne_pre_migrate_19_0_1_21_0", _RUTA)
+    spec = importlib.util.spec_from_file_location("ne_pre_migrate_19_0_1_25_0", _RUTA)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod

@@ -222,7 +222,11 @@ class AccountMove(models.Model):
         # Stock: el bien sale (o vuelve, si es NC) cuando la venta existe en Odoo, no cuando
         # SUNAT responde — la mercadería ya cambió de manos. Va después del post y antes de
         # enviar: si SUNAT rechaza, el movimiento se corrige con la NC, igual que el importe.
-        move._l10n_pe_ne_mover_stock()
+        # Si la emisión CONVIERTE una nota de venta, el stock YA salió al registrar la nota: no se
+        # vuelve a mover (evita el doble descuento); el movimiento existente se re-vincula al
+        # comprobante en _l10n_pe_ne_vincular_nota_venta (más abajo).
+        if not payload.get("notaVentaId"):
+            move._l10n_pe_ne_mover_stock()
         # Nota de Crédito: no puede acreditar más de lo facturado. Se permiten VARIAS NC
         # sobre el mismo comprobante, pero el ACUMULADO no puede superar su total: el tope
         # de esta nota es el saldo pendiente de acreditar (total − NC previas vigentes).
@@ -432,6 +436,12 @@ class AccountMove(models.Model):
         nv = self.env["l10n_pe_ne.nota_venta"].browse(int(nota_venta_id)).exists()
         if nv:
             nv.l10n_pe_ne_vincular_comprobante(int(move_id))
+            # El stock ya lo movió la nota al registrarse (la emisión lo saltó); se re-atribuye al
+            # comprobante para que el kardex/PLE 12.1 lo muestre bajo el documento fiscal.
+            self.env["stock.move"].search([
+                ("l10n_pe_ne_nota_venta_id", "=", nv.id),
+                ("l10n_pe_ne_move_id", "=", False),
+            ]).write({"l10n_pe_ne_move_id": int(move_id)})
 
     def _l10n_pe_ne_check_numero_libre(self, serie, correlativo):
         """Impide reutilizar un número fiscal (serie+correlativo) ya emitido/anulado en

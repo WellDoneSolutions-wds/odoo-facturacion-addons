@@ -27,3 +27,6 @@ from . import test_maderera_textil
 from . import test_liquidacion
 from . import test_servicios_tiempo
 from . import test_alquiler
+from . import test_stock_nota_venta
+from . import test_ajuste_stock
+from . import test_kardex

@@ -1064,7 +1064,7 @@ class L10nPeNeApi(http.Controller):
 
     # -------------------------------------------------------------- productos
     @http.route("/ne/api/productos", **_GET)
-    def list_productos(self, q=None, **kw):
+    def list_productos(self, q=None, categId=None, **kw):
         uid = self._identify()
         if not uid:
             return self._unauth()
@@ -1074,10 +1074,22 @@ class L10nPeNeApi(http.Controller):
                 query=q or None,
                 limit=pg["limit"] if pg else 50,
                 offset=pg["offset"] if pg else None,
+                categ_id=categId or None,
             )
             if pg:
                 res = {**res, "page": pg["page"], "pageSize": pg["pageSize"]}
             return self._json(res)
+        except Exception as e:  # noqa: BLE001
+            return self._fail(e)
+
+    @http.route("/ne/api/productos/categorias", **_GET)
+    def list_categorias(self, **kw):
+        """Árbol de categorías del catálogo (departamento → subcategoría) para navegar Productos."""
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        try:
+            return self._json(self._move(uid).l10n_pe_ne_list_categorias())
         except Exception as e:  # noqa: BLE001
             return self._fail(e)
 

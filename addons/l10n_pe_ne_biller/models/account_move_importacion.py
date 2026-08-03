@@ -45,7 +45,7 @@ class AccountMove(models.Model):
         for r, row in enumerate(ejemplos, 1):
             ws.write_row(r, 0, row)
         # Comentarios de ayuda al pasar el mouse por la cabecera (el triangulito rojo).
-        note = {"x_scale": 2.2, "y_scale": 1.8, "author": "CHASKIFACT"}
+        note = {"x_scale": 2.2, "y_scale": 1.8, "author": "Ekipu"}
         ws.write_comment(0, 1, (
             "Opcional. El código de barras (EAN) que trae el producto, para escanearlo "
             "en el POS. Déjalo vacío si el producto no tiene."), note)
@@ -104,7 +104,7 @@ class AccountMove(models.Model):
         wi = wb.add_worksheet("Instrucciones")
         wi.set_column(0, 0, 110)
         for r, line in enumerate([
-            "CHASKIFACT — Plantilla de importación de productos",
+            "Ekipu — Plantilla de importación de productos",
             "",
             "1. Una fila = un producto. 'CÓDIGO' es la clave: si ya existe, se ACTUALIZA; si no, se CREA.",
             "   Al ACTUALIZAR, una celda VACÍA MANTIENE el valor actual del producto (no lo borra ni lo resetea).",
@@ -123,7 +123,7 @@ class AccountMove(models.Model):
         ]):
             wi.write(r, 0, line)
         wb.close()
-        return {"filename": "plantilla-productos-chaskifact.xlsx",
+        return {"filename": "plantilla-productos-ekipu.xlsx",
                 "contentB64": base64.b64encode(buf.getvalue()).decode("ascii")}
 
     @api.model

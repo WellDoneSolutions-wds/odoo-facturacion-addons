@@ -609,7 +609,7 @@ class L10nPeNeLote(models.Model):
         wi = wb.add_worksheet("Instrucciones")
         wi.set_column(0, 0, 105)
         for r, line in enumerate([
-            "CHASKIFACT — Plantilla de emisión masiva (boletas y facturas)",
+            "Ekipu — Plantilla de emisión masiva (boletas y facturas)",
             "",
             "1. Una fila = una línea de venta. Usa la columna 'venta' para agrupar varias líneas en un mismo comprobante (mismo código en filas contiguas).",
             "2. 'tipo': FACTURA (01) o BOLETA (03). La factura exige RUC de cliente válido; la boleta acepta DNI/CE/PASAPORTE o queda a público general si dejas el cliente en blanco.",
@@ -621,7 +621,7 @@ class L10nPeNeLote(models.Model):
         ]):
             wi.write(r, 0, line)
         wb.close()
-        return {"filename": "plantilla-ventas-chaskifact.xlsx",
+        return {"filename": "plantilla-ventas-ekipu.xlsx",
                 "contentB64": base64.b64encode(buf.getvalue()).decode("ascii")}
 
     def _l10n_pe_ne_plantilla_guia(self):
@@ -649,7 +649,7 @@ class L10nPeNeLote(models.Model):
         wi = wb.add_worksheet("Instrucciones")
         wi.set_column(0, 0, 108)
         for r, line in enumerate([
-            "CHASKIFACT — Plantilla de emisión masiva de GUÍAS de remisión (remitente)",
+            "Ekipu — Plantilla de emisión masiva de GUÍAS de remisión (remitente)",
             "",
             "1. Una fila = un bien. Usa la columna 'guia' para agrupar varios bienes en una misma guía (mismo código en filas contiguas). Los datos de cabecera (destinatario, puntos, peso, vehículo, conductor) se toman de la PRIMERA fila del grupo.",
             "2. MVP: guía de REMITENTE (tipo 09), motivo 01 (Venta), transporte PRIVADO (un vehículo + un conductor). Para transportista, transporte público, comercio exterior o comprobante relacionado, usa el formulario individual de guías.",
@@ -661,7 +661,7 @@ class L10nPeNeLote(models.Model):
         ]):
             wi.write(r, 0, line)
         wb.close()
-        return {"filename": "plantilla-guias-chaskifact.xlsx",
+        return {"filename": "plantilla-guias-ekipu.xlsx",
                 "contentB64": base64.b64encode(buf.getvalue()).decode("ascii")}
 
     # ------------------------------------------------------------- serializadores

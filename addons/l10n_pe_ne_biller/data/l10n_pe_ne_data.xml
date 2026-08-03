@@ -26,6 +26,16 @@
     <field name="number_increment">1</field>
     <field name="implementation">no_gap</field>
   </record>
+  <!-- Numeración de notas de venta (venta sin comprobante SUNAT, documento interno NO fiscal):
+       NV01-000001… La serie NV no imita una serie de comprobante (F/B). -->
+  <record id="seq_l10n_pe_ne_nota_venta" model="ir.sequence">
+    <field name="name">Nota de venta NE Express</field>
+    <field name="code">l10n_pe.ne.nota_venta</field>
+    <field name="prefix">NV01-</field>
+    <field name="padding">6</field>
+    <field name="number_increment">1</field>
+    <field name="implementation">no_gap</field>
+  </record>
   <!-- URL base del microservicio ms-ne-biller. Editable en Ajustes > Técnico > Parámetros del sistema.
        El código usa este parámetro (clave l10n_pe_ne_biller.url) con localhost:8090 como respaldo. -->
   <record id="param_l10n_pe_ne_biller_url" model="ir.config_parameter">

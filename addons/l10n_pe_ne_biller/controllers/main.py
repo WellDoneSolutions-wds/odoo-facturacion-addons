@@ -169,6 +169,10 @@ class L10nPeNeApi(http.Controller):
         u = self._user(uid)
         return request.env["l10n_pe_ne.cotizacion"].with_user(uid).with_company(u.company_id)
 
+    def _nota_venta(self, uid):
+        u = self._user(uid)
+        return request.env["l10n_pe_ne.nota_venta"].with_user(uid).with_company(u.company_id)
+
     def _guia(self, uid):
         u = self._user(uid)
         return request.env["l10n_pe_ne.guia_remision"].with_user(uid).with_company(u.company_id)
@@ -728,6 +732,17 @@ class L10nPeNeApi(http.Controller):
         except Exception as e:  # noqa: BLE001
             return self._fail(e)
 
+    @http.route("/ne/api/reportes/vinculadas/export", **_GET)
+    def reporte_vinculadas_export(self, ejercicio=None, **kw):
+        """CSV del reporte de vinculadas (sustento DJ) — {filename, contentB64, count}."""
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        try:
+            return self._json(self._move(uid).l10n_pe_ne_reporte_vinculadas_csv(ejercicio))
+        except Exception as e:  # noqa: BLE001
+            return self._fail(e)
+
     @http.route("/ne/api/reportes/export", **_GET)
     def export(self, tipo="ventas", periodo=None, **kw):
         """Centro de descargas: exporta ventas|productos|clientes a XLSX (base64)."""
@@ -758,6 +773,7 @@ class L10nPeNeApi(http.Controller):
                 monto_max=kw.get("montoMax") or None,
                 serie=kw.get("serie") or None,
                 moneda=kw.get("moneda") or None,
+                bancarizacion=kw.get("bancarizacion") or None,
                 establecimiento=kw.get("establecimiento") or None,
                 limit=pg["limit"] if pg else 100,
                 offset=pg["offset"] if pg else None,
@@ -814,6 +830,9 @@ class L10nPeNeApi(http.Controller):
                 return self._payment(uid).l10n_pe_ne_quick_retencion(payload)
             if tipo == "40":
                 return self._payment(uid).l10n_pe_ne_quick_percepcion(payload)
+            if tipo == "04":
+                # Liquidación de compra: es una COMPRA que además se emite a SUNAT.
+                return self._move(uid).l10n_pe_ne_emitir_liquidacion(payload)
             return self._move(uid).l10n_pe_ne_quick_emit(payload)
 
         return self._run(op)
@@ -890,6 +909,37 @@ class L10nPeNeApi(http.Controller):
             return move.l10n_pe_ne_quick_result()
 
         return self._run(op)
+
+    @http.route("/ne/api/comprobantes/<int:rec_id>/bancarizar", **_POST)
+    def bancarizar_comprobante(self, rec_id, **kw):
+        """Marca un comprobante como bancarizado (Ley 28194) + guarda la constancia."""
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+
+        def op():
+            move = self._move(uid).browse(rec_id)
+            return move.l10n_pe_ne_marcar_bancarizado(self._body())
+
+        return self._run(op)
+
+    @http.route("/ne/api/comprobantes/<int:rec_id>/bancarizacion-doc", **_GET)
+    def bancarizacion_doc(self, rec_id, **kw):
+        """Descarga el documento de bancarización (voucher/constancia) del comprobante."""
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        try:
+            info = self._move(uid).browse(rec_id)._l10n_pe_ne_bancarizacion_doc_bytes()
+            if not info:
+                return self._err(f"El comprobante {rec_id} no tiene documento de bancarización", status=404)
+            raw, name, ct = info
+            return request.make_response(raw, headers=[
+                ("Content-Type", ct),
+                ("Content-Disposition", f'attachment; filename="{name}"'),
+            ])
+        except Exception as e:  # noqa: BLE001
+            return self._fail(e)
 
     @http.route("/ne/api/otrocpe/<int:rec_id>/<string:kind>", **_GET)
     def otrocpe_file(self, rec_id, kind, **kw):
@@ -1332,6 +1382,92 @@ class L10nPeNeApi(http.Controller):
         return self._run(
             lambda: self._cotizacion(uid).l10n_pe_ne_delete_cotizacion(int(rec_id))
         )
+
+    # ------------------------------------------------------------- notas de venta
+    # Venta REAL cobrada SIN comprobante SUNAT (documento interno, NO CPE). Modelo
+    # l10n_pe_ne.nota_venta. Alimenta la caja. No hay DELETE: una venta se ANULA (estado).
+    @http.route("/ne/api/notas-venta", **_GET)
+    def list_notas_venta(self, q=None, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        try:
+            pg = self._page_args(kw)
+            res = self._nota_venta(uid).l10n_pe_ne_list_notas_venta(
+                query=q or None,
+                limit=pg["limit"] if pg else 100,
+                offset=pg["offset"] if pg else None,
+            )
+            if pg:
+                res = {**res, "page": pg["page"], "pageSize": pg["pageSize"]}
+            return self._json(res)
+        except Exception as e:  # noqa: BLE001
+            return self._fail(e)
+
+    @http.route("/ne/api/notas-venta", **_POST)
+    def create_nota_venta(self, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(
+            lambda: self._nota_venta(uid).l10n_pe_ne_quick_venta(self._body())
+        )
+
+    @http.route("/ne/api/notas-venta/<int:rec_id>", **_PUT)
+    def update_nota_venta(self, rec_id, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(
+            lambda: self._nota_venta(uid).l10n_pe_ne_update_nota_venta(
+                dict(self._body(), id=int(rec_id))
+            )
+        )
+
+    @http.route("/ne/api/notas-venta/<int:rec_id>/detalle", **_GET)
+    def nota_venta_detalle(self, rec_id, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        try:
+            nv = self._nota_venta(uid).browse(rec_id).exists()
+            if not nv:
+                return self._err("Nota de venta no encontrada", 404)
+            return self._json(nv.l10n_pe_ne_nota_venta_detalle())
+        except Exception as e:  # noqa: BLE001
+            return self._fail(e)
+
+    @http.route("/ne/api/notas-venta/<int:rec_id>/estado", **_POST)
+    def nota_venta_estado(self, rec_id, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+
+        def op():
+            nv = self._nota_venta(uid).browse(int(rec_id)).exists()
+            if not nv:
+                raise UserError("Nota de venta no encontrada.")
+            return nv.l10n_pe_ne_set_estado_nota_venta((self._body() or {}).get("estado") or "")
+
+        return self._run(op)
+
+    @http.route("/ne/api/notas-venta/<int:rec_id>/pdf", **_GET)
+    def nota_venta_pdf(self, rec_id, formato=None, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        try:
+            nv = self._nota_venta(uid).browse(rec_id).exists()
+            if not nv:
+                return self._err("Nota de venta no encontrada", 404)
+            report = ("l10n_pe_ne_biller.action_report_nota_venta_ticket"
+                      if formato == "TICKET" else "l10n_pe_ne_biller.action_report_nota_venta")
+            pdf, _ctype = nv.env["ir.actions.report"]._render_qweb_pdf(report, res_ids=nv.ids)
+            return request.make_response(pdf, headers=[
+                ("Content-Type", "application/pdf"),
+                ("Content-Disposition", 'inline; filename="%s.pdf"' % nv.name)])
+        except Exception as e:  # noqa: BLE001
+            return self._fail(e)
 
     # -------------------------------------------------------- guías de remisión
     # GRE Remitente (tipo 09). Documento de traslado, NO es un comprobante account.move.

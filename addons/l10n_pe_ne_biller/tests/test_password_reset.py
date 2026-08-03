@@ -54,7 +54,7 @@ class TestPasswordReset(TransactionCase):
 
     def test_change_own_wrong_current_raises(self):
         with self.assertRaises(UserError):
-            self.env['res.users'].with_user(self.user_a).l10n_pe_ne_change_own_password('mala', 'nuevapass12')
+            self.env['res.users'].with_user(self.user_a).l10n_pe_ne_change_own_password('mala', 'NuevaPass12')
 
     def test_change_own_too_short_raises(self):
         with self.assertRaises(UserError):
@@ -62,14 +62,14 @@ class TestPasswordReset(TransactionCase):
 
     def test_change_own_success_clears_flag(self):
         self.user_a.l10n_pe_ne_must_change_password = True
-        res = self.env['res.users'].with_user(self.user_a).l10n_pe_ne_change_own_password('oldpass12', 'nuevapass34')
+        res = self.env['res.users'].with_user(self.user_a).l10n_pe_ne_change_own_password('oldpass12', 'NuevaPass34')
         self.assertEqual(res, {'ok': True})
         self.assertFalse(self.user_a.l10n_pe_ne_must_change_password)
 
     def test_change_own_revokes_apikeys(self):
         self.env['res.users.apikeys'].with_user(self.user_a).sudo()._generate('l10n_pe_ne', 'test', False)
         self.assertTrue(self.env['res.users.apikeys'].sudo().search([('user_id', '=', self.user_a.id)]))
-        self.env['res.users'].with_user(self.user_a).l10n_pe_ne_change_own_password('oldpass12', 'nuevapass56')
+        self.env['res.users'].with_user(self.user_a).l10n_pe_ne_change_own_password('oldpass12', 'NuevaPass56')
         self.assertFalse(self.env['res.users.apikeys'].sudo().search([('user_id', '=', self.user_a.id)]))
 
     def test_confirm_reset_revokes_apikeys(self):
@@ -77,9 +77,31 @@ class TestPasswordReset(TransactionCase):
         partner = self.user_a.partner_id
         partner.signup_prepare(signup_type='reset')
         token = partner._generate_signup_token()
-        res = self.env['res.users'].l10n_pe_ne_confirm_password_reset(token, 'clavenueva99')
+        res = self.env['res.users'].l10n_pe_ne_confirm_password_reset(token, 'ClaveNueva99')
         self.assertEqual(res, {'ok': True})
         self.assertFalse(self.env['res.users.apikeys'].sudo().search([('user_id', '=', self.user_a.id)]))
+
+    # ---- Endurecimiento (issues #1 enumeración, #2 política de contraseña) ----
+    def test_password_policy_requires_upper_and_digit(self):
+        """La política se valida en el servidor: mínimo 8 + mayúscula + número (issue #2)."""
+        U = self.env['res.users'].with_user(self.user_a)
+        with self.assertRaises(UserError):  # falta mayúscula
+            U.l10n_pe_ne_change_own_password('oldpass12', 'minusculas9')
+        with self.assertRaises(UserError):  # falta número
+            U.l10n_pe_ne_change_own_password('oldpass12', 'SinNumeroAqui')
+
+    def test_admin_generated_password_meets_policy(self):
+        """La clave temporal autogenerada cumple la política (mayúscula + número)."""
+        pw = self.env['res.users']._l10n_pe_ne_gen_password()
+        # No debe lanzar:
+        self.env['res.users']._l10n_pe_ne_check_password_policy(pw)
+
+    def test_request_reset_generic_no_enumeration(self):
+        """La solicitud responde SIEMPRE {ok:True}, exista o no la cuenta (issue #1)."""
+        R = self.env['res.users']
+        O = 'https://demo.app.comercioagil.com'
+        self.assertEqual(R.l10n_pe_ne_request_password_reset('no-existe-xyz@nadie.pe', O), {'ok': True})
+        self.assertEqual(R.l10n_pe_ne_request_password_reset('pr_user_a', O), {'ok': True})  # existe, sin correo
 
     def test_list_users_non_admin_raises(self):
         with self.assertRaises(AccessError):
@@ -115,7 +137,7 @@ class TestPasswordResetRoutes(HttpCase):
         old_token = self.env['res.users.apikeys'].with_user(user).sudo()._generate('l10n_pe_ne', 'test', False)
         r = self.url_open(
             '/ne/api/change-password',
-            data=json.dumps({'current': 'oldpass12', 'new': 'nuevapass99'}),
+            data=json.dumps({'current': 'oldpass12', 'new': 'NuevaPass99'}),
             headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ' + old_token},
         )
         self.assertEqual(r.status_code, 200)

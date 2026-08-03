@@ -1,9 +1,10 @@
 from odoo.tests import TransactionCase, tagged
+from .common import L10nPeSeedMixin
 from odoo.exceptions import UserError
 
 
 @tagged('post_install', '-at_install')
-class TestBillerAnticipo(TransactionCase):
+class TestBillerAnticipo(L10nPeSeedMixin, TransactionCase):
     """Factura final que regulariza un anticipo ya facturado.
 
     El anticipo (IGV incluido) entra como descuento global código 04 (reduce la base/IGV de cabecera,

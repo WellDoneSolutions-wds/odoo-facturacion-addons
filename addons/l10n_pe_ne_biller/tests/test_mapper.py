@@ -1,8 +1,9 @@
 from odoo.tests import TransactionCase, tagged
+from .common import L10nPeSeedMixin
 
 
 @tagged('post_install', '-at_install')
-class TestBillerMapper(TransactionCase):
+class TestBillerMapper(L10nPeSeedMixin, TransactionCase):
     def setUp(self):
         super().setUp()
         self.company = self.env.company

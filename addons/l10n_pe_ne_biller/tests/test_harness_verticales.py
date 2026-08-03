@@ -63,6 +63,44 @@ class TestHarnessVerticales(L10nPeSeedMixin, EnvioSincronoMixin, TransactionCase
             ('boleta · mayor a S/700 con documento', {
                 'tipoDoc': '03', 'moneda': 'PEN', 'serie': 'B001', 'cliente': self._DNI,
                 'lineas': [{'descripcion': 'TELEVISOR', 'cantidad': 1, 'precioUnitario': 800, 'taxCode': '1000'}]}),
+            ('peso · balanza en KGM con 3 decimales (QA-020)', {
+                'tipoDoc': '03', 'moneda': 'PEN', 'serie': 'B001', 'cliente': self._DNI,
+                'lineas': [{'descripcion': 'POLLO', 'cantidad': 18.375, 'precioUnitario': 9.80,
+                            'taxCode': '1000', 'unidad': 'KGM'}]}),
+            ('ferretería · venta por metro y metro cuadrado + kardex', {
+                'tipoDoc': '01', 'moneda': 'PEN', 'serie': 'F001', 'cliente': self._RUC,
+                'lineas': [
+                    {'descripcion': 'TUBO PVC', 'cantidad': 12.5, 'precioUnitario': 8.50,
+                     'taxCode': '1000', 'unidad': 'MTR'},
+                    {'descripcion': 'MALLA', 'cantidad': 3.25, 'precioUnitario': 24, 'taxCode': '1000',
+                     'unidad': 'MTK'},
+                ]}),
+            ('maderera · venta por volumen en metro cúbico (MTQ)', {
+                'tipoDoc': '01', 'moneda': 'PEN', 'serie': 'F001', 'cliente': self._RUC,
+                'lineas': [{'descripcion': 'MADERA TORNILLO', 'cantidad': 2.125, 'precioUnitario': 1800,
+                            'taxCode': '1000', 'unidad': 'MTQ'}]}),
+            ('textil · tela por metro y prendas por docena (DZN)', {
+                'tipoDoc': '01', 'moneda': 'PEN', 'serie': 'F001', 'cliente': self._RUC,
+                'lineas': [
+                    {'descripcion': 'TELA DRILL', 'cantidad': 15.75, 'precioUnitario': 12,
+                     'taxCode': '1000', 'unidad': 'MTR'},
+                    {'descripcion': 'POLOS', 'cantidad': 2.5, 'precioUnitario': 180, 'taxCode': '1000',
+                     'unidad': 'DZN'},
+                ]}),
+            ('servicios · por hora (HUR) y por día (DAY)', {
+                'tipoDoc': '01', 'moneda': 'PEN', 'serie': 'F001', 'cliente': self._RUC,
+                'lineas': [
+                    {'descripcion': 'CONSULTORIA', 'cantidad': 4.5, 'precioUnitario': 120,
+                     'taxCode': '1000', 'unidad': 'HUR'},
+                    {'descripcion': 'ALQUILER EQUIPO', 'cantidad': 15, 'precioUnitario': 80,
+                     'taxCode': '1000', 'unidad': 'DAY'},
+                ]}),
+            ('alquiler · arrendamiento con detracción 019 (10%)', {
+                'tipoDoc': '01', 'moneda': 'PEN', 'serie': 'F001', 'cliente': self._RUC,
+                'lineas': [{'descripcion': 'ALQUILER LOCAL · Alquiler del 01/07/2026 al 31/07/2026',
+                            'cantidad': 1, 'precioUnitario': 3000, 'taxCode': '1000', 'unidad': 'ZZ'}],
+                'detraccion': {'codBien': '019', 'tasa': 10, 'cuentaBN': '00-123-456789'},
+                'formaPago': {'tipo': 'Credito', 'cuotas': [{'fecha': '2026-12-31', 'monto': 3186}]}}),
         ]
 
     def test_corpus_valido(self):

@@ -1,6 +1,6 @@
 {
     'name': 'Facturación Electrónica PE - Conector ms-ne-biller',
-    'version': '19.0.1.21.0',
+    'version': '19.0.1.24.0',
     'category': 'Accounting/Localizations/EDI',
     'summary': 'Envía facturas a SUNAT vía el microservicio ms-ne-biller (formato SFS).',
     'post_init_hook': 'post_init_hook',
@@ -20,6 +20,7 @@
         'views/product_views.xml',
         'views/l10n_pe_ne_report_views.xml',
         'report/cotizacion_report.xml',
+        'report/nota_venta_report.xml',
         'report/guia_report.xml',
     ],
     'assets': {

@@ -8,6 +8,7 @@ from . import test_razon_social_boleta
 from . import test_observacion
 from . import test_icbper_cantidad
 from . import test_credito_gratuito
+from . import test_nota_venta
 from . import test_validacion_preemision
 from . import test_harness_verticales
 from . import test_modelo_dinero
@@ -19,6 +20,13 @@ from . import test_convenio
 from . import test_controlados
 from . import test_venta_estado
 from . import test_vinculadas
+from . import test_linea_valor_cero
+from . import test_bancarizacion
+from . import test_peso_ferreteria
+from . import test_maderera_textil
+from . import test_liquidacion
+from . import test_servicios_tiempo
+from . import test_alquiler
 from . import test_serie_registro
 from . import test_serie_establecimiento
 from . import test_serie_nota_pos

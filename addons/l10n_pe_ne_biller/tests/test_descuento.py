@@ -23,15 +23,37 @@ class TestBillerDescuento(TransactionCase):
             'l10n_latam_identification_type_id': ruc_type.id})
         self.product = self.env['product.product'].create({'name': 'PROD', 'default_code': 'P1'})
 
-    def _move(self, discount):
+    def _move(self, discount, price_unit=500.0, quantity=1.0):
         move = self.env['account.move'].create({
             'move_type': 'out_invoice', 'partner_id': self.partner.id, 'invoice_date': '2026-06-20',
             'l10n_pe_serie': 'F001', 'l10n_pe_correlativo': '1',
-            'invoice_line_ids': [(0, 0, {'product_id': self.product.id, 'quantity': 1.0,
-                                         'price_unit': 500.0, 'discount': discount,
+            'invoice_line_ids': [(0, 0, {'product_id': self.product.id, 'quantity': quantity,
+                                         'price_unit': price_unit, 'discount': discount,
                                          'tax_ids': [(6, 0, self.igv.ids)]})]})
         move.action_post()
         return move
+
+    def test_descuento_monto_fijo_reproduce_total_exacto(self):
+        """Descuento por ítem tecleado en S/ (monto fijo), no como %: S/10 sobre un precio de
+        760 c/IGV. La SPA convierte ese monto a un % de PRECISIÓN COMPLETA (10/760 =
+        1.3157894…%) justamente para que el total emitido reproduzca EXACTO lo que el usuario
+        tecleó y previsualizó (750.00). Con la precisión decimal 'Discount' por defecto de Odoo
+        (2), el % se truncaba a 1.32 y el total salía 749.97 — se cobraba 0.03 de menos y el
+        emitido no coincidía con la vista previa. Fijamos el total al céntimo.
+
+        precio_unit sin IGV = valorBase(760,'1000') = 760/1.18 (la SPA lo manda SIN redondear).
+        discount            = descuentoPct(S/10 sobre bruto 760) = (10/760)*100."""
+        precio_sin_igv = 760.0 / 1.18                 # = 644.0677966…  (como manda la SPA)
+        desc_pct = (10.0 / 760.0) * 100.0             # = 1.3157894…%   (monto fijo -> %)
+        payload = self._move(desc_pct, price_unit=precio_sin_igv)._l10n_pe_build_invoice_request()
+        d = payload['detalle'][0]
+        self.assertEqual(d['mtoValorVentaItem'], '635.59')   # base neta gravada (no 635.57)
+        self.assertEqual(d['mtoIgvItem'], '114.41')          # IGV sobre el neto (no 114.40)
+        cab = payload['cabecera']
+        self.assertEqual(cab['sumTotValVenta'], '635.59')    # gravada de cabecera
+        self.assertEqual(cab['sumTotTributos'], '114.41')    # IGV de cabecera
+        # El importe que PAGA el cliente == lo tecleado (760 - 10), al céntimo:
+        self.assertEqual(cab['sumImpVenta'], '750.00')       # antes del fix: 749.97
 
     def test_descuento_item(self):
         payload = self._move(10.0)._l10n_pe_build_invoice_request()
@@ -53,6 +75,22 @@ class TestBillerDescuento(TransactionCase):
         payload = self._move(0.0)._l10n_pe_build_invoice_request()
         self.assertEqual(payload['adicionalDetalle'], [])
         self.assertEqual(payload['detalle'][0]['mtoValorVentaItem'], '500.00')
+
+    def test_valor_unitario_alta_cantidad_reconcilia_3271(self):
+        # A3: valor sin-IGV no terminante (10/1.18 = 8.4745…) × cantidad alta. A 2 decimales el
+        # mtoValorUnitario "8.47" × 300 = 2541.00 se desviaba del mtoValorVentaItem 2542.37 (1.37 > 1)
+        # → rechazo SUNAT 3271/4288. Con más decimales la reconciliación queda sub-céntimo.
+        move = self.env['account.move'].create({
+            'move_type': 'out_invoice', 'partner_id': self.partner.id, 'invoice_date': '2026-06-20',
+            'l10n_pe_serie': 'F001', 'l10n_pe_correlativo': '7',
+            'invoice_line_ids': [(0, 0, {'product_id': self.product.id, 'quantity': 300.0,
+                                         'price_unit': 8.474576271186441, 'tax_ids': [(6, 0, self.igv.ids)]})]})
+        move.action_post()
+        d = move._l10n_pe_build_invoice_request()['detalle'][0]
+        dev = abs(float(d['mtoValorUnitario']) * 300 - float(d['mtoValorVentaItem']))
+        self.assertLessEqual(dev, 0.01)
+        # Backward-compat: un valor unitario EXACTO sigue a 2 decimales (500.00 no cambia).
+        self.assertEqual(self._move(0.0)._l10n_pe_build_invoice_request()['detalle'][0]['mtoValorUnitario'], '500.00')
 
     def test_descuento_monto_fijo_factor_reconstruye(self):
         """SUNAT 3290: con un descuento cuyo % NO es fracción redonda de la base (un descuento en
@@ -114,11 +152,29 @@ class TestBillerDescuentoNoAfecta(TransactionCase):
         self.assertEqual(req['detalle'][0]['mtoIgvItem'], '90.00')
 
     def test_variable_global_no_afecta(self):
+        # B1: factor unitario (base = monto, por = 1.00000) → base × factor = monto exacto, así la
+        # regla SUNAT 4322 pasa para cualquier importe. Antes base = precio de venta con factor a 5
+        # decimales → en base alta (≳ S/ 200.000) la desviación superaba 1 sol y SUNAT rechazaba.
         gv = self._move(100.0)._l10n_pe_build_invoice_request()['variablesGlobales']
         na = [v for v in gv if v['codTipoVariableGlobal'] == DESC_GLOBAL_NO_AFECTA_COD]
         self.assertEqual(len(na), 1)
         self.assertEqual(na[0]['mtoVariableGlobal'], '100.00')
-        self.assertEqual(na[0]['mtoBaseImpVariableGlobal'], '590.00')   # base = precio de venta
+        self.assertEqual(na[0]['porVariableGlobal'], '1.00000')
+        self.assertEqual(na[0]['mtoBaseImpVariableGlobal'], '100.00')   # base = monto (no el precio de venta)
+
+    def test_variable_global_no_afecta_base_alta_pasa_4322(self):
+        # Base alta (línea 1.000.000 → total 1.18M, descuento no-afecta 200.000): con factor 1.00000
+        # y base = monto, la desviación 4322 |monto − base×factor| es 0. Antes (base×0.16949) > 1 sol.
+        move = self.env['account.move'].create({
+            'move_type': 'out_invoice', 'partner_id': self.partner.id, 'invoice_date': '2026-06-20',
+            'l10n_pe_serie': 'F001', 'l10n_pe_correlativo': '9', 'l10n_pe_ne_desc_no_afecta': 200000.0,
+            'invoice_line_ids': [(0, 0, {'product_id': self.product.id, 'quantity': 1.0,
+                                         'price_unit': 1000000.0, 'tax_ids': [(6, 0, self.igv.ids)]})]})
+        move.action_post()
+        na = [v for v in move._l10n_pe_build_invoice_request()['variablesGlobales']
+              if v['codTipoVariableGlobal'] == DESC_GLOBAL_NO_AFECTA_COD][0]
+        dev = abs(float(na['mtoVariableGlobal']) - float(na['mtoBaseImpVariableGlobal']) * float(na['porVariableGlobal']))
+        self.assertLessEqual(dev, 1.0)
 
     def test_sin_descuento_no_emite_variable(self):
         req = self._move(0.0)._l10n_pe_build_invoice_request()

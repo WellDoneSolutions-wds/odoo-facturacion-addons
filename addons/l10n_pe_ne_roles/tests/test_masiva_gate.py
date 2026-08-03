@@ -33,6 +33,21 @@ class TestMasivaGate(TransactionCase):
         with self.assertRaises(AccessError):
             self.env["l10n_pe_ne.lote"].with_user(vend)._l10n_pe_ne_masiva_gate()
 
+    def test_cajero_no_puede_leer_masiva(self):
+        # Las LECTURAS de masiva (lista/plantilla) también están reservadas: un cajero por
+        # Postman no debe enumerar los lotes del RUC ni bajar la plantilla, en línea con veMasivo.
+        cajero = self._usuario("mg_cajero_r", ["l10n_pe_ne_roles.group_l10n_pe_ne_caja"])
+        Lote = self.env["l10n_pe_ne.lote"].with_user(cajero)
+        with self.assertRaises(AccessError):
+            Lote.l10n_pe_ne_list_lotes()
+        with self.assertRaises(AccessError):
+            Lote.l10n_pe_ne_plantilla()
+
+    def test_supervisor_si_lee(self):
+        sup = self._usuario("mg_sup_r", ["l10n_pe_ne_roles.group_l10n_pe_ne_supervisor"])
+        # No lanza: el supervisor pasa el muro y lista (recordset vacío → lista vacía es válido).
+        self.env["l10n_pe_ne.lote"].with_user(sup).l10n_pe_ne_list_lotes()
+
     def test_supervisor_puede(self):
         sup = self._usuario("mg_sup", ["l10n_pe_ne_roles.group_l10n_pe_ne_supervisor"])
         # No lanza: pasa el muro (lo que siga es lógica de negocio, fuera de este test).

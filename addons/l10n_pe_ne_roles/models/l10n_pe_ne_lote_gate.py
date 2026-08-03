@@ -42,3 +42,23 @@ class L10nPeNeLote(models.Model):
     def l10n_pe_ne_cancelar(self):
         self._l10n_pe_ne_masiva_gate()
         return super().l10n_pe_ne_cancelar()
+
+    # --- Lecturas: también reservadas. `veMasivo` (supervisor/dueño) es TODO-o-nada: quien no
+    # emite masivamente tampoco necesita ver la lista/el detalle/los resultados ni bajar la
+    # plantilla. Sin esto, un cajero por Postman listaba los lotes del RUC (nombres de archivo,
+    # conteos, resultados) aunque la SPA le oculte /masivo. El cron/worker corre en env.su y pasa.
+    def l10n_pe_ne_list_lotes(self):
+        self._l10n_pe_ne_masiva_gate()
+        return super().l10n_pe_ne_list_lotes()
+
+    def l10n_pe_ne_lote_detalle(self):
+        self._l10n_pe_ne_masiva_gate()
+        return super().l10n_pe_ne_lote_detalle()
+
+    def l10n_pe_ne_resultados(self):
+        self._l10n_pe_ne_masiva_gate()
+        return super().l10n_pe_ne_resultados()
+
+    def l10n_pe_ne_plantilla(self, tipo="comprobante"):
+        self._l10n_pe_ne_masiva_gate()
+        return super().l10n_pe_ne_plantilla(tipo=tipo)

@@ -38,3 +38,6 @@ from . import test_caja_integridad
 from . import test_caja_descuadre
 from . import test_caja_gasto_egreso
 from . import test_caja_verificacion
+from . import test_stock_nota_venta
+from . import test_ajuste_stock
+from . import test_kardex

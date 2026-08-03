@@ -1163,6 +1163,26 @@ class L10nPeNeApi(http.Controller):
             lambda: self._move(uid).l10n_pe_ne_create_producto(self._body())
         )
 
+    @http.route("/ne/api/productos/<int:rec_id>/ajustar-stock", **_POST)
+    def producto_ajustar_stock(self, rec_id, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        body = self._body() or {}
+        return self._run(
+            lambda: self._move(uid)._l10n_pe_ne_ajustar_stock(
+                rec_id, body.get("modo") or "fijar",
+                body.get("cantidad") or 0, body.get("motivo") or "")
+        )
+
+    @http.route("/ne/api/productos/<int:rec_id>/kardex", **_GET)
+    def producto_kardex(self, rec_id, desde=None, hasta=None, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(
+            lambda: self._move(uid)._l10n_pe_ne_kardex(rec_id, desde, hasta))
+
     @http.route("/ne/api/negocio/margen", **_GET)
     def negocio_margen(self, **kw):
         """Margen de venta por defecto del negocio (%), para precargar el cálculo del precio

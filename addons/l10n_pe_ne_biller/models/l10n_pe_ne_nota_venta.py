@@ -6,9 +6,12 @@ Modelo propio simplificado (misma filosofía que l10n_pe_ne.cotizacion / l10n_pe
 la lógica —CRUD, totales, serialización, PDF— vive en el addon; React solo llama /ne/api."""
 
 import base64
+import logging
 
 from odoo import _, api, fields, models
 from odoo.exceptions import UserError
+
+_logger = logging.getLogger(__name__)
 
 IGV_RATE = 0.18  # IGV Perú 18%
 
@@ -200,6 +203,7 @@ class L10nPeNeNotaVenta(models.Model):
             'caja_sesion_id': self._l10n_pe_ne_caja_abierta().id or False,
             'line_ids': lines,
         })
+        nv._l10n_pe_ne_nv_mover_stock()  # venta real cobrada → descuenta inventario
         return nv._l10n_pe_ne_nota_venta_dict()
 
     # Transiciones comerciales válidas. NUNCA admite →convertida (eso lo escribe SOLO
@@ -252,6 +256,10 @@ class L10nPeNeNotaVenta(models.Model):
         self.ensure_one()
         if estado not in self._L10N_PE_NE_TRANSICIONES.get(self.estado, set()):
             raise UserError(_('No se puede pasar de «%(o)s» a «%(d)s».', o=self.estado, d=estado))
+        # Anular una nota registrada REPONE lo que descontó al registrarse (antes de cambiar el
+        # estado, para leer el estado previo).
+        if estado == 'anulada' and self.estado == 'registrada':
+            self._l10n_pe_ne_nv_mover_stock(reversa=True)
         self.estado = estado
         return self._l10n_pe_ne_nota_venta_dict()
 
@@ -261,6 +269,35 @@ class L10nPeNeNotaVenta(models.Model):
         self.ensure_one()
         self.write({'comprobante_id': int(comprobante_id), 'estado': 'convertida'})
         return self._l10n_pe_ne_nota_venta_dict()
+
+    def _l10n_pe_ne_nv_mover_stock(self, reversa=False):
+        """Descuenta (registrar) o repone (anular) el stock de las líneas de bien de la nota.
+        Espeja account.move::_l10n_pe_ne_mover_stock pero para este modelo propio; reusa el motor
+        común _l10n_pe_ne_stock_crear_moves. NUNCA bloquea el registro por stock (deja negativo)."""
+        self.ensure_one()
+        lineas = self.line_ids.filtered(
+            lambda l: l.product_id and l.product_id.is_storable and (l.cantidad or 0) > 0)
+        if not lineas:
+            return
+        wh = self.env["stock.warehouse"].search(
+            [("company_id", "=", self.company_id.id)], limit=1)
+        clientes = self.env.ref("stock.stock_location_customers", raise_if_not_found=False)
+        if not wh or not clientes:
+            _logger.warning(
+                "stock nota %s: sin almacén o ubicación de clientes; no se mueve", self.name)
+            return
+        # Registrar = SALIDA (existencias → clientes); reversa (anular) = ENTRADA (repone).
+        origen, destino = (clientes, wh.lot_stock_id) if reversa else (wh.lot_stock_id, clientes)
+        items = [{
+            "product": l.product_id,
+            "qty": abs(l.cantidad or 0.0),
+            "uom": l.product_id.uom_id,
+            "lote": None,
+        } for l in lineas]
+        self.env["account.move"]._l10n_pe_ne_stock_crear_moves(
+            items, origen, destino, self.company_id, reversa=reversa,
+            origin=self.name or "", fecha=self.fecha,
+            link_field="l10n_pe_ne_nota_venta_id", link_id=self.id)
 
     def l10n_pe_ne_get_pdf_b64(self, formato='A4'):
         """Renderiza el PDF (reporte QWeb — Task 5) y lo devuelve en base64. TICKET o A4."""

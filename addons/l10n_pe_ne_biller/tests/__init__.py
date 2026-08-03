@@ -27,6 +27,17 @@ from . import test_maderera_textil
 from . import test_liquidacion
 from . import test_servicios_tiempo
 from . import test_alquiler
+from . import test_serie_registro
+from . import test_serie_establecimiento
+from . import test_serie_nota_pos
+from . import test_caja_local
+from . import test_serie_migracion
+from . import test_serie_visibilidad
+from . import test_serie_http
+from . import test_caja_integridad
+from . import test_caja_descuadre
+from . import test_caja_gasto_egreso
+from . import test_caja_verificacion
 from . import test_stock_nota_venta
 from . import test_ajuste_stock
 from . import test_kardex

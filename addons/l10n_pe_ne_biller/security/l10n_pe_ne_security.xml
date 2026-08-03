@@ -38,6 +38,25 @@
         </record>
 
         <!--
+            Configurar las series y los establecimientos determina la NUMERACIÓN FISCAL del
+            negocio: qué serie usa cada local y qué codLocalEmisor viaja en el XML. Se separa
+            de la emisión por el mismo motivo que la anulación — un cajero factura, pero no
+            renumera la empresa.
+
+            Vive AQUÍ y no en l10n_pe_ne_roles porque el biller no depende de roles y tiene que
+            seguir funcionando sin él (mismo patrón que group_l10n_pe_ne_anulacion). Es
+            l10n_pe_ne_roles quien lo suma por implied_ids a supervisor y dueño.
+
+            IMPLICA el grupo Emisor (quien configura series también emite), así que basta con
+            asignar este.
+        -->
+        <record id="group_l10n_pe_ne_config_series" model="res.groups">
+            <field name="name">Configuración de series y establecimientos NE Express</field>
+            <field name="implied_ids" eval="[(4, ref('group_l10n_pe_ne_emisor'))]"/>
+            <field name="comment">Puede declarar las series de numeración por local y dar de alta/baja los establecimientos anexos. Implica el grupo Emisor NE Express.</field>
+        </record>
+
+        <!--
             Aislamiento multi-compañía del modelo propio l10n_pe_ne.gasto (regla
             GLOBAL: aplica a todos). Maneja company_id=False (compartidos) igual
             que las reglas nativas. Sin esto, los gastos serían visibles entre RUC.
@@ -138,6 +157,15 @@
         <record id="rule_l10n_pe_ne_establecimiento_company" model="ir.rule">
             <field name="name">Establecimiento NE Express: aislamiento por compañía</field>
             <field name="model_id" ref="model_l10n_pe_ne_establecimiento"/>
+            <field name="domain_force">[('company_id', 'in', company_ids)]</field>
+            <field name="global" eval="True"/>
+        </record>
+
+        <!-- El registro de series es configuración fiscal por RUC: mismo aislamiento que el
+             establecimiento del que cuelga. -->
+        <record id="rule_l10n_pe_ne_serie_company" model="ir.rule">
+            <field name="name">Serie NE Express: aislamiento por compañía</field>
+            <field name="model_id" ref="model_l10n_pe_ne_serie"/>
             <field name="domain_force">[('company_id', 'in', company_ids)]</field>
             <field name="global" eval="True"/>
         </record>

@@ -13,6 +13,10 @@ class L10nPeNeEstablecimiento(models.Model):
     ubigeo = fields.Char(required=True)
     direccion = fields.Char(required=True)
     distrito_id = fields.Many2one('l10n_pe.res.city.district', string='Distrito')
+    # Un local que ya declaró comprobantes no se borra: su código viaja congelado en el XML
+    # de cada uno. 'Eliminar' pasa a ser archivar (mismo patrón que las direcciones de cliente).
+    active = fields.Boolean(default=True)
+    serie_ids = fields.One2many('l10n_pe_ne.serie', 'establecimiento_id', string='Series')
     company_id = fields.Many2one('res.company', required=True, index=True,
                                  default=lambda s: s.env.company)
 
@@ -27,7 +31,10 @@ class L10nPeNeEstablecimiento(models.Model):
         return {'id': self.id, 'codigo': self.codigo, 'ubigeo': self.ubigeo,
                 'direccion': self.direccion, 'distritoId': d.id or None,
                 'distrito': d.name or '', 'provincia': d.city_id.name or '',
-                'departamento': d.city_id.state_id.name or ''}
+                'departamento': d.city_id.state_id.name or '',
+                # Cuántas series cuelgan del local: la SPA avisa ANTES de borrar, porque
+                # borrarlo dejaría esas series (y su numeración) sin domicilio declarado.
+                'seriesCount': len(self.serie_ids)}
 
     @api.model
     def l10n_pe_ne_list(self):
@@ -42,18 +49,62 @@ class L10nPeNeEstablecimiento(models.Model):
                         'distritoId': distrito.id if distrito else None,
                         'distrito': distrito.name if distrito else '',
                         'provincia': distrito.city_id.name if distrito else '',
-                        'departamento': distrito.city_id.state_id.name if distrito else ''})
+                        'departamento': distrito.city_id.state_id.name if distrito else '',
+                        # El domicilio fiscal no tiene fila, así que sus series son las que NO
+                        # apuntan a ningún establecimiento: el domain tiene que acordarse de
+                        # ('establecimiento_id', '=', False) o desaparecen del conteo.
+                        'seriesCount': self.env['l10n_pe_ne.serie'].search_count(
+                            [('company_id', '=', company.id),
+                             ('establecimiento_id', '=', False)])})
         out += [e._l10n_pe_ne_dict()
                 for e in self.search([('company_id', '=', company.id)]) if e.codigo != '0000']
         return out
 
     @api.model
+    def _l10n_pe_ne_check_codigo(self, codigo, company=None):
+        """Valida un código de establecimiento emisor contra el catálogo y lo devuelve
+        normalizado. Vacío o '0000' = domicilio fiscal, que se acepta siempre porque es
+        sintético (no tiene fila que buscar).
+
+        Hasta ahora el código del payload viajaba tal cual al XML: un '0009' tecleado a mano
+        llegaba a SUNAT y volvía como rechazo, con el correlativo ya consumido. El mensaje
+        separa los dos problemas que el emisor confunde —que el local no esté en SU catálogo
+        (se arregla aquí) y que no esté dado de alta ANTE SUNAT (trámite externo en la ficha
+        RUC)—, porque crear el anexo en esta pantalla no lo declara ante nadie."""
+        company = company or self.env.company
+        cod = (codigo or '').strip()
+        if not cod or cod == '0000':
+            return '0000'
+        if len(cod) != 4:
+            raise UserError(_(
+                "El código de establecimiento '%(cod)s' no es válido: SUNAT usa 4 caracteres "
+                "(p. ej. 0002), y '0000' es el domicilio fiscal.") % {'cod': cod})
+        # Sin active_test=False: un local archivado ya no emite (archivarlo es decir "cerré esa
+        # sucursal"), aunque su código siga congelado en los comprobantes que ya lo declararon.
+        if not self.sudo().search_count(
+                [('codigo', '=', cod), ('company_id', '=', company.id)]):
+            raise UserError(_(
+                "El establecimiento '%(cod)s' no está en tu catálogo de locales: regístralo en "
+                "Negocio → Establecimientos antes de emitir desde él. Ten en cuenta que darlo "
+                "de alta aquí NO lo da de alta ante SUNAT: eso se hace en tu ficha RUC, y si "
+                "aún no lo declaraste ahí, SUNAT rechazará el comprobante igual.")
+                % {'cod': cod})
+        return cod
+
+    @api.model
     def l10n_pe_ne_upsert(self, payload):
+        # El catálogo de locales alimenta el registro de series y el codLocalEmisor del XML:
+        # dar de alta un anexo es tocar la numeración fiscal, no un dato de contacto. El muro
+        # va aquí, en el modelo, no solo en el controller.
+        self.env.user._l10n_pe_ne_check_config_series()
         codigo = (payload.get('codigo') or '').strip()
         if codigo == '0000':
             raise UserError(_("El código '0000' es el domicilio fiscal (automático); use otro código."))
-        rec = self.search([('codigo', '=', codigo), ('company_id', '=', self.env.company.id)], limit=1)
-        vals = {'codigo': codigo, 'direccion': payload.get('direccion') or ''}
+        # active_test=False: si el código existe ARCHIVADO, esto es un alta de vuelta (y no un
+        # create que chocaría contra unique(codigo, company_id) sin explicación posible).
+        rec = self.with_context(active_test=False).search(
+            [('codigo', '=', codigo), ('company_id', '=', self.env.company.id)], limit=1)
+        vals = {'codigo': codigo, 'direccion': payload.get('direccion') or '', 'active': True}
         distrito_id = payload.get('distritoId')
         if distrito_id:
             d = self.env['l10n_pe.res.city.district'].browse(int(distrito_id)).exists()
@@ -73,11 +124,43 @@ class L10nPeNeEstablecimiento(models.Model):
             rec = self.create(dict(vals, company_id=self.env.company.id))
         return rec
 
+    def _l10n_pe_ne_en_uso(self):
+        """¿El local ya dejó rastro fiscal? Series declaradas, cajas que operaron desde él,
+        comprobantes con su codLocalEmisor o guías con él como punto de partida/llegada. Se mira
+        por CÓDIGO donde el dato viaja congelado (el comprobante guarda el código, no una FK).
+
+        La caja va por FK y por eso se pregunta aquí: un arqueo cerrado NOMBRA su local, así que
+        borrar la fila reescribiría un arqueo que es inmutable por diseño."""
+        self.ensure_one()
+        if self.serie_ids:
+            return True
+        if self.env['l10n_pe_ne.caja.sesion'].sudo().search_count(
+                [('establecimiento_id', '=', self.id)], limit=1):
+            return True
+        codigo = self.codigo
+        if self.env['account.move'].sudo().search_count(
+                [('company_id', '=', self.company_id.id),
+                 ('l10n_pe_ne_cod_establecimiento', '=', codigo)], limit=1):
+            return True
+        return bool(self.env['l10n_pe_ne.guia_remision'].sudo().search_count(
+            ['&', ('company_id', '=', self.company_id.id),
+             '|', ('cod_estab_partida', '=', codigo), ('cod_estab_llegada', '=', codigo)],
+            limit=1))
+
     @api.model
     def l10n_pe_ne_delete_establecimiento(self, rec_id):
-        e = self.browse(int(rec_id or 0)).exists()
-        if e:
-            e.unlink()
+        self.env.user._l10n_pe_ne_check_config_series()
+        e = self.with_context(active_test=False).browse(int(rec_id or 0)).exists()
+        if not e:
+            return {'ok': True, 'modo': 'eliminado'}
+        if e._l10n_pe_ne_en_uso():
+            # Se ARCHIVA en vez de borrar: la historia fiscal que lo nombra no se reescribe.
+            # Y sus series se apagan en cascada, porque dejarlas vivas seguiría emitiendo con un
+            # codLocalEmisor que el emisor acaba de dar por cerrado.
+            e.serie_ids.write({'activa': False, 'predeterminada': False})
+            e.active = False
+            return {'ok': True, 'modo': 'archivado'}
+        e.unlink()
         return {'ok': True, 'modo': 'eliminado'}
 
     # ------------------------------------------------------- direcciones cliente

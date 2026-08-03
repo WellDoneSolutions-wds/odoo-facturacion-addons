@@ -34,14 +34,32 @@
 | Productos (`veProductos`) | 👁 | 👁 | — | 👁 | ✓ | — | ✓ |
 | Compras (`veCompras`) | — | — | — | ✓ recepciona | ✓ aprueba | — | ✓ |
 | Gastos (`veGastos`) | — | ✓ registra | — | — | ✓ aprueba | — | ✓ |
-| Series (`veSeries`) | — | — | — | — | ✓ | — | ✓ |
+| Series (`veSeries`) | — | — | — | — | ✓ configura | — | ✓ configura |
 | Frecuentes (`veFrecuentes`) | — | — | — | ✓ | ✓ | — | ✓ |
 | Datos del negocio (`veNegocio`) | — | — | — | — | 👁 | — | ✓ |
 | Equipo *(`puedeGestionarEquipo`)* | — | — | — | — | — | — | ✓ |
 | Políticas de control *(`puedeSupervisar`)* | — | — | — | — | ✓ | — | ✓ |
 | Componentes UI *(`isAdmin`)* | — | — | — | — | — | — | — |
 
+Capacidades que **no** son ítems de menú (gatean botones dentro de una pantalla que
+ya se ve):
+
+| Capacidad | Qué habilita | Vendedor | Cajero | Operario | Despachador | Supervisor | Contador | Dueño |
+|---|---|:-:|:-:|:-:|:-:|:-:|:-:|:-:|
+| `puedeConfigSeries` | Declarar/editar/desactivar series por local y dar de alta o archivar establecimientos anexos (Series + Negocio) | — | — | — | — | ✓ | — | ✓ |
+| `puedeAnular` | Comunicación de baja / resumen de anulación (Comprobantes) | \* | \* | \* | \* | \* | \* | \* |
+
+\* `puedeAnular` no lo implica ningún rol: es un rol **aparte** (`anulacion`) que el
+dueño otorga a quien decida, precisamente porque la baja ante SUNAT es irreversible.
+
 Notas de diseño:
+
+- **`puedeConfigSeries` cambia quién ESCRIBE, no quién VE** (fase Series por sucursal,
+  ver [decision-serie-por-local.md](decision-serie-por-local.md)). El alta y la baja de
+  establecimientos estaban abiertas a cualquier emisor, y desde que el local determina
+  la serie eso era «un cajero puede renumerar la empresa». Series y Negocio se siguen
+  viendo igual —el legacy solo-`emisor` conserva su pantalla de consulta y el `GET` de
+  series—; lo que se cerró es la escritura, en el modelo.
 
 - **Dueño = supervisor por implicación** (`implied_ids`): la matriz no lo lista;
   hereda todo lo del supervisor y suma Equipo. `modal` (usuario e2e con los 5

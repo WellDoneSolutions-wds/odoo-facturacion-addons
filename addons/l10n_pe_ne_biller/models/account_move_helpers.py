@@ -173,8 +173,9 @@ class AccountMove(models.Model):
         if (serie or "").upper() not in habilitadas:
             raise UserError(
                 _(
-                    "La serie '%(serie)s' no está habilitada para %(ruc)s. Configúrala en un "
-                    "diario de venta (campo Serie) o usa una serie registrada: %(lista)s."
+                    "La serie '%(serie)s' no está habilitada para %(ruc)s. Declárala en "
+                    "Series (o en el campo Serie de un diario de venta) o usa una de las ya "
+                    "habilitadas: %(lista)s."
                 )
                 % {
                     "serie": serie,
@@ -183,11 +184,59 @@ class AccountMove(models.Model):
                 }
             )
 
+    def _l10n_pe_check_serie_establecimiento(self):
+        """Una serie declarada para un local solo se emite DESDE ese local.
+
+        Corre junto a _l10n_pe_check_serie, o sea ANTES de _l10n_pe_ne_assign_numero: un
+        comprobante mal armado tiene que rebotar sin consumir número, porque un correlativo
+        quemado deja un hueco en la serie que después hay que justificar ante SUNAT.
+
+        Solo veta lo que el dueño ató a un anexo concreto. Una serie declarada SIN local (la del
+        domicilio fiscal) no ata a nadie: el tenant de una sola serie la emite desde donde
+        quiera, exactamente como hoy. Y la elección explícita del payload sigue mandando en el
+        resolver a propósito —quien pide el local 0003 con la serie de 0002 se está
+        contradiciendo, y lo que corresponde es decírselo, no corregirlo por dentro—."""
+        self.ensure_one()
+        serie, _corr = self._l10n_pe_serie_correlativo()
+        local = self.env["l10n_pe_ne.serie"]._l10n_pe_ne_local_de_serie(
+            self.company_id, serie)
+        if not local:
+            return
+        actual = self.l10n_pe_ne_cod_establecimiento or "0000"
+        if actual == local.codigo:
+            return
+        alterna = self.env["l10n_pe_ne.serie"]._l10n_pe_ne_serie_de(
+            self.company_id, self._l10n_pe_document_type(),
+            self.env["l10n_pe_ne.establecimiento"].sudo().search(
+                [("codigo", "=", actual), ("company_id", "=", self.company_id.id)], limit=1),
+            familia=self._l10n_pe_serie_prefix(),
+        )
+        raise UserError(
+            _(
+                "La serie '%(serie)s' es del establecimiento %(suyo)s%(dir)s, pero este "
+                "comprobante declara el %(actual)s. Una serie pertenece a UN solo local (SUNAT "
+                "numera por RUC y serie): emitirla desde otro mezclaría la numeración de los "
+                "dos. Emite desde %(suyo)s, o usa la serie del %(actual)s%(sugerida)s."
+            )
+            % {
+                "serie": serie,
+                "suyo": local.codigo,
+                "dir": " (%s)" % local.direccion if local.direccion else "",
+                "actual": actual if actual != "0000" else _("0000 (domicilio fiscal)"),
+                "sugerida": " (%s)" % alterna if alterna else "",
+            }
+        )
+
     def _l10n_pe_ne_series_habilitadas(self):
-        """Series válidas del emisor (QA-074): las configuradas en sus diarios de venta
-        (l10n_pe_ne_serie) con su variante de familia (F↔B), más los defaults que genera el
-        sistema (F001/B001 y las notas FC01/FD01/BC01/BD01). No se usa el histórico de series
-        ya emitidas a propósito: una serie inventada usada por error no debe volverse 'válida'."""
+        """Series válidas del emisor (QA-074): las declaradas en el registro por local
+        (l10n_pe_ne.serie), las configuradas en sus diarios de venta (l10n_pe_ne_serie) con su
+        variante de familia (F↔B), y los defaults que genera el sistema (F001/B001 y las notas
+        FC01/FD01/BC01/BD01). No se usa el histórico de series ya emitidas a propósito: una serie
+        inventada usada por error no debe volverse 'válida'.
+
+        Es una UNIÓN, nunca un reemplazo: ninguna serie que valida hoy deja de validar cuando
+        aparece el registro, y con el registro vacío el conjunto es exactamente el de siempre.
+        El diario sigue siendo un origen vivo (no se deprecia en esta tanda)."""
         self.ensure_one()
         # E001 = serie por defecto de la liquidación de compra electrónica (tipo 04).
         validas = {"F001", "B001", "FC01", "FD01", "BC01", "BD01", "E001"}
@@ -205,6 +254,12 @@ class AccountMove(models.Model):
                 validas.add("B" + base[1:])
             elif len(base) >= 2 and base[0] == "E":
                 validas.add(base)
+        # Solo las ACTIVAS: apagar una serie en el registro es decir "ya no la emito", y eso
+        # tiene que cortar la emisión, no quedarse en un adorno de la pantalla.
+        for s in self.env["l10n_pe_ne.serie"].sudo().search(
+            [("company_id", "=", self.company_id.id), ("activa", "=", True)]
+        ):
+            validas.add((s.codigo or "").upper())
         return validas
 
     def _l10n_pe_product_lines(self):
@@ -662,7 +717,16 @@ class AccountMove(models.Model):
         una boleta B001 o una nota FC01 tomaban el correlativo intermedio (hueco por serie → riesgo
         de observación en el RVIE). Crea una ir.sequence 'no_gap' al primer uso, sembrada tras el
         correlativo más alto ya emitido en esa serie (migración transparente desde el folio global).
-        Mismo patrón, ya probado, que las Guías de Remisión (l10n_pe_ne_guia_remision)."""
+        Mismo patrón, ya probado, que las Guías de Remisión (l10n_pe_ne_guia_remision).
+
+        CONTRATO: la clave de la secuencia es (compañía, serie) y NUNCA incluye el
+        establecimiento. Meter el local en el `code` es la tentación natural cuando cada sucursal
+        emite lo suyo, y es exactamente el bug: dos locales que por olvido compartieran F001
+        obtendrían cada uno F001-00000001, o sea comprobantes duplicados que solo se corrigen con
+        comunicación de baja ante SUNAT. La unicidad del número la garantiza la serie; que una
+        serie sea de un local es una restricción de CONFIGURACIÓN (l10n_pe_ne.serie, único por
+        RUC), jamás de numeración. Como el código de serie ya es único por RUC, «correlativo por
+        serie» ES «correlativo por local» sin tocar una línea de este motor."""
         code = "l10n_pe.ne.cpe.%s" % serie
         # Lock consultivo: serializa el primer uso de una (serie, compañía) para no crear la
         # secuencia dos veces en concurrencia; después la unicidad la garantiza 'no_gap' (que

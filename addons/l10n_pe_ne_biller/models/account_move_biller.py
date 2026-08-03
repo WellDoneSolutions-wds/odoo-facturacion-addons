@@ -223,6 +223,35 @@ class AccountMoveLine(models.Model):
 class AccountMove(models.Model):
     _inherit = "account.move"
 
+    def init(self):
+        super().init()
+        # Único parcial sobre las secuencias de comprobante: el pg_advisory_xact_lock de
+        # _l10n_pe_ne_next_correlativo no basta bajo REPEATABLE READ (una transacción
+        # concurrente puede no ver la secuencia recién commiteada y crear otra, con lo que dos
+        # comprobantes se llevan el mismo número). Las guías ya tenían este índice; a la ruta
+        # CPE le faltaba, y con dos sucursales emitiendo a la vez la carrera deja de ser teórica.
+        # Si la base ya la sufrió y arrastra secuencias duplicadas, se LOGUEA y no se crea el
+        # índice: tumbar el upgrade de un tenant por un dato viejo sería peor que la deuda, y la
+        # limpieza es manual porque hay que decidir qué contador sobrevive.
+        self.env.cr.execute("""
+            SELECT code, company_id, count(*) FROM ir_sequence
+             WHERE code LIKE 'l10n_pe.ne.cpe.%'
+             GROUP BY code, company_id HAVING count(*) > 1
+        """)
+        duplicadas = self.env.cr.fetchall()
+        if duplicadas:
+            _logger.warning(
+                "Secuencias de comprobante duplicadas (%s): no se crea "
+                "ir_sequence_cpe_code_company_uniq. Revisa cuál contador conservar: %s",
+                len(duplicadas), duplicadas[:10],
+            )
+            return
+        self.env.cr.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS ir_sequence_cpe_code_company_uniq
+            ON ir_sequence (code, company_id)
+            WHERE code LIKE 'l10n_pe.ne.cpe.%'
+        """)
+
     l10n_pe_biller_state = fields.Selection(
         selection=[
             ("por_enviar", "Por enviar"),

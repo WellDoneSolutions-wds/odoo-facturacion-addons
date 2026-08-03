@@ -4,6 +4,8 @@ Extraído de account_move_biller.py (refactor sin cambio de comportamiento)."""
 import logging
 
 from odoo import _, api, fields, models
+from odoo.exceptions import UserError
+from ..tools.caja_arqueo import normalizar_medio
 from .account_move_biller import DEFAULT_UNIT_CODE, _percep_float
 
 _logger = logging.getLogger(__name__)
@@ -447,6 +449,34 @@ class AccountMove(models.Model):
             return Move.browse()
         return self._l10n_pe_ne_mover_stock(reversa=True)
 
+    @staticmethod
+    def _l10n_pe_ne_normaliza_medios(medios):
+        """C1: canoniza el NOMBRE de cada medio de pago antes de persistirlo.
+
+        El medio es texto libre y llega de cuatro orígenes (POS, Emitir, cobro de cotización,
+        adelanto/abono de órdenes). Sin esto, 'Efectivo' y 'efectivo' eran DOS filas del arqueo:
+        el cajero cuenta un solo cajón y el sistema le pedía contarlo dos veces, así que una de
+        las dos filas cerraba con diferencia sin que faltara un sol. Se normaliza AL ESCRIBIR
+        (aquí) y además se agrupa AL LEER (tools.caja_arqueo), que es lo que consolida la
+        historia ya escrita sin migrar datos. El monto no se toca."""
+        if not isinstance(medios, (list, tuple)):
+            return medios
+        out = []
+        for mp in medios:
+            if isinstance(mp, dict):
+                mp = dict(mp)
+                mp["medio"] = normalizar_medio(mp.get("medio"))
+            out.append(mp)
+        return out
+
+    @api.model_create_multi
+    def create(self, vals_list):
+        for vals in vals_list:
+            if vals.get("l10n_pe_ne_medios_pago"):
+                vals["l10n_pe_ne_medios_pago"] = self._l10n_pe_ne_normaliza_medios(
+                    vals["l10n_pe_ne_medios_pago"])
+        return super().create(vals_list)
+
     def write(self, vals):
         """Revierte el stock al pasar a 'rechazado'.
 
@@ -455,7 +485,37 @@ class AccountMove(models.Model):
         invariante no debe depender de que alguien se acuerde de llamar al helper.
 
         Solo los que ENTRAN a rechazado (los que ya lo estaban no se re-revierten).
+
+        Y congela el establecimiento emisor una vez asignado el número fiscal: el codLocalEmisor
+        viaja dentro del XML firmado, así que cambiarlo después dejaría al comprobante diciendo
+        que salió de un local distinto del que SUNAT recibió. El contexto l10n_pe_ne_bypass_lock
+        lo deja pasar para migraciones/mantenimiento, igual que en la caja.
         """
+        # C1: mismo choke point que en create — TODO origen que escriba medios pasa por aquí
+        # (la SPA por quick_flags, y los roles con `move.sudo().l10n_pe_ne_medios_pago = [...]`).
+        if vals.get("l10n_pe_ne_medios_pago"):
+            vals = dict(vals)
+            vals["l10n_pe_ne_medios_pago"] = self._l10n_pe_ne_normaliza_medios(
+                vals["l10n_pe_ne_medios_pago"])
+        if "l10n_pe_ne_cod_establecimiento" in vals and not self.env.context.get(
+            "l10n_pe_ne_bypass_lock"
+        ):
+            nuevo = vals.get("l10n_pe_ne_cod_establecimiento") or "0000"
+            for m in self:
+                if m.l10n_pe_ne_corr_emit and (
+                    m.l10n_pe_ne_cod_establecimiento or "0000"
+                ) != nuevo:
+                    raise UserError(
+                        _(
+                            "El comprobante %(doc)s ya tiene número fiscal asignado: su "
+                            "establecimiento emisor (%(actual)s) es parte del documento y no se "
+                            "puede cambiar. Si el local está mal, corrígelo con una nota."
+                        )
+                        % {
+                            "doc": "%s-%s" % m._l10n_pe_ne_doc_id(),
+                            "actual": m.l10n_pe_ne_cod_establecimiento or "0000",
+                        }
+                    )
         revertir = self.browse()
         if vals.get("l10n_pe_biller_state") == "rechazado":
             revertir = self.filtered(

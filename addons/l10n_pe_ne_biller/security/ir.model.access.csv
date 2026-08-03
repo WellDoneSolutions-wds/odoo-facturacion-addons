@@ -18,6 +18,9 @@ access_ne_emisor_lote,ne.emisor.lote,model_l10n_pe_ne_lote,group_l10n_pe_ne_emis
 access_ne_emisor_lote_fila,ne.emisor.lote.fila,model_l10n_pe_ne_lote_fila,group_l10n_pe_ne_emisor,1,1,1,1
 access_ne_emisor_vehiculo,ne.emisor.vehiculo,model_l10n_pe_ne_vehiculo,group_l10n_pe_ne_emisor,1,1,1,1
 access_ne_emisor_conductor,ne.emisor.conductor,model_l10n_pe_ne_conductor,group_l10n_pe_ne_emisor,1,1,1,1
-access_ne_emisor_establecimiento,ne.emisor.establecimiento,model_l10n_pe_ne_establecimiento,group_l10n_pe_ne_emisor,1,1,1,1
+access_ne_emisor_establecimiento,ne.emisor.establecimiento,model_l10n_pe_ne_establecimiento,group_l10n_pe_ne_emisor,1,0,0,0
+access_ne_config_establecimiento,ne.config.establecimiento,model_l10n_pe_ne_establecimiento,group_l10n_pe_ne_config_series,1,1,1,1
+access_ne_emisor_serie,ne.emisor.serie,model_l10n_pe_ne_serie,group_l10n_pe_ne_emisor,1,0,0,0
+access_ne_config_serie,ne.config.serie,model_l10n_pe_ne_serie,group_l10n_pe_ne_config_series,1,1,1,0
 access_ne_emisor_stock_lot,ne.emisor.stock.lot,stock.model_stock_lot,group_l10n_pe_ne_emisor,1,1,1,0
 access_ne_emisor_stock_move_line,ne.emisor.stock.move.line,stock.model_stock_move_line,group_l10n_pe_ne_emisor,1,0,0,0

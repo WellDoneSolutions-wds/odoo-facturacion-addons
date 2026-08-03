@@ -29,6 +29,7 @@ from odoo import _, api, fields, models
 from odoo.exceptions import AccessError, UserError, ValidationError
 # Misma fuente que el desglose del biller: si el IGV cambia, la conversión de la emisión no driftea.
 from odoo.addons.l10n_pe_ne_biller.models.l10n_pe_ne_cotizacion import IGV_RATE
+from odoo.addons.l10n_pe_ne_biller.tools.caja_arqueo import normalizar_medio
 
 _G = "l10n_pe_ne_roles."
 _G_CAJA = _G + "group_l10n_pe_ne_caja"
@@ -214,15 +215,20 @@ class L10nPeNeOrdenTrabajo(models.Model):
         # Nota: anular una orden con adelanto pagado NO devuelve el dinero automáticamente; el
         # reembolso es un retiro de caja manual (v1). Por eso 'encolada'→anulada exige supervisor.
         self.ensure_one()
-        # Vía A: si el adelanto ya se facturó, anular la orden dejaría vivo un comprobante de anticipo
-        # sin regularizar ante SUNAT. La reversión es un acto fiscal explícito (nota de crédito del
-        # anticipo), no un efecto colateral de anular: se exige revertirlo ANTES.
+        # PRIMERO rol y transición (hallazgo de auditoría: el check fiscal corría antes y un
+        # cajero sin permiso de anular recibía "emite la nota de crédito" — mensaje engañoso
+        # que sugiere una acción a quien jamás podrá ejecutarla). Sonda del mixin: valida
+        # arista y grupo sin exigir aún el motivo ni escribir.
+        self._check_transicion("anulada", sonda=True)
+        # Vía A: si el adelanto ya se facturó, anular la orden dejaría vivo un comprobante de
+        # anticipo sin regularizar ante SUNAT. La reversión es un acto fiscal explícito (nota
+        # de crédito del anticipo), no un efecto colateral de anular: se exige revertir ANTES.
         if self.anticipo_factura_id and \
                 self.anticipo_factura_id.l10n_pe_biller_state not in ("anulado", "rechazado"):
             raise UserError(_(
                 "El adelanto ya se facturó en el comprobante %s: emite primero su nota de crédito "
                 "y luego anula la orden.")
-                % (self.anticipo_factura_id.name or self.anticipo_factura_id.id))
+                % (self._l10n_pe_ne_anticipo_doc_ref() or self.anticipo_factura_id.id))
         self._avanzar("anulada", motivo=motivo)
         return self._l10n_pe_ne_orden_dict()
 
@@ -236,6 +242,14 @@ class L10nPeNeOrdenTrabajo(models.Model):
             raise AccessError(_("No tienes permiso para cobrar el adelanto."))
         # A2: serializa la fila — dos registros de adelanto concurrentes no se duplican.
         self._l10n_pe_ne_lock()
+        # Espejo del check de registrar_abono: cada tipo tiene SU método de pago a cuenta. Sin
+        # esto, una reserva "adelantada" por este endpoint quedaba escrita a 'encolada' — un
+        # estado SIN aristas en el grafo de reservas (orden irrescatable) — y con Vía A ON
+        # además facturaba el abono, violando el RECIBO-INTERNO-SIEMPRE de las reservas.
+        if self.tipo != "taller":
+            raise UserError(_(
+                "El adelanto único es de las órdenes de taller; una reserva se paga con "
+                "abonos (use el endpoint de abono)."))
         if self.estado != "borrador":
             raise UserError(_("El adelanto solo se registra sobre una orden en borrador."))
         if self.adelanto_movimiento_id:
@@ -253,7 +267,10 @@ class L10nPeNeOrdenTrabajo(models.Model):
                 "pago PARCIAL a cuenta. Si el cliente paga todo por adelantado, emite el "
                 "comprobante de una vez (el trabajo queda pendiente de entrega).",
                 a=monto, t=self.amount_total))
-        medio = (medio or "Efectivo").strip() or "Efectivo"
+        # C1: nombre canónico ANTES de guardarlo en medio_adelanto — de aquí sale el medio por
+        # defecto del comprobante final, y si viaja 'yape' abre su propia fila en el arqueo
+        # aunque el resto del turno se haya cobrado por 'Yape'.
+        medio = normalizar_medio(medio)
         # La caja (biller) crea el movimiento estructurado sobre la sesión abierta.
         mov = self.env["l10n_pe_ne.caja.sesion"]._l10n_pe_ne_registrar_adelanto(
             monto, medio, self.partner_id, _("Adelanto %s") % self.name)
@@ -265,12 +282,35 @@ class L10nPeNeOrdenTrabajo(models.Model):
         anticipo_move_id = False
         anticipo_numero = ""
         if self.company_id.l10n_pe_ne_adelanto_facturado:
+            # GUARDIA TEMPRANA de homogeneidad: el biller solo sabe regularizar un anticipo
+            # como descuento global 04 sobre una operación gravada HOMOGÉNEA con IGV (ver
+            # _l10n_pe_anticipo_gravado). Sin este check, el adelanto de una orden con líneas
+            # mixtas (gravada+exonerada) cobraba el dinero, FACTURABA el anticipo… y recién al
+            # cobrar el saldo descubría que el comprobante final es inemitible — trabajo hecho
+            # y dinero atrapado, sin salida. Se rechaza ANTES de tocar la caja o emitir.
+            if any(not l.afecto_igv for l in self.linea_ids):
+                raise UserError(_(
+                    "Con la Vía A activa (adelanto facturado) el anticipo solo se soporta "
+                    "sobre una orden 100%% gravada con IGV, y esta tiene líneas exoneradas o "
+                    "inafectas. Opciones: separa lo exonerado en otra orden, o cobra este "
+                    "adelanto como recibo interno (Vía B) apagando el switch para esta "
+                    "operación."))
             res_ant = self.env["account.move"].l10n_pe_ne_quick_emit(
                 self._l10n_pe_ne_payload_anticipo(monto, medio))
             anticipo_move_id = res_ant.get("id") if isinstance(res_ant, dict) else False
             anticipo_numero = (res_ant or {}).get("numero") or ""
             if anticipo_move_id:
                 move = self.env["account.move"].browse(anticipo_move_id)
+                # Número FISCAL (serie-correlativo, ej. F001-00000013), no el nombre interno
+                # de Odoo ("F 00000013") que confundía al cajero (hallazgo de auditoría).
+                try:
+                    serie, corr = move._l10n_pe_serie_correlativo()
+                    serie = move.l10n_pe_ne_serie_emit or serie
+                    corr = move.l10n_pe_ne_corr_emit or corr
+                    anticipo_numero = anticipo_numero or (
+                        "%s-%s" % (serie, str(corr).zfill(8)) if serie else "")
+                except Exception:  # noqa: BLE001 — mejor un fallback feo que romper el cobro
+                    pass
                 anticipo_numero = anticipo_numero or move.name or str(anticipo_move_id)
                 # Ajuste de céntimos (espejo del A14 de cobrar_saldo): el motor de impuestos redondea
                 # por línea; si el total emitido difiere del monto pedido, la referencia fiscal del
@@ -338,7 +378,7 @@ class L10nPeNeOrdenTrabajo(models.Model):
                 "El abono (S/ %(a).2f) completaría o superaría el total (S/ %(t).2f): el último pago "
                 "es el SALDO al recoger. Usa «Cobrar saldo y entregar» para cerrar la reserva.",
                 a=monto, t=self.amount_total))
-        medio = (medio or "Efectivo").strip() or "Efectivo"
+        medio = normalizar_medio(medio)   # C1: canónico, ver l10n_pe_ne_registrar_adelanto
         # MISMA pieza que el taller: el biller crea el movimiento estructurado 'adelanto' sobre la
         # sesión abierta; entra al arqueo POR SU MEDIO vía el seam _l10n_pe_ne_por_medio_arqueo. Se
         # enlaza la orden para que unlink lo vea (una reserva con plata no se borra). RECIBO INTERNO:
@@ -404,7 +444,7 @@ class L10nPeNeOrdenTrabajo(models.Model):
                 "saldo (el final debe referenciar un anticipo vigente).",
                 n=self.anticipo_factura_id.name or self.anticipo_factura_id.id,
                 e=self.anticipo_factura_id.l10n_pe_biller_state))
-        medio = (payload.get("medio") or self.medio_adelanto or "Efectivo").strip() or "Efectivo"
+        medio = normalizar_medio(payload.get("medio") or self.medio_adelanto)   # C1
         medios = [{"medio": medio,
                    "monto": self.saldo}]
         payload_emision = self._l10n_pe_ne_payload_emision(medios)
@@ -714,8 +754,11 @@ class L10nPeNeOrdenTrabajo(models.Model):
             "facturaId": self.factura_final_id.id or None,
             "facturaNumero": self.factura_final_id.name or "",
             # Vía A: el comprobante del anticipo (vacío en Vía B). La SPA solo lo pinta.
+            # Número FISCAL (F001-00000013), no el name interno de Odoo (hallazgo).
             "anticipoFacturaId": self.anticipo_factura_id.id or None,
-            "anticipoNumero": self.anticipo_factura_id.name or "",
+            "anticipoNumero": (self._l10n_pe_ne_anticipo_doc_ref()
+                               if self.anticipo_factura_id
+                               else "") or (self.anticipo_factura_id.name or ""),
             "anticipoEstado": self.anticipo_factura_id.l10n_pe_biller_state or "",
             # Reserva: historial de abonos a cuenta (para el taller trae su único adelanto).
             "abonos": abonos,

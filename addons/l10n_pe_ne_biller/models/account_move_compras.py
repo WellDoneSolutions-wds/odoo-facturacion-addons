@@ -8,6 +8,8 @@ from odoo import _, api, fields, models
 from odoo.exceptions import UserError
 from odoo.tools import float_round
 
+from ..tools.caja_arqueo import es_efectivo
+
 
 class AccountMove(models.Model):
     _inherit = "account.move"
@@ -495,9 +497,10 @@ class AccountMove(models.Model):
             ]
         # Forma de pago: Crédito (con cuotas) emite cac:PaymentTerms; medios de pago
         # (efectivo/Yape/…) se guardan como dato interno del POS (no van al XML SUNAT).
-        # Establecimiento emisor (sucursal): código de local anexo SUNAT del comprobante.
-        if payload.get("codEstablecimiento"):
-            move.l10n_pe_ne_cod_establecimiento = payload["codEstablecimiento"]
+        # El establecimiento emisor NO se toca aquí: llega resuelto y validado en el create
+        # (_l10n_pe_ne_resolver_establecimiento). Este método corre después, y para entonces la
+        # serie ya está elegida; volver a escribir el código del payload le pasaría por encima a
+        # la herencia dura de las notas, que ignoran el payload a propósito.
         # Orden de compra del cliente (cac:OrderReference).
         if payload.get("ordenCompra"):
             move.l10n_pe_ne_orden_compra = str(payload["ordenCompra"]).strip()
@@ -580,11 +583,15 @@ class AccountMove(models.Model):
     @staticmethod
     def _l10n_pe_ne_solo_efectivo(medios):
         """¿el pago es 100% efectivo? Sin medios detallados el POS asume efectivo (True). Un solo
-        medio no-efectivo o mezcla desactiva el redondeo (espeja lib/redondeo.ts:esSoloEfectivo)."""
+        medio no-efectivo o mezcla desactiva el redondeo (espeja lib/redondeo.ts:esSoloEfectivo).
+
+        C1: la comparación es case/tilde-insensitive (es_efectivo). Con el `== "Efectivo"` literal,
+        un pago escrito 'efectivo' perdía el redondeo de la Ley 29571 y el cliente pagaba la
+        fracción que no existe en monedas."""
         con_monto = [m for m in (medios or []) if float(m.get("monto") or 0) > 0]
         if not con_monto:
             return True
-        return all((m.get("medio") or "Efectivo").strip() == "Efectivo" for m in con_monto)
+        return all(es_efectivo(m.get("medio") or "Efectivo") for m in con_monto)
 
     def l10n_pe_ne_quick_result(self):
         self.ensure_one()
@@ -595,6 +602,11 @@ class AccountMove(models.Model):
             "tipoDoc": self.l10n_pe_ne_tipo_doc or self._l10n_pe_document_type(),
             "serie": self.l10n_pe_ne_serie_emit or serie,
             "correlativo": (self.l10n_pe_ne_corr_emit or corr).zfill(8),
+            # Local que se DECLARÓ (no el que la pantalla creía): el resolver puede haberlo
+            # sacado de la caja abierta o del comprobante afectado, y el POS ni siquiera lo
+            # manda. Devolverlo aquí es lo que deja al ticket 80mm decir la verdad y al cajero
+            # detectar en el acto que cobró desde el local equivocado.
+            "establecimiento": self.l10n_pe_ne_cod_establecimiento or "0000",
             "estado": self.l10n_pe_biller_state,
             "responseCode": m.group(1) if m else "",
             "mensaje": self.l10n_pe_biller_message or "",
@@ -608,13 +620,15 @@ class AccountMove(models.Model):
     @api.model
     def l10n_pe_ne_quick_list(self, query=None, desde=None, hasta=None, estado=None, tipo=None,
                               forma_pago=None, monto_min=None, monto_max=None, serie=None,
-                              moneda=None, bancarizacion=None, limit=100, offset=None):
+                              moneda=None, bancarizacion=None, establecimiento=None,
+                              limit=100, offset=None):
         """Lista de comprobantes emitidos (sin los blobs), para la UI. Filtros
         opcionales: query (cliente/RUC/correlativo), rango de fechas (desde/hasta),
         estado del facturador (por_enviar/en_proceso/enviado/anulado/rechazado/error),
-        tipo de comprobante (01/03/07/08), forma de pago (Contado/Credito) y rango de
-        monto total (monto_min/monto_max). `estado` y `tipo` aceptan varios valores
-        (lista o CSV "a,b") → filtran con `in` (multiselect en la UI).
+        tipo de comprobante (01/03/07/08), forma de pago (Contado/Credito), rango de
+        monto total (monto_min/monto_max) y establecimiento emisor. `estado`, `tipo`,
+        `serie` y `establecimiento` aceptan varios valores (lista o CSV "a,b") →
+        filtran con `in` (multiselect en la UI).
 
         Paginación opt-in: con `offset` devuelve {items, total} (total vía
         search_count sobre el mismo dominio); sin él, la lista plana de siempre."""
@@ -632,6 +646,7 @@ class AccountMove(models.Model):
         estados = _as_list(estado)
         tipos = _as_list(tipo)
         series = _as_list(serie)
+        locales = _as_list(establecimiento)
         mmin, mmax = _num(monto_min), _num(monto_max)
         # Se incluyen los 'por_enviar' (pendientes de envío) para que sean visibles y
         # reenviables desde la UI; antes se excluían y quedaban sin dónde verse.
@@ -642,6 +657,16 @@ class AccountMove(models.Model):
             domain.append(("l10n_pe_ne_tipo_doc", "in", tipos))
         if series:
             domain.append(("l10n_pe_ne_serie_emit", "in", series))
+        if locales:
+            # «Cuánto vendió Miraflores» es la primera pregunta del dueño con dos locales.
+            # El '0000' arrastra los comprobantes sin código: un NULL o un '' es domicilio
+            # fiscal (así lo entiende el XML y así lo declaró el emisor), y dejarlos fuera
+            # escondería toda la historia anterior a esta fase justo en el filtro que se usa
+            # para cuadrar el mes.
+            valores = list(locales)
+            if "0000" in valores:
+                valores += [False, ""]
+            domain.append(("l10n_pe_ne_cod_establecimiento", "in", valores))
         if moneda:
             domain.append(("currency_id.name", "=", moneda))
         if forma_pago:
@@ -706,6 +731,10 @@ class AccountMove(models.Model):
                 if m.create_date
                 else "",
                 "mensaje": m.l10n_pe_biller_message or "",
+                # Local emisor declarado (codLocalEmisor del XML). El comprobante anterior a
+                # esta fase no tiene código y es domicilio fiscal: se dice '0000' en vez de
+                # dejar la celda vacía, que se leería como "no se sabe".
+                "establecimiento": m.l10n_pe_ne_cod_establecimiento or "0000",
                 # Notas de crédito vigentes que afectan este comprobante (0 si no tiene).
                 "ncCount": nc_por_doc.get(m.id, (0, 0.0))[0],
                 "ncTotal": round(nc_por_doc.get(m.id, (0, 0.0))[1], 2),
@@ -779,6 +808,12 @@ class AccountMove(models.Model):
             "cliente": self.partner_id.name or "",
             "clienteDoc": self.partner_id.vat or "",
             "moneda": self.currency_id.name or "PEN",
+            # Local emisor tal como salió en el XML (codLocalEmisor) + su dirección, para que
+            # el detalle y la representación impresa (ticket 80mm / A4) digan desde dónde se
+            # vendió. En una NC/ND es el local HEREDADO del comprobante afectado.
+            "establecimiento": self.l10n_pe_ne_cod_establecimiento or "0000",
+            "establecimientoDireccion": self._l10n_pe_ne_direccion_local(
+                self.l10n_pe_ne_cod_establecimiento),
             "estado": self.l10n_pe_biller_state or "",
             "mensaje": self.l10n_pe_biller_message or "",
             "formaPago": self.l10n_pe_ne_forma_pago or "Contado",

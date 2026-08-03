@@ -14,6 +14,7 @@ Levantamiento de los **procesos de negocio multi-rol** del producto: qué son, q
 | [decision-alta-usuarios.md](decision-alta-usuarios.md) | **Alta de usuarios por el dueño del RUC.** Cierra P3. Addon `l10n_pe_ne_roles`, `sudo()` + whitelist, cero ACL. Incluye el pentest (7 vectores a cerrar) |
 | [decision-integridad-datos.md](decision-integridad-datos.md) | **Integridad del dato antes que las compuertas.** El control real para el cliente con gente: conteo ciego, inmutabilidad, autoría, retiro con contraparte |
 | [decision-friccion-pyme.md](decision-friccion-pyme.md) | **Fricción PyME: el dueño-solo contra su propio POS.** CN-01 y CN-02 clic a clic vs los 3 toques del POS; 12 reglas de degradación mínima y la línea roja SUNAT (emisión sí, ceremonia no) |
+| [decision-serie-por-local.md](decision-serie-por-local.md) | **La serie es del local; el correlativo sigue siendo del RUC.** D1..D7 de la fase Series por sucursal: modelo propio de series, `'0000'` sintético, un solo resolver en la emisión, registro vacío por defecto, muro `group_l10n_pe_ne_config_series` y caja por local |
 
 **Exploración** (material de base; donde contradiga a las decisiones de arriba, gana la decisión):
 

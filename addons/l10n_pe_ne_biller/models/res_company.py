@@ -204,6 +204,51 @@ class ResCompany(models.Model):
     l10n_pe_ne_retiro_umbral = fields.Monetary(
         string='Umbral de retiro con voucher', currency_field='currency_id', default=300.0,
         help="Retiros de caja por encima de este monto exigen número de voucher/depósito y fecha.")
+    # C1 (integridad): si al cobrar no hay caja abierta, se abre UNA sola (saldo inicial 0) para
+    # que la venta caiga en algún arqueo. Sin esto el POS emitía igual y esa plata no entraba en
+    # NINGÚN cierre: la sesión previa está congelada (D-2) y la siguiente empieza después, así que
+    # era dinero físico sin rastro. Activo por defecto porque es la conducta aprobada y no exige
+    # configurar nada; apagable para el RUC que solo factura desde la oficina y no quiere cajas
+    # que nadie abrió. Apagarlo devuelve EXACTAMENTE el comportamiento anterior a esta fase.
+    l10n_pe_ne_caja_autoapertura = fields.Boolean(
+        string="Abrir caja automáticamente al cobrar", default=True,
+        help="Si al emitir un comprobante de venta no hay una caja abierta que lo cuente, se abre "
+             "una con saldo inicial 0 (en el local del comprobante) y se avisa en pantalla. Evita "
+             "ventas que no entran en ningún arqueo. La caja nunca bloquea una venta.")
+    # C2 (integridad): tolerancia de descuadre AL CERRAR la caja. Por debajo, el cierre pasa
+    # como hasta hoy —sin una sola pregunta—; por encima, exige un motivo escrito (que queda en
+    # el arqueo congelado) y avisa al dueño/supervisor. NUNCA bloquea esperando a nadie: en una
+    # bodega de tres personas el supervisor es el que está atendiendo, y un cierre que espera
+    # aprobación es un cajero que se va a su casa con la caja abierta.
+    #
+    # El default NO puede ser 0. Con tolerancia cero, el céntimo de vuelto de CUALQUIER día
+    # obliga a escribir un motivo: el cajero teclea "ok" doscientas veces y el texto deja de
+    # significar nada justo el día que sí hacía falta — el control muere de saturación. S/ 5.00
+    # es la magnitud del error honesto de mostrador (un billete de S/ 5 mal dado de vuelto, o
+    # unas monedas de más en la prisa); a partir de ahí, en una caja de barrio, algo pasó y hay
+    # que poder nombrarlo. Configurable por RUC porque no es lo mismo una bodega que un local
+    # que factura S/ 50 000 al día — y se puede poner en 0 a propósito (tolerancia cero) si el
+    # negocio quiere justificar hasta el céntimo.
+    l10n_pe_ne_cierre_tolerancia = fields.Monetary(
+        string='Tolerancia de descuadre al cerrar caja', currency_field='currency_id',
+        default=5.0,
+        help="Diferencia que se acepta al cerrar la caja sin dar explicaciones. Por encima, el "
+             "cierre exige un motivo escrito y se avisa al dueño o supervisor. El cierre nunca "
+             "queda bloqueado esperando una aprobación.")
+    # C3 (integridad): ¿el gasto nuevo viene marcado como pagado DEL CAJÓN? Es la conducta
+    # habitual del negocio, no una regla del sistema: la bodega paga casi todo con el efectivo
+    # del mostrador y tendría que marcar la casilla doscientas veces al mes; la oficina que paga
+    # por transferencia no debe verla marcada nunca.
+    #
+    # Default False y no True: encenderlo por defecto haría que gastos que hoy no tocan la caja
+    # empezaran a descontarle plata al arqueo el día del upgrade —y que un gasto registrado sin
+    # caja abierta pasara a fallar—, sin que nadie lo haya pedido. Es el único default compatible
+    # con lo que hoy funciona; el negocio que quiera lo contrario lo enciende una vez.
+    l10n_pe_ne_gasto_de_caja = fields.Boolean(
+        string="Los gastos se pagan del cajón por defecto",
+        help="Marca por defecto la casilla «se pagó del cajón» al registrar un gasto. El gasto "
+             "pagado del cajón crea su retiro de caja automáticamente, para que el arqueo deje "
+             "de esperar un dinero que ya se gastó. Se puede desmarcar gasto por gasto.")
     l10n_pe_ne_agente_percepcion = fields.Boolean(
         string="Agente de percepción",
         help="Marcar SOLO si SUNAT designó a la empresa como agente de percepción del IGV "

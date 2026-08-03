@@ -406,6 +406,11 @@ class AccountMove(models.Model):
             # Valida la serie (familia correcta + habilitada, QA-074) ANTES de asignar el
             # correlativo, para no consumir un número si la serie se rechaza.
             move._l10n_pe_check_serie()
+            # Y que la serie sea la del local que el comprobante declara: la incoherencia
+            # (serie de Miraflores declarando San Isidro) se corta aquí, también antes del
+            # correlativo. Va en el envío y no solo en quick_emit para que cubra igual al
+            # comprobante armado desde el backend de Odoo.
+            move._l10n_pe_check_serie_establecimiento()
             # Fija la serie+correlativo fiscal ANTES de construir el payload/firmar, desde la
             # secuencia POR SERIE (no el folio del diario). A partir de aquí el número es estable
             # e igual en payload, XML firmado, QR, PDF y una eventual baja. Va DESPUÉS del guard

@@ -20,6 +20,13 @@ class AccountMove(models.Model):
             # Redondeo de efectivo: el POS lo aplica en vivo con estos parámetros (ver lib/redondeo.ts).
             "redondeoActivo": bool(self.env.company.l10n_pe_ne_redondeo_activo),
             "redondeoModo": self.env.company.l10n_pe_ne_redondeo_modo or "favor",
+            # C1: con la auto-apertura activa, la falta de caja abierta YA NO impide cobrar (el
+            # backend abre el turno al emitir). El POS lo necesita para no seguir deshabilitando
+            # el botón por una condición que dejó de ser un bloqueo: si la pantalla mantuviera
+            # su propia regla, la función aprobada sería inalcanzable justo desde el mostrador.
+            # Apagado, el POS vuelve a exigir caja —sin auto-apertura la venta quedaría huérfana,
+            # y ahí bloquear sí es lo honesto.
+            "cajaAutoapertura": bool(self.env.company.l10n_pe_ne_caja_autoapertura),
         }
 
     @api.model
@@ -31,10 +38,15 @@ class AccountMove(models.Model):
 
     @api.model
     def l10n_pe_ne_series(self, limit=None, offset=None):
-        """Series realmente en uso, agregadas desde los comprobantes emitidos (la serie la
-        fija el emisor al emitir; el correlativo lo autoincrementa Odoo por diario). Por serie:
-        tipo, cuántos emitidos, último correlativo y el próximo a emitir. Incluye las series de
-        retención/percepción (account.payment). Aislado por RUC vía el contexto de compañía."""
+        """Series del emisor: las DECLARADAS en el registro por local (l10n_pe_ne.serie,
+        `origen: 'config'`) unidas a las realmente EN USO, agregadas desde los comprobantes
+        emitidos (`origen: 'uso'`). Por serie: tipo, cuántos emitidos, último correlativo y el
+        próximo a emitir. Incluye las series de retención/percepción (account.payment). Aislado
+        por RUC vía el contexto de compañía.
+
+        El contrato es ADITIVO: las cinco claves de siempre (serie/tipoDoc/tipo/emitidos/
+        ultimo/proximo) y su paginación opt-in no cambian, y con el registro vacío la respuesta
+        es exactamente la de antes —todas las filas con `origen: 'uso'`—."""
         TIPO = {
             "01": "Factura",
             "03": "Boleta",
@@ -71,17 +83,42 @@ class AccountMove(models.Model):
             add(p.l10n_pe_ret_serie, "20", p.l10n_pe_ret_correlativo)
             add(p.l10n_pe_per_serie, "40", p.l10n_pe_per_correlativo)
 
-        filas = [
-            {
+        # Registro por local: se fusiona por CÓDIGO con el agregado de uso, así una serie
+        # declarada que ya emitió sale una sola vez y con sus contadores reales, y una recién
+        # declarada aparece con 0 emitidos y su próximo en 00000001.
+        registro = {
+            s.codigo: s
+            for s in self.env["l10n_pe_ne.serie"].sudo().search(
+                [("company_id", "=", self.env.company.id)]
+            )
+        }
+        for codigo, s in registro.items():
+            agg.setdefault(
+                codigo,
+                {"serie": codigo, "tipoDoc": s.tipo_doc, "emitidos": 0, "ultimo": 0},
+            )
+
+        filas = []
+        for s in sorted(agg.values(), key=lambda x: x["serie"]):
+            reg = registro.get(s["serie"])
+            estab = reg.establecimiento_id if reg else None
+            filas.append({
                 "serie": s["serie"],
                 "tipoDoc": s["tipoDoc"],
                 "tipo": TIPO.get(s["tipoDoc"], s["tipoDoc"]),
                 "emitidos": s["emitidos"],
                 "ultimo": str(s["ultimo"]).zfill(8) if s["ultimo"] else "—",
                 "proximo": str(s["ultimo"] + 1).zfill(8),
-            }
-            for s in sorted(agg.values(), key=lambda x: x["serie"])
-        ]
+                # --- aditivo (registro por local). Una fila 'uso' no sabe de qué local es:
+                # nadie lo declaró, así que se dice null en vez de inventar '0000'.
+                "id": reg.id if reg else None,
+                "origen": "config" if reg else "uso",
+                "establecimiento": ((estab.codigo or "0000") if estab else "0000") if reg else None,
+                "establecimientoId": (estab.id or None) if reg else None,
+                "establecimientoDireccion": (estab.direccion or "") if reg else "",
+                "activa": reg.activa if reg else True,
+                "predeterminada": reg.predeterminada if reg else False,
+            })
         # Paginación opt-in sobre el agregado ya construido (no hay search directo).
         if offset is None:
             return filas
@@ -114,6 +151,17 @@ class AccountMove(models.Model):
             "agentePercepcion": bool(company.l10n_pe_ne_agente_percepcion),
             "redondeoActivo": bool(company.l10n_pe_ne_redondeo_activo),
             "redondeoModo": company.l10n_pe_ne_redondeo_modo or "favor",
+            # C1: auto-apertura de caja al cobrar (ver res_company). Se expone donde el usuario
+            # la puede cambiar — un parámetro de negocio no se hardcodea ni se esconde en el ORM.
+            "cajaAutoapertura": bool(company.l10n_pe_ne_caja_autoapertura),
+            # C2: desde qué diferencia el cierre de caja exige una explicación escrita. Mismo
+            # motivo: la tolerancia de una bodega no es la de un local que factura S/ 50 000 al
+            # día, y quien lo sabe es el dueño, no el código.
+            "toleranciaDescuadre": round(company.l10n_pe_ne_cierre_tolerancia or 0.0, 2),
+            # C3: si en este negocio los gastos salen del cajón por defecto. Lo lee el formulario
+            # de gastos para precargar la casilla: no es una regla del sistema, es cómo paga este
+            # negocio, y eso solo lo sabe el dueño.
+            "gastoDeCaja": bool(company.l10n_pe_ne_gasto_de_caja),
         }
 
     def l10n_pe_ne_get_logo(self):
@@ -214,6 +262,23 @@ class AccountMove(models.Model):
             company.l10n_pe_ne_redondeo_activo = bool(vals.get("redondeoActivo"))
         if vals.get("redondeoModo") in ("favor", "cercano"):
             company.l10n_pe_ne_redondeo_modo = vals["redondeoModo"]
+        if "cajaAutoapertura" in vals:
+            company.l10n_pe_ne_caja_autoapertura = bool(vals.get("cajaAutoapertura"))
+        if "gastoDeCaja" in vals:
+            company.l10n_pe_ne_gasto_de_caja = bool(vals.get("gastoDeCaja"))
+        # C2: tolerancia de descuadre al cerrar caja. El vacío NO es 0: es "no lo toques" —el
+        # formulario del negocio manda todos sus campos en cada guardado, y un input que quedó
+        # en blanco por una recarga a medias no puede dejar al RUC en tolerancia cero (que
+        # obligaría a justificar hasta el céntimo). Para tolerancia cero se escribe 0.
+        tol_raw = vals.get("toleranciaDescuadre")
+        if tol_raw is not None and str(tol_raw).strip() != "":
+            try:
+                tol = float(tol_raw)
+            except (TypeError, ValueError):
+                raise UserError(_("La tolerancia de descuadre debe ser un monto válido."))
+            if tol < 0:
+                raise UserError(_("La tolerancia de descuadre no puede ser negativa."))
+            company.l10n_pe_ne_cierre_tolerancia = round(tol, 2)
         if "logo" in vals:
             self._l10n_pe_ne_set_logo(company, vals.get("logo"))
         return self.l10n_pe_ne_negocio()

@@ -333,7 +333,16 @@ class L10nPeNeCotizacionFlujo(models.Model):
     # ───────────────────────────────────────────── colas (server-side)
     @api.model
     def l10n_pe_ne_cola_cobro(self, offset=0, limit=10):
-        """Cola de cobro (cajero): aceptadas sin convertir."""
+        """Cola de cobro (cajero): aceptadas sin convertir.
+
+        AUTO-EXPIRA al leer (hallazgo de auditoría): entre corrida y corrida del cron
+        diario, una aceptada que pasó su validez seguía apareciendo como cobrable — y el
+        cajero recién descubría el rechazo al intentar cobrar (P6 vinculante). Misma
+        escritura AUTORIZADA e idempotente del cron, acotada a las aceptadas visibles."""
+        for cot in self.sudo().search([("estado", "=", "aceptada"),
+                                       ("company_id", "=", self.env.company.id)]):
+            if cot._l10n_pe_ne_vencida():
+                cot.with_context(l10n_pe_ne_flujo_ok=True).write({"estado": "vencida"})
         return self._l10n_pe_ne_cola_dict(
             [("estado", "=", "aceptada"), ("comprobante_id", "=", False)], offset, limit)
 

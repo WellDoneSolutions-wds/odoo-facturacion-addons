@@ -19,6 +19,7 @@ from odoo.exceptions import AccessError, UserError
 from odoo.tools import float_round, html2plaintext
 
 from ..tools.amount_to_words import leyenda_monto
+from ..tools.caja_arqueo import es_efectivo, normalizar_medio
 
 _logger = logging.getLogger(__name__)
 
@@ -220,6 +221,35 @@ class AccountMoveLine(models.Model):
 
 class AccountMove(models.Model):
     _inherit = "account.move"
+
+    def init(self):
+        super().init()
+        # Único parcial sobre las secuencias de comprobante: el pg_advisory_xact_lock de
+        # _l10n_pe_ne_next_correlativo no basta bajo REPEATABLE READ (una transacción
+        # concurrente puede no ver la secuencia recién commiteada y crear otra, con lo que dos
+        # comprobantes se llevan el mismo número). Las guías ya tenían este índice; a la ruta
+        # CPE le faltaba, y con dos sucursales emitiendo a la vez la carrera deja de ser teórica.
+        # Si la base ya la sufrió y arrastra secuencias duplicadas, se LOGUEA y no se crea el
+        # índice: tumbar el upgrade de un tenant por un dato viejo sería peor que la deuda, y la
+        # limpieza es manual porque hay que decidir qué contador sobrevive.
+        self.env.cr.execute("""
+            SELECT code, company_id, count(*) FROM ir_sequence
+             WHERE code LIKE 'l10n_pe.ne.cpe.%'
+             GROUP BY code, company_id HAVING count(*) > 1
+        """)
+        duplicadas = self.env.cr.fetchall()
+        if duplicadas:
+            _logger.warning(
+                "Secuencias de comprobante duplicadas (%s): no se crea "
+                "ir_sequence_cpe_code_company_uniq. Revisa cuál contador conservar: %s",
+                len(duplicadas), duplicadas[:10],
+            )
+            return
+        self.env.cr.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS ir_sequence_cpe_code_company_uniq
+            ON ir_sequence (code, company_id)
+            WHERE code LIKE 'l10n_pe.ne.cpe.%'
+        """)
 
     l10n_pe_biller_state = fields.Selection(
         selection=[
@@ -1555,8 +1585,9 @@ class AccountMove(models.Model):
         if (serie or "").upper() not in habilitadas:
             raise UserError(
                 _(
-                    "La serie '%(serie)s' no está habilitada para %(ruc)s. Configúrala en un "
-                    "diario de venta (campo Serie) o usa una serie registrada: %(lista)s."
+                    "La serie '%(serie)s' no está habilitada para %(ruc)s. Declárala en "
+                    "Series (o en el campo Serie de un diario de venta) o usa una de las ya "
+                    "habilitadas: %(lista)s."
                 )
                 % {
                     "serie": serie,
@@ -1565,11 +1596,59 @@ class AccountMove(models.Model):
                 }
             )
 
+    def _l10n_pe_check_serie_establecimiento(self):
+        """Una serie declarada para un local solo se emite DESDE ese local.
+
+        Corre junto a _l10n_pe_check_serie, o sea ANTES de _l10n_pe_ne_assign_numero: un
+        comprobante mal armado tiene que rebotar sin consumir número, porque un correlativo
+        quemado deja un hueco en la serie que después hay que justificar ante SUNAT.
+
+        Solo veta lo que el dueño ató a un anexo concreto. Una serie declarada SIN local (la del
+        domicilio fiscal) no ata a nadie: el tenant de una sola serie la emite desde donde
+        quiera, exactamente como hoy. Y la elección explícita del payload sigue mandando en el
+        resolver a propósito —quien pide el local 0003 con la serie de 0002 se está
+        contradiciendo, y lo que corresponde es decírselo, no corregirlo por dentro—."""
+        self.ensure_one()
+        serie, _corr = self._l10n_pe_serie_correlativo()
+        local = self.env["l10n_pe_ne.serie"]._l10n_pe_ne_local_de_serie(
+            self.company_id, serie)
+        if not local:
+            return
+        actual = self.l10n_pe_ne_cod_establecimiento or "0000"
+        if actual == local.codigo:
+            return
+        alterna = self.env["l10n_pe_ne.serie"]._l10n_pe_ne_serie_de(
+            self.company_id, self._l10n_pe_document_type(),
+            self.env["l10n_pe_ne.establecimiento"].sudo().search(
+                [("codigo", "=", actual), ("company_id", "=", self.company_id.id)], limit=1),
+            familia=self._l10n_pe_serie_prefix(),
+        )
+        raise UserError(
+            _(
+                "La serie '%(serie)s' es del establecimiento %(suyo)s%(dir)s, pero este "
+                "comprobante declara el %(actual)s. Una serie pertenece a UN solo local (SUNAT "
+                "numera por RUC y serie): emitirla desde otro mezclaría la numeración de los "
+                "dos. Emite desde %(suyo)s, o usa la serie del %(actual)s%(sugerida)s."
+            )
+            % {
+                "serie": serie,
+                "suyo": local.codigo,
+                "dir": " (%s)" % local.direccion if local.direccion else "",
+                "actual": actual if actual != "0000" else _("0000 (domicilio fiscal)"),
+                "sugerida": " (%s)" % alterna if alterna else "",
+            }
+        )
+
     def _l10n_pe_ne_series_habilitadas(self):
-        """Series válidas del emisor (QA-074): las configuradas en sus diarios de venta
-        (l10n_pe_ne_serie) con su variante de familia (F↔B), más los defaults que genera el
-        sistema (F001/B001 y las notas FC01/FD01/BC01/BD01). No se usa el histórico de series
-        ya emitidas a propósito: una serie inventada usada por error no debe volverse 'válida'."""
+        """Series válidas del emisor (QA-074): las declaradas en el registro por local
+        (l10n_pe_ne.serie), las configuradas en sus diarios de venta (l10n_pe_ne_serie) con su
+        variante de familia (F↔B), y los defaults que genera el sistema (F001/B001 y las notas
+        FC01/FD01/BC01/BD01). No se usa el histórico de series ya emitidas a propósito: una serie
+        inventada usada por error no debe volverse 'válida'.
+
+        Es una UNIÓN, nunca un reemplazo: ninguna serie que valida hoy deja de validar cuando
+        aparece el registro, y con el registro vacío el conjunto es exactamente el de siempre.
+        El diario sigue siendo un origen vivo (no se deprecia en esta tanda)."""
         self.ensure_one()
         validas = {"F001", "B001", "FC01", "FD01", "BC01", "BD01"}
         journals = self.env["account.journal"].sudo().search(
@@ -1584,6 +1663,12 @@ class AccountMove(models.Model):
             if len(base) >= 2 and base[0] in ("F", "B"):
                 validas.add("F" + base[1:])
                 validas.add("B" + base[1:])
+        # Solo las ACTIVAS: apagar una serie en el registro es decir "ya no la emito", y eso
+        # tiene que cortar la emisión, no quedarse en un adorno de la pantalla.
+        for s in self.env["l10n_pe_ne.serie"].sudo().search(
+            [("company_id", "=", self.company_id.id), ("activa", "=", True)]
+        ):
+            validas.add((s.codigo or "").upper())
         return validas
 
     def _l10n_pe_product_lines(self):
@@ -2041,7 +2126,16 @@ class AccountMove(models.Model):
         una boleta B001 o una nota FC01 tomaban el correlativo intermedio (hueco por serie → riesgo
         de observación en el RVIE). Crea una ir.sequence 'no_gap' al primer uso, sembrada tras el
         correlativo más alto ya emitido en esa serie (migración transparente desde el folio global).
-        Mismo patrón, ya probado, que las Guías de Remisión (l10n_pe_ne_guia_remision)."""
+        Mismo patrón, ya probado, que las Guías de Remisión (l10n_pe_ne_guia_remision).
+
+        CONTRATO: la clave de la secuencia es (compañía, serie) y NUNCA incluye el
+        establecimiento. Meter el local en el `code` es la tentación natural cuando cada sucursal
+        emite lo suyo, y es exactamente el bug: dos locales que por olvido compartieran F001
+        obtendrían cada uno F001-00000001, o sea comprobantes duplicados que solo se corrigen con
+        comunicación de baja ante SUNAT. La unicidad del número la garantiza la serie; que una
+        serie sea de un local es una restricción de CONFIGURACIÓN (l10n_pe_ne.serie, único por
+        RUC), jamás de numeración. Como el código de serie ya es único por RUC, «correlativo por
+        serie» ES «correlativo por local» sin tocar una línea de este motor."""
         code = "l10n_pe.ne.cpe.%s" % serie
         # Lock consultivo: serializa el primer uso de una (serie, compañía) para no crear la
         # secuencia dos veces en concurrencia; después la unicidad la garantiza 'no_gap' (que
@@ -2982,6 +3076,11 @@ class AccountMove(models.Model):
             # Valida la serie (familia correcta + habilitada, QA-074) ANTES de asignar el
             # correlativo, para no consumir un número si la serie se rechaza.
             move._l10n_pe_check_serie()
+            # Y que la serie sea la del local que el comprobante declara: la incoherencia
+            # (serie de Miraflores declarando San Isidro) se corta aquí, también antes del
+            # correlativo. Va en el envío y no solo en quick_emit para que cubra igual al
+            # comprobante armado desde el backend de Odoo.
+            move._l10n_pe_check_serie_establecimiento()
             # Fija la serie+correlativo fiscal ANTES de construir el payload/firmar, desde la
             # secuencia POR SERIE (no el folio del diario). A partir de aquí el número es estable
             # e igual en payload, XML firmado, QR, PDF y una eventual baja. Va DESPUÉS del guard
@@ -3088,6 +3187,20 @@ class AccountMove(models.Model):
             partner = origin.partner_id
         else:
             partner = self._l10n_pe_ne_quick_partner(payload.get("cliente") or {})
+            # FACTURA (01) exige RUC (hallazgo de auditoría): SUNAT rechaza una factura a
+            # DNI/consumidor final, pero el rechazo llegaba DESPUÉS de emitir (comprobante en
+            # 'error' con correlativo consumido). Se corta aquí, antes de armar el move. La
+            # boleta (03) acepta cualquier documento; NC/ND heredan el cliente del original.
+            # Se valida el NÚMERO (11 dígitos), no el tipo de documento latam: ese catálogo
+            # se completa de forma desigual y bloquearía emisiones legítimas.
+            if tipo == "01":
+                ruc = (partner.vat or "").strip()
+                if len(ruc) != 11 or not ruc.isdigit():
+                    raise UserError(_(
+                        "Una FACTURA exige un cliente con RUC válido (11 dígitos). "
+                        "«%(cli)s» tiene el documento n.º %(nd)s: emite una BOLETA, o "
+                        "corrige el cliente con su RUC.",
+                        cli=partner.name or "-", nd=ruc or "(vacío)"))
         # Descuento global (% sobre toda la operación): se prorratea a cada línea como descuento que
         # afecta la base (cat. 53 código 00), combinándose con el descuento propio de la línea. Produce
         # los mismos totales que un descuento global y reusa la emisión de descuento por ítem ya validada.
@@ -3175,6 +3288,18 @@ class AccountMove(models.Model):
                     },
                 )
             )
+        # Local emisor ANTES del create: decide la serie, y la serie decide el contador. El
+        # payload sigue pudiendo imponerlo; si lo que impone contradice a la serie pedida, el
+        # gate de _l10n_pe_check_serie_establecimiento lo corta antes de quemar el correlativo.
+        cod_estab = self._l10n_pe_ne_resolver_establecimiento(payload, origin)
+        # C1: auto-apertura de caja. Va AQUÍ —después de resolver el local y ANTES del create—
+        # por dos razones que no son de estilo:
+        #   * después de resolver, porque el resolver mira la caja abierta (escalón 4) y abrirla
+        #     antes le cambiaría la respuesta a este mismo comprobante;
+        #   * antes del create, porque el arqueo amarra las ventas por `create_date >=
+        #     fecha_apertura`: una caja abierta después del move dejaría la venta igual de
+        #     huérfana que hoy, con la sesión abierta de adorno.
+        caja_abierta = self._l10n_pe_ne_autoabrir_caja(tipo, cod_estab, enviar)
         vals = {
             "move_type": "out_refund" if tipo == "07" else "out_invoice",
             "partner_id": partner.id,
@@ -3182,7 +3307,8 @@ class AccountMove(models.Model):
             "invoice_date": payload.get("fechaEmision")
             or self._l10n_pe_ne_today_lima(),
             "l10n_pe_serie": payload.get("serie")
-            or self._l10n_pe_ne_default_serie(tipo, origin),
+            or self._l10n_pe_ne_default_serie(tipo, origin, cod_estab),
+            "l10n_pe_ne_cod_establecimiento": cod_estab,
             "invoice_line_ids": lines,
         }
         # Alinear el tipo latam con el tipoDoc pedido: sin esto, una BOLETA a un cliente
@@ -3327,7 +3453,42 @@ class AccountMove(models.Model):
             # El llamador (l10n_pe_ne_preflight) valida y revierte la transacción.
             return move
         move.action_l10n_pe_send_to_biller()
-        return move.l10n_pe_ne_quick_result()
+        res = move.l10n_pe_ne_quick_result()
+        if caja_abierta:
+            # La SPA avisa «se abrió tu caja»: el cajero TIENE que enterarse, porque al cerrar va a
+            # contar un turno que no abrió él (y con saldo inicial 0, no el sencillo del cajón).
+            res["cajaAbierta"] = caja_abierta._l10n_pe_ne_aviso_apertura()
+        return res
+
+    @api.model
+    def _l10n_pe_ne_autoabrir_caja(self, tipo, cod_estab, enviar=True):
+        """C1: abre la caja del local si no hay ninguna que cuente esta venta. Devuelve la sesión
+        recién abierta (para avisarlo en la respuesta) o un recordset vacío.
+
+        Se queda fuera:
+          * las NOTAS (07/08): el arqueo solo mira `out_invoice`, así que una NC nunca cae en él y
+            abrir una caja por corregir un documento sería ruido puro;
+          * el PRE-FLIGHT (`enviar=False`): valida y revierte, no debe dejar rastro;
+          * el LOTE masivo (contexto `l10n_pe_ne_sin_autoapertura`): subir 200 comprobantes desde
+            la oficina no es un cobro de mostrador, y le abriría al contador una caja que nadie
+            atiende;
+          * el RUC que apagó `l10n_pe_ne_caja_autoapertura` (vuelve al comportamiento anterior).
+
+        Nunca lanza: la caja no bloquea una venta (si la apertura falla, el peor caso es el de
+        hoy — la venta sale igual)."""
+        if not enviar or tipo in ("07", "08"):
+            return self.env["l10n_pe_ne.caja.sesion"].browse()
+        if self.env.context.get("l10n_pe_ne_sin_autoapertura"):
+            return self.env["l10n_pe_ne.caja.sesion"].browse()
+        if not self.env.company.l10n_pe_ne_caja_autoapertura:
+            return self.env["l10n_pe_ne.caja.sesion"].browse()
+        try:
+            sesion, abierta_ahora = self.env["l10n_pe_ne.caja.sesion"]._l10n_pe_ne_asegurar_sesion(
+                cod_estab)
+        except Exception as e:  # noqa: BLE001 — la caja jamás tumba una emisión
+            _logger.warning("Caja: no se pudo asegurar la sesión al cobrar (%s)", e)
+            return self.env["l10n_pe_ne.caja.sesion"].browse()
+        return sesion if abierta_ahora else self.env["l10n_pe_ne.caja.sesion"].browse()
 
     @api.model
     def l10n_pe_ne_preflight(self, payload):
@@ -3346,10 +3507,24 @@ class AccountMove(models.Model):
             pass
 
         findings = []
+        # Cliente inexistente = FINDING, no excepción (hallazgo de auditoría: un clienteId
+        # huérfano hacía crear-y-revertir el partner dentro del savepoint y el request moría
+        # en 404 HTML al flushear la caché envenenada — un validador nunca debe explotar).
+        payload = dict(payload or {})
+        cid = (payload.get("cliente") or {}).get("id") or payload.get("clienteId")
+        if cid:
+            try:
+                cid_ok = self.env["res.partner"].browse(int(cid)).exists()
+            except (TypeError, ValueError):
+                cid_ok = False
+            if not cid_ok:
+                return [{"code": "cliente_no_existe", "campo": "cliente",
+                         "nivel": "error",
+                         "mensaje": _("El cliente indicado (id %s) no existe.") % cid}]
         try:
             with self.env.cr.savepoint():
                 try:
-                    move = self.l10n_pe_ne_quick_emit(dict(payload or {}), enviar=False)
+                    move = self.l10n_pe_ne_quick_emit(payload, enviar=False)
                     findings = move._l10n_pe_ne_validaciones()
                 except UserError as e:
                     findings = [{"code": "bloqueo", "campo": "", "nivel": "error",
@@ -3381,20 +3556,128 @@ class AccountMove(models.Model):
                 )
             )
 
-    def _l10n_pe_ne_default_serie(self, tipo, origin=None):
-        """Serie por defecto: F001/B001 para factura/boleta; FC01/FD01 (o BC01/BD01 si el afectado es
-        boleta) para NC/ND, derivando la familia del documento original."""
+    def _l10n_pe_ne_default_serie(self, tipo, origin=None, cod_estab=None):
+        """Serie por defecto para (tipo, local): la que ese local declaró en el registro y, si no
+        declaró ninguna, F001/B001 para factura/boleta y FC01/FD01 (o BC01/BD01 si el afectado es
+        boleta) para NC/ND, derivando la familia del documento original.
+
+        El fallback está intacto carácter por carácter: con el registro vacío —que es como
+        arranca y como se queda quien no configura nada— esta función responde exactamente lo
+        mismo que antes de que existieran las series por local."""
+        base = (
+            "B"
+            if origin is not None and (origin.l10n_pe_serie or "F")[:1].upper() == "B"
+            else "F"
+        )
+        # '0000' (y la ausencia de código) es el domicilio fiscal: recordset vacío, no una fila
+        # que buscar (D3). Sus series son las que no apuntan a ningún establecimiento.
+        estab = self.env["l10n_pe_ne.establecimiento"].browse()
+        if cod_estab and cod_estab != "0000":
+            estab = estab.sudo().search(
+                [("codigo", "=", cod_estab),
+                 ("company_id", "=", self.env.company.id)], limit=1)
+        declarada = self.env["l10n_pe_ne.serie"]._l10n_pe_ne_serie_de(
+            self.env.company, tipo, estab,
+            # La familia solo acota en las notas: un tipo 07 admite FC02 y BC02 en el registro,
+            # pero la de ESTA nota la manda el documento afectado.
+            familia=base if tipo in ("07", "08") else None,
+        )
+        if declarada:
+            return declarada
         if tipo == "03":
             return "B001"
         if tipo in ("07", "08"):
-            base = (
-                "B"
-                if origin is not None
-                and (origin.l10n_pe_serie or "F")[:1].upper() == "B"
-                else "F"
-            )
             return base + ("C01" if tipo == "07" else "D01")
         return "F001"
+
+    @api.model
+    def _l10n_pe_ne_resolver_establecimiento(self, payload, origin=None):
+        """Local emisor (codLocalEmisor) del comprobante que se va a crear.
+
+        UN SOLO resolver y llamado ANTES del create: el local decide la serie y la serie decide
+        el contador, así que resolverlo después —donde estaba, en _l10n_pe_ne_quick_flags— llega
+        tarde para elegirla y demasiado tarde para rebotar sin quemar un correlativo. Todos los
+        canales (SPA, orden de trabajo, cobro de cotización, lote masivo) pasan por quick_emit,
+        de modo que esta es la única regla de local que existe.
+
+        Cadena, de lo más específico a lo más general:
+
+          1. NC/ND: el local del comprobante afectado. Herencia DURA, el payload se ignora: una
+             nota no se emite «desde otro local», es dato derivado del documento que corrige, y
+             hasta ahora todas declaraban '0000' aunque corrigieran una venta de la sucursal.
+          2. `codEstablecimiento` del payload: la elección explícita del emisor manda.
+          3. Local de la serie pedida, si esa serie está declarada con local: pedir F002 ES decir
+             «emito desde San Isidro», y obligar a repetirlo en dos campos solo da para
+             contradecirse.
+          4. Local de la caja abierta: se declara una vez por turno, no una vez por venta.
+          5. '0000' (domicilio fiscal), que es lo que hacían todos hasta esta fase."""
+        payload = payload or {}
+        if origin is not None:
+            # Sin validar contra el catálogo: es historia ya emitida y su código viaja congelado
+            # en el XML del afectado. Si el local se archivó después, la nota igual debe salir.
+            return origin.l10n_pe_ne_cod_establecimiento or "0000"
+        Estab = self.env["l10n_pe_ne.establecimiento"]
+        if payload.get("codEstablecimiento"):
+            return Estab._l10n_pe_ne_check_codigo(payload["codEstablecimiento"])
+        serie = (payload.get("serie") or "").strip().upper()
+        if serie:
+            local = self.env["l10n_pe_ne.serie"]._l10n_pe_ne_local_de_serie(
+                self.env.company, serie)
+            if local:
+                return local.codigo
+        return self.env["l10n_pe_ne.caja.sesion"]._l10n_pe_ne_local_abierto() or "0000"
+
+    @api.model
+    def l10n_pe_ne_contexto_emision(self, tipo_doc=None, serie=None, doc_afectado_id=None):
+        """Con qué local y qué serie saldría AHORA MISMO un comprobante de ese tipo, sin emitir
+        nada.
+
+        Existe para que la pantalla PINTE la decisión del backend en vez de deducirla: la cadena
+        (nota → payload → serie → caja → domicilio fiscal) es una sola y vive en el resolver. Una
+        SPA que la reimplementara mostraría un local y emitiría otro — y desde que el POS y
+        Emitir mandan el código explícito, lo que muestran es lo que se declara ante SUNAT.
+
+        `doc_afectado_id` es lo que hace útil esto en una nota: su local es dato DERIVADO del
+        comprobante que corrige y no una elección, así que la pantalla lo pinta bloqueado en vez
+        de ofrecer un selector cuyo valor el emit va a ignorar."""
+        tipo = str(tipo_doc or "01")
+        origin = None
+        if tipo in ("07", "08") and doc_afectado_id:
+            # browse sin sudo: la record rule de compañía es la que impide preguntar por el
+            # local de un comprobante de otro tenant.
+            origin = self.browse(int(doc_afectado_id)).exists() or None
+        cod = self._l10n_pe_ne_resolver_establecimiento(
+            {"serie": serie} if serie else {}, origin)
+        return {
+            "tipoDoc": tipo,
+            "codEstablecimiento": cod,
+            "establecimiento": self._l10n_pe_ne_direccion_local(cod),
+            # Mismo orden que el armado de vals: la serie tecleada manda, y si no hay, la que
+            # ese local declaró (o el default de siempre si no declaró ninguna).
+            "serie": (serie or "").strip().upper()
+                     or self._l10n_pe_ne_default_serie(tipo, origin, cod),
+            # La nota no elige local: la pantalla lo muestra en solo lectura.
+            "heredado": origin is not None,
+        }
+
+    @api.model
+    def _l10n_pe_ne_direccion_local(self, cod):
+        """Dirección del local con ese código, para que la pantalla muestre «0002 · Av. Larco
+        100» y no un número suelto que el dueño tiene que traducir de memoria.
+
+        El domicilio fiscal no tiene fila (D3): su dirección es la del partner de la compañía,
+        igual que la fila sintética que fabrica `l10n_pe_ne_list`. Un código archivado o ya
+        inexistente devuelve '' en vez de romper: en un comprobante emitido el código es
+        historia congelada y el local pudo darse de baja después.
+
+        sudo + company_id explícito: es una lectura de catálogo propio para pintar una etiqueta,
+        y el emisor puede no tener acceso al modelo de establecimientos."""
+        if not cod or cod == "0000":
+            return self.env.company.partner_id.street or ""
+        return self.env["l10n_pe_ne.establecimiento"].sudo().with_context(
+            active_test=False).search(
+            [("codigo", "=", cod), ("company_id", "=", self.env.company.id)],
+            limit=1).direccion or ""
 
     def _l10n_pe_ne_quick_currency(self, moneda):
         """Moneda del comprobante: PEN por defecto; USD si el payload lo pide
@@ -3563,14 +3846,16 @@ class AccountMove(models.Model):
         urb = (c.get("urbanizacion") or "").strip()
         Partner = self.env["res.partner"]
         found = Partner.search([("vat", "=", num)], limit=1) if num else Partner.browse()
-        if not found and not num and not nombre:
-            # Público general SIN documento ni nombre: reusa UN solo 'CONSUMIDOR
-            # FINAL' por tenant en vez de crear un partner desechable por venta.
+        if not found and not num:
+            # Público general SIN documento: reusa el partner del MISMO nombre en el tenant
+            # ('CONSUMIDOR FINAL' si no vino nombre) en vez de crear uno desechable por
+            # venta — hallazgo de auditoría: la SPA manda 'CLIENTE VARIOS' y cada venta
+            # creaba un duplicado idéntico, ensuciando la lista de clientes.
             # (La emisión no reescribe el partner, así que reusarlo es seguro.)
             found = Partner.search([
                 ("company_id", "=", self.env.company.id),
                 ("vat", "=", False),
-                ("name", "=", "CONSUMIDOR FINAL"),
+                ("name", "=", nombre or "CONSUMIDOR FINAL"),
             ], limit=1)
         if not found:
             # company_id del emisor actual: aísla el cliente por RUC (multi-tenant). Sin
@@ -3744,6 +4029,13 @@ class AccountMove(models.Model):
             # Redondeo de efectivo: el POS lo aplica en vivo con estos parámetros (ver lib/redondeo.ts).
             "redondeoActivo": bool(self.env.company.l10n_pe_ne_redondeo_activo),
             "redondeoModo": self.env.company.l10n_pe_ne_redondeo_modo or "favor",
+            # C1: con la auto-apertura activa, la falta de caja abierta YA NO impide cobrar (el
+            # backend abre el turno al emitir). El POS lo necesita para no seguir deshabilitando
+            # el botón por una condición que dejó de ser un bloqueo: si la pantalla mantuviera
+            # su propia regla, la función aprobada sería inalcanzable justo desde el mostrador.
+            # Apagado, el POS vuelve a exigir caja —sin auto-apertura la venta quedaría huérfana,
+            # y ahí bloquear sí es lo honesto.
+            "cajaAutoapertura": bool(self.env.company.l10n_pe_ne_caja_autoapertura),
         }
 
     @api.model
@@ -3755,10 +4047,15 @@ class AccountMove(models.Model):
 
     @api.model
     def l10n_pe_ne_series(self, limit=None, offset=None):
-        """Series realmente en uso, agregadas desde los comprobantes emitidos (la serie la
-        fija el emisor al emitir; el correlativo lo autoincrementa Odoo por diario). Por serie:
-        tipo, cuántos emitidos, último correlativo y el próximo a emitir. Incluye las series de
-        retención/percepción (account.payment). Aislado por RUC vía el contexto de compañía."""
+        """Series del emisor: las DECLARADAS en el registro por local (l10n_pe_ne.serie,
+        `origen: 'config'`) unidas a las realmente EN USO, agregadas desde los comprobantes
+        emitidos (`origen: 'uso'`). Por serie: tipo, cuántos emitidos, último correlativo y el
+        próximo a emitir. Incluye las series de retención/percepción (account.payment). Aislado
+        por RUC vía el contexto de compañía.
+
+        El contrato es ADITIVO: las cinco claves de siempre (serie/tipoDoc/tipo/emitidos/
+        ultimo/proximo) y su paginación opt-in no cambian, y con el registro vacío la respuesta
+        es exactamente la de antes —todas las filas con `origen: 'uso'`—."""
         TIPO = {
             "01": "Factura",
             "03": "Boleta",
@@ -3795,17 +4092,42 @@ class AccountMove(models.Model):
             add(p.l10n_pe_ret_serie, "20", p.l10n_pe_ret_correlativo)
             add(p.l10n_pe_per_serie, "40", p.l10n_pe_per_correlativo)
 
-        filas = [
-            {
+        # Registro por local: se fusiona por CÓDIGO con el agregado de uso, así una serie
+        # declarada que ya emitió sale una sola vez y con sus contadores reales, y una recién
+        # declarada aparece con 0 emitidos y su próximo en 00000001.
+        registro = {
+            s.codigo: s
+            for s in self.env["l10n_pe_ne.serie"].sudo().search(
+                [("company_id", "=", self.env.company.id)]
+            )
+        }
+        for codigo, s in registro.items():
+            agg.setdefault(
+                codigo,
+                {"serie": codigo, "tipoDoc": s.tipo_doc, "emitidos": 0, "ultimo": 0},
+            )
+
+        filas = []
+        for s in sorted(agg.values(), key=lambda x: x["serie"]):
+            reg = registro.get(s["serie"])
+            estab = reg.establecimiento_id if reg else None
+            filas.append({
                 "serie": s["serie"],
                 "tipoDoc": s["tipoDoc"],
                 "tipo": TIPO.get(s["tipoDoc"], s["tipoDoc"]),
                 "emitidos": s["emitidos"],
                 "ultimo": str(s["ultimo"]).zfill(8) if s["ultimo"] else "—",
                 "proximo": str(s["ultimo"] + 1).zfill(8),
-            }
-            for s in sorted(agg.values(), key=lambda x: x["serie"])
-        ]
+                # --- aditivo (registro por local). Una fila 'uso' no sabe de qué local es:
+                # nadie lo declaró, así que se dice null en vez de inventar '0000'.
+                "id": reg.id if reg else None,
+                "origen": "config" if reg else "uso",
+                "establecimiento": ((estab.codigo or "0000") if estab else "0000") if reg else None,
+                "establecimientoId": (estab.id or None) if reg else None,
+                "establecimientoDireccion": (estab.direccion or "") if reg else "",
+                "activa": reg.activa if reg else True,
+                "predeterminada": reg.predeterminada if reg else False,
+            })
         # Paginación opt-in sobre el agregado ya construido (no hay search directo).
         if offset is None:
             return filas
@@ -3838,6 +4160,17 @@ class AccountMove(models.Model):
             "agentePercepcion": bool(company.l10n_pe_ne_agente_percepcion),
             "redondeoActivo": bool(company.l10n_pe_ne_redondeo_activo),
             "redondeoModo": company.l10n_pe_ne_redondeo_modo or "favor",
+            # C1: auto-apertura de caja al cobrar (ver res_company). Se expone donde el usuario
+            # la puede cambiar — un parámetro de negocio no se hardcodea ni se esconde en el ORM.
+            "cajaAutoapertura": bool(company.l10n_pe_ne_caja_autoapertura),
+            # C2: desde qué diferencia el cierre de caja exige una explicación escrita. Mismo
+            # motivo: la tolerancia de una bodega no es la de un local que factura S/ 50 000 al
+            # día, y quien lo sabe es el dueño, no el código.
+            "toleranciaDescuadre": round(company.l10n_pe_ne_cierre_tolerancia or 0.0, 2),
+            # C3: si en este negocio los gastos salen del cajón por defecto. Lo lee el formulario
+            # de gastos para precargar la casilla: no es una regla del sistema, es cómo paga este
+            # negocio, y eso solo lo sabe el dueño.
+            "gastoDeCaja": bool(company.l10n_pe_ne_gasto_de_caja),
         }
 
     def l10n_pe_ne_get_logo(self):
@@ -3938,6 +4271,23 @@ class AccountMove(models.Model):
             company.l10n_pe_ne_redondeo_activo = bool(vals.get("redondeoActivo"))
         if vals.get("redondeoModo") in ("favor", "cercano"):
             company.l10n_pe_ne_redondeo_modo = vals["redondeoModo"]
+        if "cajaAutoapertura" in vals:
+            company.l10n_pe_ne_caja_autoapertura = bool(vals.get("cajaAutoapertura"))
+        if "gastoDeCaja" in vals:
+            company.l10n_pe_ne_gasto_de_caja = bool(vals.get("gastoDeCaja"))
+        # C2: tolerancia de descuadre al cerrar caja. El vacío NO es 0: es "no lo toques" —el
+        # formulario del negocio manda todos sus campos en cada guardado, y un input que quedó
+        # en blanco por una recarga a medias no puede dejar al RUC en tolerancia cero (que
+        # obligaría a justificar hasta el céntimo). Para tolerancia cero se escribe 0.
+        tol_raw = vals.get("toleranciaDescuadre")
+        if tol_raw is not None and str(tol_raw).strip() != "":
+            try:
+                tol = float(tol_raw)
+            except (TypeError, ValueError):
+                raise UserError(_("La tolerancia de descuadre debe ser un monto válido."))
+            if tol < 0:
+                raise UserError(_("La tolerancia de descuadre no puede ser negativa."))
+            company.l10n_pe_ne_cierre_tolerancia = round(tol, 2)
         if "logo" in vals:
             self._l10n_pe_ne_set_logo(company, vals.get("logo"))
         return self.l10n_pe_ne_negocio()
@@ -5158,6 +5508,34 @@ class AccountMove(models.Model):
             return Move.browse()
         return self._l10n_pe_ne_mover_stock(reversa=True)
 
+    @staticmethod
+    def _l10n_pe_ne_normaliza_medios(medios):
+        """C1: canoniza el NOMBRE de cada medio de pago antes de persistirlo.
+
+        El medio es texto libre y llega de cuatro orígenes (POS, Emitir, cobro de cotización,
+        adelanto/abono de órdenes). Sin esto, 'Efectivo' y 'efectivo' eran DOS filas del arqueo:
+        el cajero cuenta un solo cajón y el sistema le pedía contarlo dos veces, así que una de
+        las dos filas cerraba con diferencia sin que faltara un sol. Se normaliza AL ESCRIBIR
+        (aquí) y además se agrupa AL LEER (tools.caja_arqueo), que es lo que consolida la
+        historia ya escrita sin migrar datos. El monto no se toca."""
+        if not isinstance(medios, (list, tuple)):
+            return medios
+        out = []
+        for mp in medios:
+            if isinstance(mp, dict):
+                mp = dict(mp)
+                mp["medio"] = normalizar_medio(mp.get("medio"))
+            out.append(mp)
+        return out
+
+    @api.model_create_multi
+    def create(self, vals_list):
+        for vals in vals_list:
+            if vals.get("l10n_pe_ne_medios_pago"):
+                vals["l10n_pe_ne_medios_pago"] = self._l10n_pe_ne_normaliza_medios(
+                    vals["l10n_pe_ne_medios_pago"])
+        return super().create(vals_list)
+
     def write(self, vals):
         """Revierte el stock al pasar a 'rechazado'.
 
@@ -5166,7 +5544,37 @@ class AccountMove(models.Model):
         invariante no debe depender de que alguien se acuerde de llamar al helper.
 
         Solo los que ENTRAN a rechazado (los que ya lo estaban no se re-revierten).
+
+        Y congela el establecimiento emisor una vez asignado el número fiscal: el codLocalEmisor
+        viaja dentro del XML firmado, así que cambiarlo después dejaría al comprobante diciendo
+        que salió de un local distinto del que SUNAT recibió. El contexto l10n_pe_ne_bypass_lock
+        lo deja pasar para migraciones/mantenimiento, igual que en la caja.
         """
+        # C1: mismo choke point que en create — TODO origen que escriba medios pasa por aquí
+        # (la SPA por quick_flags, y los roles con `move.sudo().l10n_pe_ne_medios_pago = [...]`).
+        if vals.get("l10n_pe_ne_medios_pago"):
+            vals = dict(vals)
+            vals["l10n_pe_ne_medios_pago"] = self._l10n_pe_ne_normaliza_medios(
+                vals["l10n_pe_ne_medios_pago"])
+        if "l10n_pe_ne_cod_establecimiento" in vals and not self.env.context.get(
+            "l10n_pe_ne_bypass_lock"
+        ):
+            nuevo = vals.get("l10n_pe_ne_cod_establecimiento") or "0000"
+            for m in self:
+                if m.l10n_pe_ne_corr_emit and (
+                    m.l10n_pe_ne_cod_establecimiento or "0000"
+                ) != nuevo:
+                    raise UserError(
+                        _(
+                            "El comprobante %(doc)s ya tiene número fiscal asignado: su "
+                            "establecimiento emisor (%(actual)s) es parte del documento y no se "
+                            "puede cambiar. Si el local está mal, corrígelo con una nota."
+                        )
+                        % {
+                            "doc": "%s-%s" % m._l10n_pe_ne_doc_id(),
+                            "actual": m.l10n_pe_ne_cod_establecimiento or "0000",
+                        }
+                    )
         revertir = self.browse()
         if vals.get("l10n_pe_biller_state") == "rechazado":
             revertir = self.filtered(
@@ -6390,9 +6798,10 @@ class AccountMove(models.Model):
             ]
         # Forma de pago: Crédito (con cuotas) emite cac:PaymentTerms; medios de pago
         # (efectivo/Yape/…) se guardan como dato interno del POS (no van al XML SUNAT).
-        # Establecimiento emisor (sucursal): código de local anexo SUNAT del comprobante.
-        if payload.get("codEstablecimiento"):
-            move.l10n_pe_ne_cod_establecimiento = payload["codEstablecimiento"]
+        # El establecimiento emisor NO se toca aquí: llega resuelto y validado en el create
+        # (_l10n_pe_ne_resolver_establecimiento). Este método corre después, y para entonces la
+        # serie ya está elegida; volver a escribir el código del payload le pasaría por encima a
+        # la herencia dura de las notas, que ignoran el payload a propósito.
         # Orden de compra del cliente (cac:OrderReference).
         if payload.get("ordenCompra"):
             move.l10n_pe_ne_orden_compra = str(payload["ordenCompra"]).strip()
@@ -6475,11 +6884,15 @@ class AccountMove(models.Model):
     @staticmethod
     def _l10n_pe_ne_solo_efectivo(medios):
         """¿el pago es 100% efectivo? Sin medios detallados el POS asume efectivo (True). Un solo
-        medio no-efectivo o mezcla desactiva el redondeo (espeja lib/redondeo.ts:esSoloEfectivo)."""
+        medio no-efectivo o mezcla desactiva el redondeo (espeja lib/redondeo.ts:esSoloEfectivo).
+
+        C1: la comparación es case/tilde-insensitive (es_efectivo). Con el `== "Efectivo"` literal,
+        un pago escrito 'efectivo' perdía el redondeo de la Ley 29571 y el cliente pagaba la
+        fracción que no existe en monedas."""
         con_monto = [m for m in (medios or []) if float(m.get("monto") or 0) > 0]
         if not con_monto:
             return True
-        return all((m.get("medio") or "Efectivo").strip() == "Efectivo" for m in con_monto)
+        return all(es_efectivo(m.get("medio") or "Efectivo") for m in con_monto)
 
     def l10n_pe_ne_quick_result(self):
         self.ensure_one()
@@ -6490,6 +6903,11 @@ class AccountMove(models.Model):
             "tipoDoc": self.l10n_pe_ne_tipo_doc or self._l10n_pe_document_type(),
             "serie": self.l10n_pe_ne_serie_emit or serie,
             "correlativo": (self.l10n_pe_ne_corr_emit or corr).zfill(8),
+            # Local que se DECLARÓ (no el que la pantalla creía): el resolver puede haberlo
+            # sacado de la caja abierta o del comprobante afectado, y el POS ni siquiera lo
+            # manda. Devolverlo aquí es lo que deja al ticket 80mm decir la verdad y al cajero
+            # detectar en el acto que cobró desde el local equivocado.
+            "establecimiento": self.l10n_pe_ne_cod_establecimiento or "0000",
             "estado": self.l10n_pe_biller_state,
             "responseCode": m.group(1) if m else "",
             "mensaje": self.l10n_pe_biller_message or "",
@@ -6503,13 +6921,14 @@ class AccountMove(models.Model):
     @api.model
     def l10n_pe_ne_quick_list(self, query=None, desde=None, hasta=None, estado=None, tipo=None,
                               forma_pago=None, monto_min=None, monto_max=None, serie=None,
-                              moneda=None, limit=100, offset=None):
+                              moneda=None, establecimiento=None, limit=100, offset=None):
         """Lista de comprobantes emitidos (sin los blobs), para la UI. Filtros
         opcionales: query (cliente/RUC/correlativo), rango de fechas (desde/hasta),
         estado del facturador (por_enviar/en_proceso/enviado/anulado/rechazado/error),
-        tipo de comprobante (01/03/07/08), forma de pago (Contado/Credito) y rango de
-        monto total (monto_min/monto_max). `estado` y `tipo` aceptan varios valores
-        (lista o CSV "a,b") → filtran con `in` (multiselect en la UI).
+        tipo de comprobante (01/03/07/08), forma de pago (Contado/Credito), rango de
+        monto total (monto_min/monto_max) y establecimiento emisor. `estado`, `tipo`,
+        `serie` y `establecimiento` aceptan varios valores (lista o CSV "a,b") →
+        filtran con `in` (multiselect en la UI).
 
         Paginación opt-in: con `offset` devuelve {items, total} (total vía
         search_count sobre el mismo dominio); sin él, la lista plana de siempre."""
@@ -6527,6 +6946,7 @@ class AccountMove(models.Model):
         estados = _as_list(estado)
         tipos = _as_list(tipo)
         series = _as_list(serie)
+        locales = _as_list(establecimiento)
         mmin, mmax = _num(monto_min), _num(monto_max)
         # Se incluyen los 'por_enviar' (pendientes de envío) para que sean visibles y
         # reenviables desde la UI; antes se excluían y quedaban sin dónde verse.
@@ -6537,6 +6957,16 @@ class AccountMove(models.Model):
             domain.append(("l10n_pe_ne_tipo_doc", "in", tipos))
         if series:
             domain.append(("l10n_pe_ne_serie_emit", "in", series))
+        if locales:
+            # «Cuánto vendió Miraflores» es la primera pregunta del dueño con dos locales.
+            # El '0000' arrastra los comprobantes sin código: un NULL o un '' es domicilio
+            # fiscal (así lo entiende el XML y así lo declaró el emisor), y dejarlos fuera
+            # escondería toda la historia anterior a esta fase justo en el filtro que se usa
+            # para cuadrar el mes.
+            valores = list(locales)
+            if "0000" in valores:
+                valores += [False, ""]
+            domain.append(("l10n_pe_ne_cod_establecimiento", "in", valores))
         if moneda:
             domain.append(("currency_id.name", "=", moneda))
         if forma_pago:
@@ -6598,6 +7028,10 @@ class AccountMove(models.Model):
                 if m.create_date
                 else "",
                 "mensaje": m.l10n_pe_biller_message or "",
+                # Local emisor declarado (codLocalEmisor del XML). El comprobante anterior a
+                # esta fase no tiene código y es domicilio fiscal: se dice '0000' en vez de
+                # dejar la celda vacía, que se leería como "no se sabe".
+                "establecimiento": m.l10n_pe_ne_cod_establecimiento or "0000",
                 # Notas de crédito vigentes que afectan este comprobante (0 si no tiene).
                 "ncCount": nc_por_doc.get(m.id, (0, 0.0))[0],
                 "ncTotal": round(nc_por_doc.get(m.id, (0, 0.0))[1], 2),
@@ -6671,6 +7105,12 @@ class AccountMove(models.Model):
             "cliente": self.partner_id.name or "",
             "clienteDoc": self.partner_id.vat or "",
             "moneda": self.currency_id.name or "PEN",
+            # Local emisor tal como salió en el XML (codLocalEmisor) + su dirección, para que
+            # el detalle y la representación impresa (ticket 80mm / A4) digan desde dónde se
+            # vendió. En una NC/ND es el local HEREDADO del comprobante afectado.
+            "establecimiento": self.l10n_pe_ne_cod_establecimiento or "0000",
+            "establecimientoDireccion": self._l10n_pe_ne_direccion_local(
+                self.l10n_pe_ne_cod_establecimiento),
             "estado": self.l10n_pe_biller_state or "",
             "mensaje": self.l10n_pe_biller_message or "",
             "formaPago": self.l10n_pe_ne_forma_pago or "Contado",

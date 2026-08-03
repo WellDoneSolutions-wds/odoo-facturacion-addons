@@ -61,12 +61,18 @@
       <field name="implied_ids" eval="[(4, ref('l10n_pe_ne_biller.group_l10n_pe_ne_emisor'))]"/>
       <field name="comment">Atiende la cola de órdenes de trabajo (CN-02).</field>
     </record>
+    <!-- El supervisor suma la configuración de series/establecimientos (grupo del biller): es
+         exactamente la fila `veSeries: ('puedeSupervisar',)` de _VIS_MENU, ahora con el permiso
+         real detrás del menú. El grupo se declara en el biller para que este siga funcionando
+         sin el addon de roles; aquí solo se OTORGA. -->
     <record id="group_l10n_pe_ne_supervisor" model="res.groups">
       <field name="name">Supervisor NE Express</field>
       <field name="privilege_id" ref="privilege_ne_express"/>
-      <field name="implied_ids" eval="[(4, ref('l10n_pe_ne_biller.group_l10n_pe_ne_emisor'))]"/>
+      <field name="implied_ids" eval="[(4, ref('l10n_pe_ne_biller.group_l10n_pe_ne_emisor')),
+                                       (4, ref('l10n_pe_ne_biller.group_l10n_pe_ne_config_series'))]"/>
       <field name="comment">Aprueba las compuertas de política encendidas por el RUC y cierra
-        la revisión asíncrona. NO impone 'aprobador ≠ solicitante' (escala libre).</field>
+        la revisión asíncrona. Configura las series por local. NO impone 'aprobador ≠
+        solicitante' (escala libre).</field>
     </record>
 
     <!-- Contador externo: SOLO LECTURA. Implica account.group_account_readonly (account.move
@@ -85,9 +91,10 @@
     <record id="group_l10n_pe_ne_duenio" model="res.groups">
       <field name="name">Dueño del RUC NE Express</field>
       <field name="privilege_id" ref="privilege_ne_express"/>
-      <field name="implied_ids" eval="[(4, ref('group_l10n_pe_ne_supervisor'))]"/>
+      <field name="implied_ids" eval="[(4, ref('group_l10n_pe_ne_supervisor')),
+                                       (4, ref('l10n_pe_ne_biller.group_l10n_pe_ne_config_series'))]"/>
       <field name="comment">Da de alta, edita, desactiva y asigna roles a la gente de SU RUC (y
-        solo de su RUC). No puede otorgar base.group_system.</field>
+        solo de su RUC). Configura las series por local. No puede otorgar base.group_system.</field>
     </record>
   </data>
 </odoo>

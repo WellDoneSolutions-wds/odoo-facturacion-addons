@@ -138,6 +138,22 @@ class TestOrdenTrabajo(TransactionCase):
         ingresos, _retiros = sesion._l10n_pe_ne_ingresos_retiros()
         self.assertEqual(ingresos, 0.0)
 
+    def test_adelanto_en_minuscula_cae_en_la_fila_de_la_venta(self):
+        """C1 · el adelanto escrito 'yape' y la venta cobrada por 'Yape' son el MISMO bolsillo:
+        una sola fila del arqueo. Antes eran dos y el cajero contaba su Yape dos veces, así que
+        una de ellas cerraba con diferencia sin que faltara un sol."""
+        self._abrir_caja()
+        orden = self._orden(precio=118.0)
+        cajero = self._user("caj5b_ot", ["l10n_pe_ne_roles.group_l10n_pe_ne_caja"])
+        orden.with_user(cajero).l10n_pe_ne_registrar_adelanto(50.0, "  yape ")
+        sesion = self.Sesion.search([("estado", "=", "abierta")], limit=1)
+        # AL ESCRIBIR: el movimiento guarda el nombre canónico (es el que ve el cajero).
+        self.assertEqual(orden.adelanto_movimiento_id.medio, "Yape")
+        self.assertEqual(orden.medio_adelanto, "Yape")
+        # AL LEER: se suma sobre la fila que ya traía la venta, sin abrir una segunda.
+        por_medio = sesion._l10n_pe_ne_por_medio_arqueo({"porMedio": {"Yape": 30.0}})
+        self.assertEqual(por_medio, {"Yape": 80.0})
+
     # ── cobro del saldo: guardas + regla dura ───────────────────────────────────
     def test_cobrar_saldo_solo_terminada(self):
         orden = self._orden(estado="encolada")
@@ -585,7 +601,9 @@ class TestOrdenTrabajoViaA(EnvioSincronoMixin, TransactionCase):
         # anticipo 'enviado' (vivo): anular la orden lo dejaría sin regularizar → UserError con el número
         with self.assertRaises(UserError) as cm:
             orden.with_user(sup).l10n_pe_ne_anular("cliente desistió")
-        self.assertIn(ant.name, str(cm.exception))
+        # El mensaje cita el número FISCAL (F001-00000001), no el name interno de Odoo:
+        # es el número que el cajero ve en la SPA y con el que pedirá la nota de crédito.
+        self.assertIn(orden._l10n_pe_ne_anticipo_doc_ref(), str(cm.exception))
         self.assertEqual(orden.estado, "encolada")   # no avanzó
         # con el anticipo ya ANULADO (su), la anulación de la orden sí procede
         ant.sudo().l10n_pe_biller_state = "anulado"

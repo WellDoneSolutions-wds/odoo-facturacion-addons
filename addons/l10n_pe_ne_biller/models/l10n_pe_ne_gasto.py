@@ -3,11 +3,23 @@
 
 Modelo propio de Odoo: TODA la lógica (CRUD + serialización) vive en el addon; React
 solo llama. Aislado por compañía (regla multi-compañía en security). Alimenta la
-utilidad neta del dashboard ('Con gastos')."""
+utilidad neta del dashboard ('Con gastos').
+
+C3 — el gasto que se paga DEL CAJÓN mueve la caja. Hasta aquí el gasto y la caja eran dos
+libros que no se hablaban: el cajero pagaba S/ 50 de gaseosas con la plata del cajón, lo
+registraba como gasto, y el arqueo seguía esperando esos S/ 50 — al cerrar le faltaba dinero
+sin que faltara nada. El único egreso que la caja veía era el 'retiro' de su propia pantalla,
+así que el cajero honesto tenía que registrar DOS veces la misma plata (gasto + retiro) y
+acordarse de hacerlo. Ahora lo declara UNA vez y el sistema mueve los dos libros."""
 import calendar
+import logging
 
 from odoo import _, api, fields, models
 from odoo.exceptions import UserError
+
+from ..tools.caja_arqueo import normalizar_medio
+
+_logger = logging.getLogger(__name__)
 
 
 class L10nPeNeGasto(models.Model):
@@ -32,12 +44,26 @@ class L10nPeNeGasto(models.Model):
     # (un gasto en negativo que apunta al original vía este campo), nunca editar/borrar.
     gasto_reversado_id = fields.Many2one('l10n_pe_ne.gasto', string='Reversa a',
                                          index=True, ondelete='set null', copy=False)
+    # C3: ¿esta plata salió del cajón (de la caja abierta) o por otra vía (banco, tarjeta
+    # personal, cuenta del dueño)? Lo elige el usuario, gasto por gasto, porque el sistema no
+    # tiene forma de saberlo: el mismo negocio paga el agua por transferencia y las gaseosas con
+    # el efectivo del mostrador. Default False (ver l10n_pe_ne_gasto_de_caja en res.company):
+    # los gastos de hoy no tocan caja y no pueden empezar a tocarla sin que nadie lo pida.
+    paga_caja = fields.Boolean(string='Se pagó del cajón (sale de la caja)')
+    # Movimiento(s) de caja que este gasto generó. Es One2many y no un M2o al revés para no
+    # duplicar la relación: el movimiento ya apunta al gasto (l10n_pe_ne.caja.movimiento.gasto_id),
+    # que es quien tiene que explicar de dónde salió. En la práctica es 0 o 1.
+    movimiento_ids = fields.One2many('l10n_pe_ne.caja.movimiento', 'gasto_id',
+                                     string='Movimientos de caja')
 
-    # Campos de negocio que, una vez creado el gasto, no se pueden reescribir (D-2).
-    _CAMPOS_INMUTABLES = ('monto', 'descripcion', 'fecha', 'cuenta', 'currency_id')
+    # Campos de negocio que, una vez creado el gasto, no se pueden reescribir (D-2). paga_caja
+    # entra: cambiarlo después dejaría un gasto diciendo que salió del cajón sin su movimiento
+    # (o al revés), que es justamente el descuadre que esta rebanada vino a cerrar.
+    _CAMPOS_INMUTABLES = ('monto', 'descripcion', 'fecha', 'cuenta', 'currency_id', 'paga_caja')
 
     def _l10n_pe_ne_gasto_dict(self):
         self.ensure_one()
+        mv = self.movimiento_ids[:1]
         return {
             'id': self.id,
             'fecha': self.fecha.strftime('%Y-%m-%d') if self.fecha else '',
@@ -48,7 +74,113 @@ class L10nPeNeGasto(models.Model):
             'usuario': (self.usuario_id or self.create_uid).name or '',
             'esReversa': bool(self.gasto_reversado_id),
             'reversaDe': self.gasto_reversado_id.id or None,
+            # C3: la lista tiene que distinguir el gasto que movió la caja del que no; si no, el
+            # cajero no sabe cuáles de sus gastos ya están descontados de su arqueo.
+            'pagaCaja': bool(self.paga_caja),
+            'movimientoCajaId': mv.id or None,
+            'sesionCajaId': mv.sesion_id.id or None,
         }
+
+    # ------------------------------------------------------ enganche con la caja (C3)
+    def _l10n_pe_ne_sesion_egreso(self):
+        """Sesión de caja donde cae el movimiento de ESTE gasto, ya bloqueada (FOR UPDATE), o
+        vacío si no corresponde tocar la caja. Lanza si hace falta caja y no la hay.
+
+        Dos casos, y son distintos a propósito:
+
+          * gasto NUEVO -> la caja abierta del usuario (el helper del biller resuelve el local y
+            lanza si hay varias y ninguna es suya: adivinar descuadraría dos arqueos). Si no hay
+            caja abierta se lanza con un mensaje que ofrece la salida — a diferencia de una venta,
+            un gasto SÍ se puede detener: no hay un cliente esperando en el mostrador, y registrar
+            un egreso del cajón sin cajón abierto es dinero que no entra en ningún arqueo.
+
+          * REVERSA -> la sesión del movimiento ORIGINAL, que es de donde salió la plata. Nunca
+            «la caja de hoy»: si el gasto salió del turno de ayer, devolverlo al de hoy le mete a
+            un arqueo un dinero que nadie puso en ese cajón."""
+        self.ensure_one()
+        Sesion = self.env['l10n_pe_ne.caja.sesion']
+        if self.gasto_reversado_id:
+            mv = self.gasto_reversado_id.movimiento_ids[:1]
+            if not mv:
+                return Sesion.browse()      # el original no salió del cajón: la reversa tampoco
+            sesion = mv.sesion_id
+            # D-2: la sesión cerrada es INMUTABLE. No se le mete un movimiento nuevo ni se le
+            # reescribe el arqueo congelado; el llamador avisa por escrito qué hacer con el
+            # dinero (ver _l10n_pe_ne_aviso_reversa_caja).
+            return sesion if sesion._l10n_pe_ne_bloquear() else Sesion.browse()
+        if not Sesion._l10n_pe_ne_abiertas():
+            raise UserError(_(
+                "Este gasto se pagó del cajón, pero no hay ninguna caja abierta que lo descuente: "
+                "quedaría fuera de todo arqueo. Abre tu caja y vuelve a registrarlo —o desmarca "
+                "«se pagó del cajón» si salió por banco, tarjeta o de tu bolsillo—."))
+        return Sesion._l10n_pe_ne_sesion_abierta()
+
+    def _l10n_pe_ne_enganchar_caja(self):
+        """Crea el movimiento de caja del gasto: RETIRO si es un gasto (monto > 0), INGRESO si es
+        una reversa (monto < 0, la plata vuelve al cajón). Devuelve el movimiento o vacío.
+
+        Una sola acción del usuario mueve los dos libros. Antes tenía que registrar el gasto y
+        además acordarse de teclear el retiro; el día que se olvidaba, su arqueo cerraba con un
+        faltante que nadie sabía explicar."""
+        self.ensure_one()
+        Movimiento = self.env['l10n_pe_ne.caja.movimiento']
+        monto = round(abs(self.monto or 0.0), 2)
+        if not monto:
+            return Movimiento           # un gasto de S/ 0 no mueve dinero
+        sesion = self._l10n_pe_ne_sesion_egreso()
+        if not sesion:
+            return Movimiento
+        medio = normalizar_medio(self.cuenta)
+        es_retiro = (self.monto or 0.0) > 0
+        if es_retiro:
+            # Mismo guard que el retiro manual: no se saca de un bolsillo más de lo que tiene.
+            # D-4 (voucher sobre umbral) NO se exige aquí a propósito: la contraparte documental
+            # de este egreso ES el gasto —fecha, descripción, autor, append-only (D-2) y encima
+            # golpea la utilidad del mes—, que es más rastro del que deja un número de voucher
+            # tecleado a mano. Exigir además un voucher solo lograría que el cajero volviera a
+            # registrar el gasto por fuera de la caja, que es el agujero que estamos tapando.
+            sesion._l10n_pe_ne_check_egreso(medio, monto)
+        return Movimiento.create({
+            'sesion_id': sesion.id,
+            'tipo': 'retiro' if es_retiro else 'ingreso',
+            'motivo': _("Gasto: %s", self.descripcion or ''),
+            'monto': monto,
+            'medio': medio,
+            'gasto_id': self.id,
+            'company_id': self.company_id.id,
+            'currency_id': self.currency_id.id,
+        })
+
+    def _l10n_pe_ne_aviso_reversa_caja(self):
+        """Texto honesto para la reversa que NO pudo devolver la plata a la caja porque su turno
+        ya cerró. El arqueo cerrado no se reescribe (D-2): aquel cierre contó lo que había en el
+        cajón y esa foto es la evidencia. Callarse el caso sería peor que el problema: el usuario
+        creería que su caja ya está corregida."""
+        self.ensure_one()
+        sesion = self.gasto_reversado_id.movimiento_ids[:1].sesion_id
+        return _(
+            "El gasto se reversó, pero su egreso pertenece a la caja N° %(sid)s, que ya está "
+            "cerrada: un arqueo cerrado no se reescribe. Si el dinero vuelve al cajón, "
+            "regístralo como ingreso en la caja de hoy indicando este motivo.", sid=sesion.id)
+
+    @api.model_create_multi
+    def create(self, vals_list):
+        """El enganche con la caja va en el ORM y no en el método público: así el gasto creado
+        por cualquier vía (API, reversa, un flujo futuro) mueve la caja igual. Un gasto sin
+        paga_caja no toca nada — que es todo lo que existía antes de C3."""
+        if not any((v or {}).get('paga_caja') for v in vals_list):
+            return super().create(vals_list)
+        # savepoint: gasto y movimiento son UN hecho. Si el egreso no cabe (no hay caja abierta,
+        # o el bolsillo no tiene tanto), la fila del gasto ya está insertada y una excepción a
+        # pelo no la deshace: por HTTP la salva el rollback del controlador, pero por RPC o desde
+        # un flujo interno quedaría vivo un gasto que dice «salió del cajón» sin haber salido de
+        # ningún lado. Eso es exactamente el descuadre que esta rebanada vino a cerrar.
+        with self.env.cr.savepoint():
+            gastos = super().create(vals_list)
+            for g in gastos:
+                if g.paga_caja:
+                    g._l10n_pe_ne_enganchar_caja()
+        return gastos
 
     # -------------------------------------------------------- inmutabilidad (D-2)
     def write(self, vals):
@@ -99,10 +231,17 @@ class L10nPeNeGasto(models.Model):
         gasto = gasto or {}
         if not (gasto.get('descripcion') or '').strip():
             raise UserError(_("El gasto necesita una descripción."))
+        # C3: `pagaCaja` ausente NO es False, es «lo que diga el negocio»: el cliente viejo (y
+        # cualquier integración que ya exista) sigue creando gastos sin tocar la caja mientras el
+        # RUC no encienda el default, y la bodega que paga todo del cajón no tiene que marcar la
+        # casilla doscientas veces al mes.
+        paga = gasto.get('pagaCaja')
         vals = {
             'descripcion': gasto['descripcion'].strip(),
             'monto': float(gasto.get('monto') or 0),
             'cuenta': (gasto.get('cuenta') or 'Efectivo').strip(),
+            'paga_caja': (bool(self.env.company.l10n_pe_ne_gasto_de_caja) if paga is None
+                          else bool(paga)),
         }
         if gasto.get('fecha'):
             vals['fecha'] = gasto['fecha']
@@ -133,6 +272,12 @@ class L10nPeNeGasto(models.Model):
             raise UserError(_("Este movimiento ya es una reversa; no se reversa una reversa."))
         if self.search_count([('gasto_reversado_id', '=', orig.id)]):
             raise UserError(_("Este gasto ya fue reversado."))
+        # C3: reversar un gasto que salió del cajón tiene que devolver la plata a la caja, o el
+        # arqueo seguiría descontando un egreso que ya no existe. Se decide ANTES de crear —y
+        # bloqueando la sesión (FOR UPDATE, que se sostiene hasta el commit)— para que la reversa
+        # no diga «volvió al cajón» si entre la comprobación y la escritura el turno se cerró.
+        mv = orig.movimiento_ids[:1]
+        caja_ok = bool(mv) and mv.sesion_id._l10n_pe_ne_bloquear()
         rev = self.create({
             'descripcion': (motivo or '').strip() or _("Reversa de: %s", orig.descripcion or ''),
             'monto': -orig.monto,
@@ -140,5 +285,15 @@ class L10nPeNeGasto(models.Model):
             'currency_id': orig.currency_id.id,
             'fecha': fields.Date.context_today(self),
             'gasto_reversado_id': orig.id,
+            'paga_caja': caja_ok,
         })
-        return rev._l10n_pe_ne_gasto_dict()
+        d = rev._l10n_pe_ne_gasto_dict()
+        if mv and not caja_ok:
+            # D-2: el turno del que salió la plata ya cerró y su arqueo es inmutable. La reversa
+            # contable se hace igual (el gasto no puede quedar vivo), pero hay que DECIRLO: el
+            # dinero físico no volvió solo al cajón y el usuario tiene que decidir qué hace.
+            d['avisoCaja'] = rev._l10n_pe_ne_aviso_reversa_caja()
+            _logger.info(
+                "Gasto %s reversado: su egreso quedó en la caja %s, ya cerrada (no se reescribe).",
+                orig.id, mv.sesion_id.id)
+        return d

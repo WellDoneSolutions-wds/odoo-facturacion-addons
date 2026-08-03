@@ -885,7 +885,13 @@ class L10nPeNeLoteFila(models.Model):
             self.move_id.action_l10n_pe_send_to_biller()
             result = self.move_id.l10n_pe_ne_quick_result()
         else:
-            result = self.env["account.move"].l10n_pe_ne_quick_emit(json.loads(self.payload_json))
+            # C1: el lote NO auto-abre caja. Subir 200 comprobantes desde la oficina no es un
+            # cobro de mostrador: le abriría al contador un turno que nadie atiende y que, al
+            # cerrarse, pediría contar un cajón inexistente. La emisión de mostrador (POS/Emitir)
+            # sí la abre.
+            result = self.env["account.move"].with_context(
+                l10n_pe_ne_sin_autoapertura=True
+            ).l10n_pe_ne_quick_emit(json.loads(self.payload_json))
             self.move_id = result["id"]
         self.write({
             "estado": _ESTADO_MAP.get(result.get("estado"), "error"),

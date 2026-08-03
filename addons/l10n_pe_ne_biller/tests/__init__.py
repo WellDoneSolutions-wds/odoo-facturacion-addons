@@ -19,3 +19,14 @@ from . import test_convenio
 from . import test_controlados
 from . import test_venta_estado
 from . import test_vinculadas
+from . import test_serie_registro
+from . import test_serie_establecimiento
+from . import test_serie_nota_pos
+from . import test_caja_local
+from . import test_serie_migracion
+from . import test_serie_visibilidad
+from . import test_serie_http
+from . import test_caja_integridad
+from . import test_caja_descuadre
+from . import test_caja_gasto_egreso
+from . import test_caja_verificacion

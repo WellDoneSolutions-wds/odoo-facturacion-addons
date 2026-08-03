@@ -40,8 +40,32 @@ class ResUsers(models.Model):
             "ruc": self.company_id.vat or "",
             "isAdmin": self.has_group("base.group_system"),
             "puedeAnular": self.has_group("l10n_pe_ne_biller.group_l10n_pe_ne_anulacion"),
+            "puedeConfigSeries": self._l10n_pe_ne_puede_config_series(),
             "mustChangePassword": self.l10n_pe_ne_must_change_password,
         }
+
+    def _l10n_pe_ne_puede_config_series(self):
+        """Quién puede tocar el registro de series y el catálogo de establecimientos. Desde que
+        el local determina la serie, eso es cambiar la numeración fiscal de la empresa: se separa
+        del grupo Emisor igual que se separó la anulación, para que un cajero facture sin poder
+        renumerar el negocio.
+
+        El administrador de plataforma pasa igual: es quien aprovisiona el tenant y da soporte,
+        ya puede todo por otras vías, y negárselo dejaría sin salida al RUC que se quedara sin
+        supervisor. Mismo trato que le dan los choke points de l10n_pe_ne_roles."""
+        self.ensure_one()
+        return (self.has_group("l10n_pe_ne_biller.group_l10n_pe_ne_config_series")
+                or self.has_group("base.group_system"))
+
+    def _l10n_pe_ne_check_config_series(self):
+        """Muro compartido por l10n_pe_ne.serie y l10n_pe_ne.establecimiento. Vive en el MODELO
+        (no solo en el controller) para que ninguna vía —RPC, backend, un endpoint futuro— se lo
+        pueda saltar; el controller solo lo refleja como 403."""
+        if not self._l10n_pe_ne_puede_config_series():
+            raise AccessError(_(
+                "No tienes permiso para configurar las series de numeración ni los "
+                "establecimientos: determinan la numeración fiscal del negocio. Pídeselo al "
+                "dueño o al supervisor."))
 
     @api.model
     def _l10n_pe_ne_gen_password(self, length=14):

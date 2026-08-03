@@ -135,8 +135,11 @@ class TestCaja(TransactionCase):
         self.Sesion.l10n_pe_ne_abrir_caja({"saldoInicial": 10})
         self.Sesion.l10n_pe_ne_caja_movimiento({"tipo": "ingreso", "motivo": "venta polo", "monto": 323})
         # Retirar 500 (> 333) debe bloquearse — el guard de disponible corre ANTES que el de
-        # voucher, así que aunque 500 > umbral, el mensaje es "solo tiene".
-        with self.assertRaisesRegex(UserError, "solo tiene"):
+        # voucher. El mensaje NO revela cuánto hay: sería una sonda del conteo ciego D-1
+        # (un retiro imposible dejaba leer el esperado de efectivo antes de contar).
+        # C3: el guard pasó a ser POR MEDIO —no se saca por Yape más de lo que entró por Yape— y
+        # el mensaje nombra el bolsillo. Sin `medio`, ese bolsillo es el efectivo, como siempre.
+        with self.assertRaisesRegex(UserError, "excede lo que hay en la caja"):
             self.Sesion.l10n_pe_ne_caja_movimiento({"tipo": "retiro", "motivo": "test", "monto": 500})
         # Retirar exactamente lo disponible (333). Como 333 > umbral 300, D-4 exige voucher.
         d = self.Sesion.l10n_pe_ne_caja_movimiento({

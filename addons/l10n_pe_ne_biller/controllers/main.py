@@ -22,7 +22,8 @@ import logging
 
 import psycopg2
 from odoo import http
-from odoo.exceptions import AccessDenied, AccessError, UserError, ValidationError
+from odoo.exceptions import (AccessDenied, AccessError, MissingError, UserError,
+                             ValidationError)
 from odoo.http import request
 
 _logger = logging.getLogger(__name__)
@@ -42,7 +43,9 @@ _PG_RETRY = ("40001", "40P01")
 # Mensaje amigable (ES) para constraints conocidas; el resto cae al texto pg legible.
 _CONSTRAINT_MSGS = {
     "account_move_unique_name_latam": "Ya existe un comprobante con ese número para ese cliente (número duplicado).",
-    "l10n_pe_ne_caja_sesion_unica_abierta": "Ya hay una caja abierta para tu negocio. Ciérrala antes de abrir otra.",
+    "l10n_pe_ne_caja_sesion_unica_abierta": "Ya hay otra caja abierta para ese mismo local. Ciérrala antes de abrir otra.",
+    "l10n_pe_ne_serie_codigo_company_uniq": "Esa serie ya está registrada para tu RUC: una serie pertenece a un solo local (SUNAT numera por RUC y serie).",
+    "l10n_pe_ne_serie_predeterminada_uniq": "Ese local ya tiene una serie predeterminada para ese tipo de comprobante.",
 }
 
 # Tipo de archivo descargable → (content-type, extensión de archivo).
@@ -96,17 +99,30 @@ class L10nPeNeApi(http.Controller):
         auth = request.httprequest.headers.get("Authorization", "") or ""
         return auth[7:].strip() if auth[:7].lower() == "bearer " else auth.strip()
 
+    # Rutas operables con la clave TEMPORAL pendiente de cambio: solo identidad y el
+    # propio cambio. Todo lo demás exige haber cambiado la clave (hallazgo de auditoría:
+    # el Bearer minteado con la temporal operaba endpoints de negocio por curl, saltándose
+    # el forzado de /cambiar-clave que la SPA sí aplica).
+    _MUST_CHANGE_OK = ("/ne/api/whoami", "/ne/api/logout", "/ne/api/change-password")
+
     def _identify(self):
         """Valida el Bearer contra una API key nativa de Odoo con nuestro scope.
-        Devuelve el uid (int) o None. Lookup timing-safe por índice (raw SQL)."""
+        Devuelve el uid (int) o None. Lookup timing-safe por índice (raw SQL).
+        Con contraseña temporal pendiente (mustChangePassword) solo autentica las rutas
+        de identidad/cambio: el resto recibe 401 hasta que el usuario cambie su clave."""
         token = self._bearer()
         if not token:
             return None
-        return (
+        uid = (
             request.env["res.users.apikeys"]
             .sudo()
             ._check_credentials(scope=_SCOPE, key=token)
         )
+        if uid and request.httprequest.path not in self._MUST_CHANGE_OK:
+            user = request.env["res.users"].sudo().browse(uid)
+            if user.l10n_pe_ne_must_change_password:
+                return None
+        return uid
 
     def _ttl_hours(self):
         """Vida (horas) de la API key del login, desde el param de sistema
@@ -164,6 +180,10 @@ class L10nPeNeApi(http.Controller):
     def _estab(self, uid):
         u = self._user(uid)
         return request.env["l10n_pe_ne.establecimiento"].with_user(uid).with_company(u.company_id)
+
+    def _serie(self, uid):
+        u = self._user(uid)
+        return request.env["l10n_pe_ne.serie"].with_user(uid).with_company(u.company_id)
 
     def _proyecto(self, uid):
         u = self._user(uid)
@@ -242,15 +262,30 @@ class L10nPeNeApi(http.Controller):
         # Revertir para dejar la transacción limpia (si no, el commit final de Odoo
         # volvería a fallar con 500) y responder con un mensaje legible.
         request.env.cr.rollback()
-        # Cross-tenant / sin permiso: la regla multi-compañía nativa niega el acceso.
+        # Sin permiso. Dos orígenes distintos que ANTES se aplanaban al mismo mensaje
+        # (hallazgo de auditoría: todos los 403 de ROL decían "puede pertenecer a otra
+        # empresa" — engañoso dentro de la misma empresa):
+        #   1. AccessError del ORM (ir.rule/ACL, típicamente cross-tenant): su texto
+        #      técnico en inglés enumera grupos y modelos — NO se filtra; genérico.
+        #   2. AccessError de NUESTROS gates de rol (mensajes de negocio en español,
+        #      escritos con _()): ese texto ES para el usuario y se respeta.
         if isinstance(e, AccessError):
             _logger.info(
                 "NE acceso denegado: %s", str(e).splitlines()[0] if str(e) else e
             )
+            msg = (e.args[0] if e.args and isinstance(e.args[0], str) else "") or ""
+            core = any(m in msg for m in (
+                "not allowed", "Contact your administrator",
+                "This operation is allowed", "allowed for the following groups"))
             return self._err(
-                "No tienes acceso a este recurso (puede pertenecer a otra empresa).",
+                (msg.splitlines()[0] if msg and not core else
+                 "No tienes acceso a este recurso (puede pertenecer a otra empresa)."),
                 status=403,
             )
+        if isinstance(e, MissingError):
+            # Registro borrado/inexistente: 404 JSON legible, jamás la página HTML de
+            # werkzeug (hallazgo de auditoría en preflight con clienteId huérfano).
+            return self._err("El registro no existe o fue eliminado.", status=404)
         if isinstance(e, (UserError, ValidationError)):
             msg = (e.args[0] if e.args else str(e)) or "Operación no válida"
         elif isinstance(e, psycopg2.IntegrityError):
@@ -531,6 +566,28 @@ class L10nPeNeApi(http.Controller):
         except Exception as e:  # noqa: BLE001
             return self._fail(e)
 
+    # Alta/edición de una serie del registro y su baja lógica. El GET de arriba sigue abierto
+    # a cualquier emisor (leer la propia numeración no cambia nada, y cerrarlo dejaría sin la
+    # pantalla de Series a los tenants pre-roles); el muro está en la escritura, y de verdad
+    # vive dentro del método del modelo — esto solo lo refleja como 403.
+    @http.route("/ne/api/series", **_POST)
+    def upsert_serie(self, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(lambda: self._serie(uid).l10n_pe_ne_serie_upsert(self._body()))
+
+    @http.route("/ne/api/series/<int:rec_id>", **_DEL)
+    def delete_serie(self, rec_id, **kw):
+        """DESACTIVA, nunca borra: una serie que ya emitió es historia fiscal y su correlativo
+        tiene que seguir siendo consultable."""
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(
+            lambda: self._serie(uid).l10n_pe_ne_serie_toggle(rec_id, activa=False)
+        )
+
     # ---------------------------------------------------------- datos negocio
     @http.route("/ne/api/negocio", **_GET)
     def negocio(self, **kw):
@@ -701,6 +758,7 @@ class L10nPeNeApi(http.Controller):
                 monto_max=kw.get("montoMax") or None,
                 serie=kw.get("serie") or None,
                 moneda=kw.get("moneda") or None,
+                establecimiento=kw.get("establecimiento") or None,
                 limit=pg["limit"] if pg else 100,
                 offset=pg["offset"] if pg else None,
             )
@@ -1472,6 +1530,23 @@ class L10nPeNeApi(http.Controller):
             lambda: self._estab(uid).l10n_pe_ne_upsert(self._body())._l10n_pe_ne_dict()
         )
 
+    # Local y serie con los que saldría el próximo comprobante. Solo LECTURA: la pantalla lo
+    # pinta para no tener que reimplementar la cadena de resolución (y acabar mostrando un local
+    # distinto del que declara el XML). En una nota manda el afectado, de ahí docAfectadoId.
+    @http.route("/ne/api/emision/contexto", **_GET)
+    def contexto_emision(self, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        try:
+            return self._json(self._move(uid).l10n_pe_ne_contexto_emision(
+                tipo_doc=kw.get("tipoDoc"),
+                serie=kw.get("serie"),
+                doc_afectado_id=kw.get("docAfectadoId") or None,
+            ))
+        except Exception as e:  # noqa: BLE001
+            return self._fail(e)
+
     # ------------------------------------------------ proyectos (avance de obra)
     @http.route("/ne/api/proyectos", **_GET)
     def list_proyectos(self, **kw):
@@ -1501,12 +1576,16 @@ class L10nPeNeApi(http.Controller):
 
     # ------------------------------------------------------------------- caja
     @http.route("/ne/api/caja", **_GET)
-    def caja_actual(self, **kw):
+    def caja_actual(self, establecimiento=None, **kw):
+        # `establecimiento` es la RESPUESTA a la pregunta que el backend devuelve cuando hay
+        # varias cajas abiertas y ninguna es del usuario ({requiereLocal, locales}). Sin él el
+        # contrato no cambia: la caja propia, o la única, o ninguna.
         uid = self._identify()
         if not uid:
             return self._unauth()
         try:
-            return self._json(self._caja(uid).l10n_pe_ne_caja_actual())
+            return self._json(self._caja(uid).l10n_pe_ne_caja_actual(
+                establecimiento=establecimiento or None))
         except Exception as e:  # noqa: BLE001
             return self._fail(e)
 

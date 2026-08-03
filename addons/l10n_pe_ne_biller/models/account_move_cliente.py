@@ -123,16 +123,18 @@ class AccountMove(models.Model):
             return {"ok": True, "modo": "archivado"}
 
     @api.model
-    def l10n_pe_ne_list_productos(self, query=None, limit=50, offset=None):
+    def l10n_pe_ne_list_productos(self, query=None, limit=50, offset=None, categ_id=None):
         """Productos de Odoo para que React liste/autocomplete y los documentos los referencien.
         Busca por nombre, código interno (default_code) o código de barras (barcode).
+        `categ_id` filtra por categoría INCLUYENDO sus subcategorías (child_of) — para navegar
+        el catálogo por departamento (super).
 
         Paginación opt-in: con `offset` devuelve {items, total}; sin él, lista plana."""
         domain = [("sale_ok", "=", True)]
+        if categ_id:
+            domain.append(("categ_id", "child_of", int(categ_id)))
         if query:
-            domain = [
-                "&",
-                ("sale_ok", "=", True),
+            domain += [
                 "|",
                 "|",
                 ("name", "ilike", query),
@@ -145,6 +147,25 @@ class AccountMove(models.Model):
         if offset is None:
             return items
         return {"items": items, "total": Product.search_count(domain)}
+
+    @api.model
+    def l10n_pe_ne_list_categorias(self):
+        """Árbol de categorías de producto bajo 'Supermercado' (departamento → subcategoría),
+        con el conteo de productos vendibles de cada rama (child_of). Para navegar el catálogo
+        por departamento en la SPA. Vacío si aún no se sembró la raíz 'Supermercado'."""
+        Cat = self.env["product.category"]
+        Product = self.env["product.product"]
+        root = Cat.search([("name", "=", "Supermercado"), ("parent_id", "=", False)], limit=1)
+        if not root:
+            return {"rootId": None, "items": []}
+        cats = Cat.search([("id", "child_of", root.id)], order="complete_name")
+        items = [{
+            "id": c.id,
+            "name": c.name,
+            "parentId": c.parent_id.id if c.parent_id else None,
+            "count": Product.search_count([("sale_ok", "=", True), ("categ_id", "child_of", c.id)]),
+        } for c in cats]
+        return {"rootId": root.id, "items": items}
 
     @api.model
     def l10n_pe_ne_producto_por_barcode(self, code):

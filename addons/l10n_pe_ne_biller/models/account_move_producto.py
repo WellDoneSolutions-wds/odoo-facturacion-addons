@@ -619,6 +619,8 @@ class AccountMove(models.Model):
             "descripcion": p.name or "",
             "codigo": p.default_code or "",
             "barcode": p.barcode or "",
+            "categId": p.categ_id.id or None,
+            "categoria": p.categ_id.complete_name or "",
             "codSunat": p.l10n_pe_ne_cod_producto_sunat or "",
             "detraCod": p.l10n_pe_ne_detraccion_cod or "",
             "percepTasa": p.l10n_pe_ne_percepcion_tasa or 0.0,

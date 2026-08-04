@@ -420,7 +420,13 @@ class AccountMove(models.Model):
                 "mtoValorUnitario": self._l10n_pe_fmt_unit(gross / qty if qty else 0.0),
                 "mtoValorVentaItem": fmt(base),
                 # Precio de venta unitario = (valor venta + ISC + IGV) / cantidad; NO incluye el ICBPER.
-                "mtoPrecioVentaUnitario": self._l10n_pe_fmt_unit((base + isc + igv) / qty if qty else 0.0),
+                # A 2 decimales (fmt, no fmt_unit): es el AlternativeConditionPrice (cat.01), un precio
+                # de REFERENCIA que SUNAT no reconcilia contra ningún total —a diferencia de
+                # mtoValorUnitario, que sí necesita los 8 dec para casar con mtoValorVentaItem—. Recalcularlo
+                # desde base+igv ya redondeados y dejarlo en 8 dec ensuciaba la representación impresa
+                # (p.ej. S/2.50 con IGV mostrado como 2.49902988). El detalle del comprobante usa la MISMA
+                # fórmula (precioConIgv) para que PDF y app coincidan.
+                "mtoPrecioVentaUnitario": fmt((base + isc + igv) / qty if qty else 0.0),
                 "mtoValorReferencialUnitario": "0.00",
                 "porIgvItem": fmt(por_igv),
                 # La base del IGV incluye el ISC (el IGV se computa sobre valor venta + ISC).

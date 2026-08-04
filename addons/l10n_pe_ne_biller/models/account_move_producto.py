@@ -590,6 +590,10 @@ class AccountMove(models.Model):
         costo = float(ln.get("costo") or 0)
         if costo > 0:
             vals["standard_price"] = costo
+        # Stock mínimo (umbral de reposición): solo lo trae el alta desde el catálogo.
+        sm = float(ln.get("stockMinimo") or 0)
+        if sm > 0:
+            vals["l10n_pe_ne_stock_minimo"] = sm
         if cod:
             vals["default_code"] = cod
         bc = (ln.get("barcode") or "").strip()
@@ -646,6 +650,9 @@ class AccountMove(models.Model):
             # cuando una compra trae un costo distinto.
             "costo": p.standard_price or 0.0,
             "margen": p.l10n_pe_ne_margen or 0.0,
+            # Stock mínimo (umbral de reposición). 0 = sin alerta. La lista lo usa para marcar
+            # "bajo el mínimo" cuando 0 < stock <= stockMinimo.
+            "stockMinimo": p.l10n_pe_ne_stock_minimo or 0.0,
             # Rastreo por lote o serie (Odoo: tracking). "lote" agrupa unidades (farmacia,
             # alimentos); "serie" es un número por unidad (celulares, equipos).
             "rastreo": {"lot": "lote", "serial": "serie"}.get(p.tracking, "ninguno"),

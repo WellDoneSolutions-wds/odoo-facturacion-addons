@@ -187,6 +187,7 @@ class AccountMove(models.Model):
                 "vence": producto.get("vence"),
                 "margen": producto.get("margen"),
                 "costo": producto.get("costo"),
+                "stockMinimo": producto.get("stockMinimo"),
             },
             tax,
         )
@@ -236,6 +237,8 @@ class AccountMove(models.Model):
             vals["l10n_pe_ne_margen"] = float(producto.get("margen") or 0)
         if producto.get("costo") is not None:
             vals["standard_price"] = float(producto.get("costo") or 0)
+        if producto.get("stockMinimo") is not None:
+            vals["l10n_pe_ne_stock_minimo"] = float(producto.get("stockMinimo") or 0)
         if "vence" in producto:
             vals["use_expiration_date"] = bool(producto.get("vence"))
         if producto.get("precio") is not None:

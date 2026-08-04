@@ -1207,6 +1207,16 @@ class L10nPeNeApi(http.Controller):
             lambda: self._move(uid).l10n_pe_ne_crear_marca(self._body())
         )
 
+    @http.route("/ne/api/productos/verificar-stock", **_POST)
+    def verificar_stock(self, **kw):
+        """Pre-emisión (no bloquea): qué productos con inventario quedarían en stock negativo."""
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(
+            lambda: self._move(uid).l10n_pe_ne_verificar_stock((self._body() or {}).get("lineas"))
+        )
+
     @http.route("/ne/api/productos/<int:rec_id>/ajustar-stock", **_POST)
     def producto_ajustar_stock(self, rec_id, **kw):
         uid = self._identify()

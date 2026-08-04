@@ -636,6 +636,36 @@ class AccountMove(models.Model):
         body = body or {}
         return self.env["l10n_pe_ne.marca"].l10n_pe_ne_crear_marca(body.get("nombre"))
 
+    @api.model
+    def l10n_pe_ne_verificar_stock(self, lineas):
+        """Pre-emisión: dado [{productId, cantidad}], devuelve los productos con inventario cuya
+        venta dejaría el stock NEGATIVO. Solo informa (el front pide confirmación); NO bloquea —
+        emitir permite vender sin stock a propósito (ver _l10n_pe_ne_mover_stock). Agrega la
+        cantidad por producto (el mismo puede ir en varias líneas)."""
+        por_prod = {}
+        for ln in lineas or []:
+            pid = int((ln or {}).get("productId") or 0)
+            if pid:
+                por_prod[pid] = por_prod.get(pid, 0.0) + float((ln or {}).get("cantidad") or 0)
+        Product = self.env["product.product"]
+        avisos = []
+        for pid, cant in por_prod.items():
+            p = Product.browse(pid).exists()
+            # Solo bienes con inventario: un servicio (o un bien sin stock) no tiene existencias.
+            if not p or not p.is_storable:
+                continue
+            stock = p.qty_available
+            queda = stock - cant
+            if queda < 0:
+                avisos.append({
+                    "productId": pid,
+                    "nombre": p.name,
+                    "stock": stock,
+                    "cantidad": cant,
+                    "quedaEn": queda,
+                })
+        return {"avisos": avisos}
+
     def _l10n_pe_ne_product_dict(self, p):
         sale_taxes = p.taxes_id.filtered(lambda t: t.type_tax_use == "sale")
         # El ICBPER (7152) NO es la afectación: es un tributo aparte (bolsa plástica). Se

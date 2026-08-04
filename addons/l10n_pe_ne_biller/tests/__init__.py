@@ -43,3 +43,4 @@ from . import test_ajuste_stock
 from . import test_kardex
 from . import test_producto_costo_minimo
 from . import test_producto_categorias
+from . import test_producto_marca

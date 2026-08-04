@@ -137,9 +137,11 @@ class AccountMove(models.Model):
             domain += [
                 "|",
                 "|",
+                "|",
                 ("name", "ilike", query),
                 ("default_code", "ilike", query),
                 ("barcode", "ilike", query),
+                ("l10n_pe_ne_marca_id.name", "ilike", query),
             ]
         Product = self.env["product.product"]
         prods = Product.search(domain, order="name", limit=limit, offset=offset or 0)
@@ -164,6 +166,11 @@ class AccountMove(models.Model):
             "count": Product.search_count([("sale_ok", "=", True), ("categ_id", "child_of", c.id)]),
         } for c in cats]
         return {"rootId": root.id, "items": items}
+
+    @api.model
+    def l10n_pe_ne_list_marcas(self):
+        """Marcas comerciales (id + nombre) para el select del form de producto."""
+        return self.env["l10n_pe_ne.marca"].l10n_pe_ne_list_marcas()
 
     @api.model
     def l10n_pe_ne_producto_por_barcode(self, code):
@@ -208,6 +215,7 @@ class AccountMove(models.Model):
                 "costo": producto.get("costo"),
                 "stockMinimo": producto.get("stockMinimo"),
                 "categId": producto.get("categId"),
+                "marcaId": producto.get("marcaId"),
             },
             tax,
         )
@@ -268,6 +276,9 @@ class AccountMove(models.Model):
                 default_categ = self.env.ref("product.product_category_all", raise_if_not_found=False)
                 if default_categ:
                     vals["categ_id"] = default_categ.id
+        if "marcaId" in producto:
+            # Marca compartida; vacío ('' / 0) la desasigna.
+            vals["l10n_pe_ne_marca_id"] = int(producto.get("marcaId") or 0) or False
         if "vence" in producto:
             vals["use_expiration_date"] = bool(producto.get("vence"))
         if producto.get("precio") is not None:

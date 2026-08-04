@@ -1,6 +1,7 @@
 from . import uom_uom
 from . import product_template
 from . import product_category
+from . import l10n_pe_ne_marca
 from . import res_company
 from . import account_journal
 from . import account_move_biller

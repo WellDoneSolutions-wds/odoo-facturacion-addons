@@ -1,7 +1,26 @@
 <?xml version="1.0" encoding="utf-8"?>
 <odoo>
-    <!-- Reporte PDF de la cotización (QWeb). Usa el layout externo de Odoo, así que
-         hereda el membrete/pie de la compañía emisora. -->
+    <!-- Paperformat A4 para los documentos referenciales (cotización y guía). Estos
+         reportes usan web.basic_layout, que NO dibuja membrete: con el paperformat A4
+         por defecto (margin_top=52 / header_spacing=52, reservados para un header que
+         acá no existe) el contenido caía al medio de la hoja con una banda vacía arriba.
+         Márgenes chicos + header_spacing=0 hacen que arranque en la parte superior.
+         Lo referencian action_report_cotizacion y action_report_guia. -->
+    <record id="paperformat_documento_referencial_a4" model="report.paperformat">
+        <field name="name">Documento referencial A4</field>
+        <field name="format">A4</field>
+        <field name="orientation">Portrait</field>
+        <field name="margin_top">8</field>
+        <field name="margin_bottom">8</field>
+        <field name="margin_left">7</field>
+        <field name="margin_right">7</field>
+        <field name="header_spacing">0</field>
+        <field name="header_line" eval="False"/>
+        <field name="dpi">90</field>
+    </record>
+
+    <!-- Reporte PDF de la cotización (QWeb). Usa web.basic_layout (sin membrete) con el
+         paperformat referencial de arriba. -->
     <record id="action_report_cotizacion" model="ir.actions.report">
         <field name="name">Cotización</field>
         <field name="model">l10n_pe_ne.cotizacion</field>
@@ -9,6 +28,7 @@
         <field name="report_name">l10n_pe_ne_biller.report_cotizacion</field>
         <field name="report_file">l10n_pe_ne_biller.report_cotizacion</field>
         <field name="print_report_name">'Cotizacion - %s' % (object.name or '')</field>
+        <field name="paperformat_id" ref="paperformat_documento_referencial_a4"/>
         <field name="binding_model_id" ref="model_l10n_pe_ne_cotizacion"/>
         <field name="binding_type">report</field>
     </record>

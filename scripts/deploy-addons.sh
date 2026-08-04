@@ -1,6 +1,6 @@
 #!/bin/bash
 # Deploy de addons en el EC2 — lo invoca el workflow deploy.yml vía SSM Run
-# Command (rol OIDC odoo-mype-deploy-addon, definido en el repo de infra).
+# Command (rol OIDC ekipu-deploy-addon, definido en el repo de infra).
 #
 # Uso: deploy-addons.sh <git-sha>
 #
@@ -26,7 +26,7 @@ SHA=$1
 if [ -z "$SHA" ]; then echo "Uso: $0 <git-sha>"; exit 1; fi
 # Mismos valores hardcodeados que update-odoo.sh hornea vía Terraform:
 REGION=us-east-1
-DIST_PARAM=/odoo-mype/cloudfront-distribution-id
+DIST_PARAM=/ekipu/cloudfront-distribution-id
 
 cd /home/ubuntu/odoo-facturacion-addons
 git fetch origin

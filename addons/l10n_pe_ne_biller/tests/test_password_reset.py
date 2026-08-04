@@ -99,7 +99,7 @@ class TestPasswordReset(TransactionCase):
     def test_request_reset_generic_no_enumeration(self):
         """La solicitud responde SIEMPRE {ok:True}, exista o no la cuenta (issue #1)."""
         R = self.env['res.users']
-        O = 'https://demo.app.comercioagil.com'
+        O = 'https://demo.app.ekipu.pe'
         self.assertEqual(R.l10n_pe_ne_request_password_reset('no-existe-xyz@nadie.pe', O), {'ok': True})
         self.assertEqual(R.l10n_pe_ne_request_password_reset('pr_user_a', O), {'ok': True})  # existe, sin correo
 

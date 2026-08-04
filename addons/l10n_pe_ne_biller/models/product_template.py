@@ -25,6 +25,17 @@ class ProductTemplate(models.Model):
         "lo recalcule.",
     )
 
+    # Umbral de reposición: cuando las existencias bajan de este nivel, la UI avisa "bajo el
+    # mínimo". No auto-compra (no crea reglas de reabastecimiento de Odoo): es una alerta simple
+    # que basta para una PYME. Solo tiene sentido en bienes que llevan inventario; 0 = sin alerta.
+    l10n_pe_ne_stock_minimo = fields.Float(
+        string="Stock mínimo",
+        digits=(12, 4),
+        default=0.0,
+        help="Nivel de reposición. Cuando el saldo baja de este número, la app avisa para "
+             "reponer a tiempo. Solo aplica a bienes con inventario. 0 = sin alerta.",
+    )
+
     l10n_pe_ne_unit_code = fields.Char(
         string='Unidad SUNAT (cat.03)',
         help="Código de unidad de medida SUNAT (Catálogo 03, ej. NIU, KGM, LTR) que se usa al "
@@ -73,6 +84,14 @@ class ProductTemplate(models.Model):
              "la tasa final se confirma al emitir (el 0.5% del listado SUNAT se ajusta "
              "a mano). Solo aplica si el negocio es agente de percepción.",
     )
+
+    @api.constrains("l10n_pe_ne_stock_minimo")
+    def _check_stock_minimo(self):
+        # Defensa en profundidad: la API y el import ya validan >= 0, pero un write directo no
+        # pasa por esos caminos. El modelo es el único lugar que ningún caller puede saltarse.
+        for rec in self:
+            if rec.l10n_pe_ne_stock_minimo < 0:
+                raise ValidationError(_("El stock mínimo no puede ser negativo."))
 
     @api.constrains("l10n_pe_ne_percepcion_tasa")
     def _check_percepcion_tasa(self):

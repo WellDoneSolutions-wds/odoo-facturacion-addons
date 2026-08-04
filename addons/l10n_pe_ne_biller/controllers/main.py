@@ -1175,21 +1175,10 @@ class L10nPeNeApi(http.Controller):
             lambda: self._move(uid).l10n_pe_ne_create_producto(self._body())
         )
 
-    # -------------------------------------------------------------- categorías
-    @http.route("/ne/api/categorias", **_GET)
-    def list_categorias(self, **kw):
-        """Árbol de categorías del negocio (siembra un genérico la primera vez)."""
-        uid = self._identify()
-        if not uid:
-            return self._unauth()
-        try:
-            return self._json(self._move(uid).l10n_pe_ne_categorias())
-        except Exception as e:  # noqa: BLE001
-            return self._fail(e)
-
-    @http.route("/ne/api/categorias", **_POST)
+    @http.route("/ne/api/productos/categorias", **_POST)
     def create_categoria(self, **kw):
-        """Crea una categoría/subcategoría del negocio (creable al vuelo desde el form)."""
+        """Crea un departamento/subcategoría bajo 'Supermercado' (creable al vuelo desde el form).
+        El GET del árbol es list_categorias (mismo path)."""
         uid = self._identify()
         if not uid:
             return self._unauth()

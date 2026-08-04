@@ -145,14 +145,24 @@ class AccountMove(models.Model):
         # está vacío. Usar `or "01"` aquí lo hacía SIEMPRE factura y filtraba la placa también
         # en boletas. El idioma correcto (igual que en el resto del archivo) es
         # `l10n_pe_ne_tipo_doc or _l10n_pe_document_type()`.
-        if self.l10n_pe_ne_placa and (self.l10n_pe_ne_tipo_doc or self._l10n_pe_document_type()) == "01":
-            for li in range(1, idx + 1):
+        # Placa POR LÍNEA: cada línea de combustible con su propia placa (varios vehículos por
+        # factura); las líneas sin placa (no combustible) no la llevan. Fallback de compatibilidad:
+        # si NINGUNA línea trae placa pero el move tiene una de cabecera (flujo viejo/compras), se
+        # replica en todas —conserva el comportamiento anterior.
+        if (self.l10n_pe_ne_tipo_doc or self._l10n_pe_document_type()) == "01":
+            plines = list(self._l10n_pe_product_lines())
+            hay_por_linea = any((l.l10n_pe_ne_placa or "").strip() for l in plines)
+            fallback = (self.l10n_pe_ne_placa or "").strip() if not hay_por_linea else ""
+            for li, line in enumerate(plines, start=1):
+                placa = (line.l10n_pe_ne_placa or "").strip() or fallback
+                if not placa:
+                    continue
                 out.append({
                     "idLinea": str(li),
                     "codTipoVariable": "-",
                     "nomPropiedad": "Numero de Placa",
                     "codPropiedad": "7000",
-                    "valPropiedad": self.l10n_pe_ne_placa.strip(),
+                    "valPropiedad": placa,
                     "codBienPropiedad": "-",
                     "fecInicioPropiedad": "-",
                     "horInicioPropiedad": "-",

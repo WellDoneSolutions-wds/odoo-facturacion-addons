@@ -134,6 +134,9 @@ class AccountMove(models.Model):
                 lvals["l10n_pe_ne_unit_code"] = ln["unidad"]
             if ln.get("codSunat"):
                 lvals["l10n_pe_ne_cod_producto_sunat"] = ln["codSunat"]
+            if ln.get("placa"):
+                # Placa del vehículo POR LÍNEA (grifo/combustible) → cat-55 código 7000 en el XML.
+                lvals["l10n_pe_ne_placa"] = str(ln["placa"]).strip().upper()
             if ln.get("afectacionGratuita"):
                 lvals["l10n_pe_ne_afectacion_gratuita"] = ln["afectacionGratuita"]
             if ln.get("fraccionar"):

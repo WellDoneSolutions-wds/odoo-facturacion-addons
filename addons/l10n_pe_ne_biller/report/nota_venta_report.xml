@@ -25,6 +25,10 @@
         <field name="report_name">l10n_pe_ne_biller.report_nota_venta</field>
         <field name="report_file">l10n_pe_ne_biller.report_nota_venta</field>
         <field name="print_report_name">'Nota de venta - %s' % (object.name or '')</field>
+        <!-- Mismo paperformat referencial A4 que cotización/guía: basic_layout no dibuja
+             membrete, así el contenido arranca arriba y no cae al medio de la hoja
+             (el default A4 reserva margin_top=52mm para un header inexistente). -->
+        <field name="paperformat_id" ref="paperformat_documento_referencial_a4"/>
         <field name="binding_model_id" ref="model_l10n_pe_ne_nota_venta"/>
         <field name="binding_type">report</field>
     </record>

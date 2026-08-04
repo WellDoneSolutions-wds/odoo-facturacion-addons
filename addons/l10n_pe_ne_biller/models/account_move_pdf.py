@@ -48,6 +48,22 @@ class AccountMove(models.Model):
         nota = html2plaintext(self.narration or "").strip()
         return ("Observación: " + nota) if nota else ""
 
+    def _l10n_pe_ne_inicial_credito_lineas(self):
+        """Líneas print-only de la INICIAL AL CONTADO de una venta al crédito. El inicial ya pagado
+        NO va al XML SUNAT (allí solo van el saldo pendiente y las cuotas), así que sin esto el
+        impreso mostraría cuotas que suman MENOS que el total, con un hueco sin explicar. Devuelve
+        ['Inicial pagada al contado: S/ X', 'Saldo a crédito: S/ Y'] o [] si no aplica."""
+        self.ensure_one()
+        if self.l10n_pe_ne_forma_pago != "Credito":
+            return []
+        inicial = self.l10n_pe_ne_inicial_contado or 0.0
+        if inicial <= 0:
+            return []
+        return [
+            "Inicial pagada al contado: S/ %.2f" % inicial,
+            "Saldo a crédito: S/ %.2f" % self._l10n_pe_credito_pendiente(),
+        ]
+
     def _l10n_pe_ne_cobro_efectivo(self):
         """(redondeo, a_pagar, pagado, vuelto) del cobro en efectivo — dato de CAJA, no del XML.
         El comprobante mantiene amount_total; en efectivo se cobra a_pagar = amount_total + redondeo
@@ -66,16 +82,19 @@ class AccountMove(models.Model):
         efectivo y el vuelto — el ticket 80mm ya los trae en su bloque POS, el A4 solo mostraba los
         medios. Todos son datos de caja (NO van al XML SUNAT). "" si no hay medios detallados."""
         self.ensure_one()
+        partes = []
         det = self._l10n_pe_ne_medios_pago_texto()
-        if not det:
-            return ""
-        partes = [det]
-        redondeo, a_pagar, _pagado, vuelto = self._l10n_pe_ne_cobro_efectivo()
-        if redondeo:
-            partes.append("Redondeo S/ %.2f" % redondeo)
-            partes.append("A pagar efectivo S/ %.2f" % a_pagar)
-        if vuelto > 0:
-            partes.append("Vuelto S/ %.2f" % vuelto)
+        if det:
+            partes.append(det)
+            redondeo, a_pagar, _pagado, vuelto = self._l10n_pe_ne_cobro_efectivo()
+            if redondeo:
+                partes.append("Redondeo S/ %.2f" % redondeo)
+                partes.append("A pagar efectivo S/ %.2f" % a_pagar)
+            if vuelto > 0:
+                partes.append("Vuelto S/ %.2f" % vuelto)
+        # Inicial al contado del crédito: se muestra aunque no haya medios POS detallados (venta a
+        # crédito desde "Nuevo comprobante"), para que el impreso cuadre con el total.
+        partes.extend(self._l10n_pe_ne_inicial_credito_lineas())
         return " · ".join(partes)
 
     def _l10n_pe_ne_ticket_adicional(self):
@@ -96,6 +115,9 @@ class AccountMove(models.Model):
                 partes.append("A pagar efectivo: S/ %.2f" % a_pagar)
             if vuelto > 0:
                 partes.append("Vuelto: S/ %.2f" % vuelto)
+        # Inicial al contado del crédito (no va al XML; imprescindible en el impreso para explicar
+        # por qué las cuotas suman menos que el total).
+        partes.extend(self._l10n_pe_ne_inicial_credito_lineas())
         if self.invoice_user_id:
             partes.append("Atendido por: " + (self.invoice_user_id.name or ""))
         obs = self._l10n_pe_ne_observacion_impresa()

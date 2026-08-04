@@ -188,6 +188,13 @@ class AccountMoveLine(models.Model):
         copy=False,
         help="Código de producto SUNAT (UNSPSC, catálogo 25) de la línea, si aplica.",
     )
+    l10n_pe_ne_placa = fields.Char(
+        string="Placa del vehículo (combustible)",
+        copy=False,
+        help="Número de placa del vehículo de ESTA línea (grifo/combustible). Va como "
+        "cac:AdditionalItemProperty cat-55 código 7000 (Gastos Art. 37 Renta) en la línea. "
+        "Cada línea de combustible puede tener su propia placa; las demás no la llevan.",
+    )
     # Lote/serie de una línea de COMPRA. El lote entra con la mercadería, así que se captura
     # en la compra y viaja con la línea hasta que _l10n_pe_ne_mover_stock_compra crea el
     # movimiento. En la VENTA no se pide: Odoo reserva y asigna el lote solo, por su

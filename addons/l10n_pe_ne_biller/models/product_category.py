@@ -9,16 +9,28 @@ pide su árbol se siembra uno genérico razonable (editable), para no arrancar e
 from odoo import _, api, fields, models
 from odoo.exceptions import UserError
 
-# Árbol semilla genérico y editable. No pretende ser el catálogo de un supermercado (una
-# ferretería o farmacia lo borra y arma el suyo): es un punto de partida útil para el retail
-# peruano común. Cada negocio lo adapta.
+# Árbol semilla COMPLETO y editable — una taxonomía de retail/supermercado peruano lista para
+# usar desde el día uno. NO es un enum fijo: son datos (product.category) que cada negocio
+# adapta: una ferretería o farmacia borra lo que no usa y arma lo suyo. Es un punto de partida
+# generoso; el negocio lo recorta más que ampliarlo.
 _SEED = {
-    "Abarrotes": ["Arroz", "Fideos", "Aceites", "Conservas", "Menestras", "Azúcar"],
-    "Bebidas": ["Gaseosas", "Agua", "Jugos"],
-    "Lácteos": ["Leche", "Yogurt", "Queso"],
-    "Snacks": ["Galletas", "Chocolates", "Frituras"],
-    "Limpieza": ["Detergentes", "Lejía", "Jabón de ropa"],
-    "Cuidado personal": ["Shampoo", "Jabón", "Papel higiénico"],
+    "Abarrotes": ["Arroz", "Azúcar", "Fideos", "Menestras", "Harinas", "Aceites", "Conservas", "Salsas y aderezos", "Café", "Té e infusiones", "Cereales"],
+    "Lácteos y huevos": ["Leche", "Yogurt", "Queso", "Mantequilla", "Margarina", "Crema de leche", "Huevos"],
+    "Carnes y aves": ["Res", "Cerdo", "Pollo", "Pavo", "Embutidos"],
+    "Pescados y mariscos": ["Pescado fresco", "Conservas de pescado", "Mariscos"],
+    "Frutas y verduras": ["Frutas", "Verduras", "Hortalizas"],
+    "Panadería y pastelería": ["Pan", "Pan de molde", "Kekes y bizcochos", "Tortas y postres", "Galletas frescas"],
+    "Bebidas": ["Agua", "Gaseosas", "Jugos", "Energizantes", "Bebidas rehidratantes", "Café y té listos"],
+    "Licores": ["Cerveza", "Vino", "Pisco", "Ron", "Whisky"],
+    "Snacks y golosinas": ["Papas y frituras", "Galletas", "Chocolates", "Caramelos", "Frutos secos"],
+    "Congelados": ["Helados", "Nuggets y apanados", "Papas prefritas", "Verduras congeladas", "Pizzas"],
+    "Comidas preparadas": ["Pollo a la brasa", "Almuerzos", "Ensaladas", "Sándwiches", "Sushi"],
+    "Productos naturales": ["Quinua y granos andinos", "Avena", "Miel", "Granola", "Semillas"],
+    "Limpieza del hogar": ["Detergentes", "Lavavajillas", "Lejía", "Suavizantes", "Desinfectantes", "Ambientadores"],
+    "Cuidado personal": ["Shampoo y acondicionador", "Jabón", "Higiene dental", "Desodorantes", "Papel higiénico", "Cuidado femenino", "Afeitado"],
+    "Bebés": ["Pañales", "Toallitas húmedas", "Fórmula infantil", "Papillas", "Biberones y accesorios"],
+    "Mascotas": ["Alimento para perros", "Alimento para gatos", "Arena sanitaria", "Snacks y accesorios"],
+    "Bazar y hogar": ["Focos y pilas", "Menaje", "Descartables", "Bolsas", "Ferretería básica"],
     "Otros": [],
 }
 

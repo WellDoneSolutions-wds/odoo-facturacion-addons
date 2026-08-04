@@ -771,11 +771,19 @@ class AccountMove(models.Model):
             afect = next(
                 (c for c in ("9997", "9998", "9995", "9996") if c in codes), "1000"
             )
+            # Precio unitario CON IGV para la representación del detalle (P. Unit). MISMA fórmula que
+            # mtoPrecioVentaUnitario del XML/PDF —(valor venta + ISC + IGV)/cantidad, sin ICBPER— para
+            # que la app y el PDF muestren idéntico (2 decimales). `precio` (sin IGV) se conserva por
+            # retrocompat / cálculos del front.
+            base_l, igv_l, isc_l, _icb = self._l10n_pe_line_amounts(ln)
+            qty_l = ln.quantity or 0.0
+            precio_con_igv = round((base_l + isc_l + igv_l) / qty_l, 2) if qty_l else 0.0
             lineas.append(
                 {
                     "descripcion": ln.name or "",
                     "cantidad": ln.quantity or 0.0,
                     "precio": ln.price_unit or 0.0,
+                    "precioConIgv": precio_con_igv,
                     "descuento": ln.discount or 0.0,
                     "afectacion": afect,
                     "unidad": self._l10n_pe_unit_code(ln),

@@ -151,13 +151,11 @@ class AccountMove(models.Model):
     @api.model
     def l10n_pe_ne_list_categorias(self):
         """Árbol de categorías de producto bajo 'Supermercado' (departamento → subcategoría),
-        con el conteo de productos vendibles de cada rama (child_of). Para navegar el catálogo
-        por departamento en la SPA. Vacío si aún no se sembró la raíz 'Supermercado'."""
+        con el conteo de productos vendibles de cada rama (child_of). UN solo árbol que usan el
+        filtro del catálogo y el form (asignar categoría). Se siembra completo la primera vez."""
         Cat = self.env["product.category"]
         Product = self.env["product.product"]
-        root = Cat.search([("name", "=", "Supermercado"), ("parent_id", "=", False)], limit=1)
-        if not root:
-            return {"rootId": None, "items": []}
+        root = Cat._l10n_pe_ne_root()
         cats = Cat.search([("id", "child_of", root.id)], order="complete_name")
         items = [{
             "id": c.id,

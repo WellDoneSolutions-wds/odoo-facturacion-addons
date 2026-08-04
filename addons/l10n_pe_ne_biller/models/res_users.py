@@ -13,7 +13,7 @@ _logger = logging.getLogger(__name__)
 _MIN_LEN = 8
 
 # Solo estos orígenes (subdominios del SPA) pueden recibir el link de reset.
-# Esquema wildcard: <t>.app.ekipu.pe (hasta 2026-08: <t>.app.comercioagil.com).
+# Esquema wildcard: <t>.app.ekipu.pe (hasta 2026-08 con el dominio anterior).
 _L10N_PE_NE_SPA_ORIGIN_RE = re.compile(r'^https://[a-z0-9-]+\.app\.ekipu\.pe$')
 
 

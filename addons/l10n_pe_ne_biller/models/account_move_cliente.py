@@ -188,6 +188,7 @@ class AccountMove(models.Model):
                 "margen": producto.get("margen"),
                 "costo": producto.get("costo"),
                 "stockMinimo": producto.get("stockMinimo"),
+                "categId": producto.get("categId"),
             },
             tax,
         )
@@ -239,6 +240,15 @@ class AccountMove(models.Model):
             vals["standard_price"] = float(producto.get("costo") or 0)
         if producto.get("stockMinimo") is not None:
             vals["l10n_pe_ne_stock_minimo"] = float(producto.get("stockMinimo") or 0)
+        if "categId" in producto:
+            cid = int(producto.get("categId") or 0)
+            if cid:
+                vals["categ_id"] = cid
+            else:
+                # Sin categoría → la de por defecto de Odoo (categ_id es requerido, no admite vacío).
+                default_categ = self.env.ref("product.product_category_all", raise_if_not_found=False)
+                if default_categ:
+                    vals["categ_id"] = default_categ.id
         if "vence" in producto:
             vals["use_expiration_date"] = bool(producto.get("vence"))
         if producto.get("precio") is not None:

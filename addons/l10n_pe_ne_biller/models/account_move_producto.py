@@ -608,9 +608,42 @@ class AccountMove(models.Model):
             vals["l10n_pe_ne_percepcion_tasa"] = _percep_float(ln["percepTasa"])
         if uni:
             vals["l10n_pe_ne_unit_code"] = uni
+        # Categoría (product.category propia del negocio): la hoja elegida (subcategoría si la
+        # hay, si no la categoría). Solo desde el catálogo; al auto-crear emitiendo no viene.
+        cid = int(ln.get("categId") or 0)
+        if cid:
+            vals["categ_id"] = cid
         if tax:
             vals["taxes_id"] = [(6, 0, tax.ids)]
         return Product.create(vals)
+
+    def _l10n_pe_ne_categoria_dict(self, categ):
+        """Descompone la categoría del producto para el front: la hoja (categId), su ancestro
+        top (categoriaId), la subcategoría si la hoja tiene padre propio (subcategoriaId) y una
+        etiqueta para la lista. Todo en 0/"" si es la categoría nativa de Odoo (no del negocio)."""
+        propia = bool(categ and categ.l10n_pe_ne_company_id)
+        if not propia:
+            return {"categId": 0, "categoriaId": 0, "subcategoriaId": 0, "categoriaLabel": ""}
+        padre = categ.parent_id if (categ.parent_id and categ.parent_id.l10n_pe_ne_company_id) else None
+        return {
+            "categId": categ.id,
+            "categoriaId": padre.id if padre else categ.id,
+            "subcategoriaId": categ.id if padre else 0,
+            "categoriaLabel": ("%s › %s" % (padre.name, categ.name)) if padre else categ.name,
+        }
+
+    @api.model
+    def l10n_pe_ne_categorias(self):
+        """Árbol de categorías del negocio para el form (siembra un genérico la primera vez)."""
+        return self.env["product.category"]._l10n_pe_ne_arbol(self.env.company)
+
+    @api.model
+    def l10n_pe_ne_crear_categoria(self, body):
+        """Crea una categoría/subcategoría del negocio (creable al vuelo desde el form)."""
+        body = body or {}
+        return self.env["product.category"]._l10n_pe_ne_crear(
+            self.env.company, body.get("nombre"), body.get("parentId")
+        )
 
     def _l10n_pe_ne_product_dict(self, p):
         sale_taxes = p.taxes_id.filtered(lambda t: t.type_tax_use == "sale")
@@ -658,5 +691,8 @@ class AccountMove(models.Model):
             "rastreo": {"lot": "lote", "serial": "serie"}.get(p.tracking, "ninguno"),
             # ¿Los lotes llevan vencimiento? Solo aplica con rastreo por lote/serie.
             "vence": bool(p.use_expiration_date),
+            # Categoría / subcategoría (jerárquica, del negocio). Alimenta los dos selects del
+            # form (categoriaId/subcategoriaId) y la etiqueta de la lista.
+            **self._l10n_pe_ne_categoria_dict(p.categ_id),
         }
 

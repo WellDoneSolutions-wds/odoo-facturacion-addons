@@ -42,3 +42,4 @@ from . import test_stock_nota_venta
 from . import test_ajuste_stock
 from . import test_kardex
 from . import test_producto_costo_minimo
+from . import test_producto_categorias

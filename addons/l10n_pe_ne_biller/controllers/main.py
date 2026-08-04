@@ -1151,6 +1151,17 @@ class L10nPeNeApi(http.Controller):
         except Exception as e:  # noqa: BLE001
             return self._fail(e)
 
+    @http.route("/ne/api/productos/marcas", **_GET)
+    def list_marcas(self, **kw):
+        """Marcas comerciales (id + nombre) para el select del form de producto."""
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        try:
+            return self._json(self._move(uid).l10n_pe_ne_list_marcas())
+        except Exception as e:  # noqa: BLE001
+            return self._fail(e)
+
     @http.route("/ne/api/productos/barcode/<string:code>", **_GET)
     def producto_barcode(self, code, **kw):
         """Resuelve un producto por código de barras escaneado (POS). 404 si no hay match."""
@@ -1184,6 +1195,16 @@ class L10nPeNeApi(http.Controller):
             return self._unauth()
         return self._run(
             lambda: self._move(uid).l10n_pe_ne_crear_categoria(self._body())
+        )
+
+    @http.route("/ne/api/productos/marcas", **_POST)
+    def create_marca(self, **kw):
+        """Crea (o reutiliza) una marca comercial al vuelo desde el form. GET en el mismo path."""
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(
+            lambda: self._move(uid).l10n_pe_ne_crear_marca(self._body())
         )
 
     @http.route("/ne/api/productos/<int:rec_id>/ajustar-stock", **_POST)

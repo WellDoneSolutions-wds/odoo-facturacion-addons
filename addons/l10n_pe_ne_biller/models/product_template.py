@@ -36,6 +36,15 @@ class ProductTemplate(models.Model):
              "reponer a tiempo. Solo aplica a bienes con inventario. 0 = sin alerta.",
     )
 
+    l10n_pe_ne_marca_id = fields.Many2one(
+        "l10n_pe_ne.marca",
+        string="Marca",
+        ondelete="set null",
+        index=True,
+        help="Marca comercial del producto (Gloria, Coca-Cola…). Se comparte entre productos, "
+             "aparece en la lista del catálogo y puede anotarse en la descripción del ítem del "
+             "comprobante.")
+
     l10n_pe_ne_unit_code = fields.Char(
         string='Unidad SUNAT (cat.03)',
         help="Código de unidad de medida SUNAT (Catálogo 03, ej. NIU, KGM, LTR) que se usa al "

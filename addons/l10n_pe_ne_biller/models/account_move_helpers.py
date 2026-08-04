@@ -379,6 +379,9 @@ class AccountMove(models.Model):
                     etq += " Vence %s" % venc.date().strftime("%d/%m/%Y")
                 etqs.append(etq)
             desc = "%s | %s" % (desc, " · ".join(etqs))
+        marca = (line.product_id.l10n_pe_ne_marca_id.name or "").strip()
+        if marca:
+            desc = "%s · Marca %s" % (desc, marca)
         reg = (line.product_id.l10n_pe_ne_registro_sanitario or "").strip()
         if reg:
             desc = "%s · Reg. San. %s" % (desc, reg)

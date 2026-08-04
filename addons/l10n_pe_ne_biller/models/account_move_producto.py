@@ -613,6 +613,10 @@ class AccountMove(models.Model):
         cid = int(ln.get("categId") or 0)
         if cid:
             vals["categ_id"] = cid
+        # Marca comercial (l10n_pe_ne.marca, compartida). Solo desde el catálogo.
+        mid = int(ln.get("marcaId") or 0)
+        if mid:
+            vals["l10n_pe_ne_marca_id"] = mid
         if tax:
             vals["taxes_id"] = [(6, 0, tax.ids)]
         return Product.create(vals)
@@ -625,6 +629,12 @@ class AccountMove(models.Model):
         return self.env["product.category"]._l10n_pe_ne_crear_bajo_super(
             body.get("nombre"), body.get("parentId")
         )
+
+    @api.model
+    def l10n_pe_ne_crear_marca(self, body):
+        """Crea (o reutiliza) una marca comercial al vuelo desde el form de producto."""
+        body = body or {}
+        return self.env["l10n_pe_ne.marca"].l10n_pe_ne_crear_marca(body.get("nombre"))
 
     def _l10n_pe_ne_product_dict(self, p):
         sale_taxes = p.taxes_id.filtered(lambda t: t.type_tax_use == "sale")
@@ -639,6 +649,8 @@ class AccountMove(models.Model):
             "barcode": p.barcode or "",
             "categId": p.categ_id.id or None,
             "categoria": p.categ_id.complete_name or "",
+            "marcaId": p.l10n_pe_ne_marca_id.id or None,
+            "marca": p.l10n_pe_ne_marca_id.name or "",
             "codSunat": p.l10n_pe_ne_cod_producto_sunat or "",
             "detraCod": p.l10n_pe_ne_detraccion_cod or "",
             "percepTasa": p.l10n_pe_ne_percepcion_tasa or 0.0,

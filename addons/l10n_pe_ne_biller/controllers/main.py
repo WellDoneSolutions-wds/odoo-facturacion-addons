@@ -592,6 +592,42 @@ class L10nPeNeApi(http.Controller):
             lambda: self._serie(uid).l10n_pe_ne_serie_toggle(rec_id, activa=False)
         )
 
+    # ---------------------------------------------- V11 · recurrentes / membresías
+    def _recurrencia(self, uid):
+        u = self._user(uid)
+        return request.env["l10n_pe_ne.recurrencia"].with_user(uid).with_company(u.company_id)
+
+    @http.route("/ne/api/recurrencias", **_GET)
+    def recurrencias(self, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        try:
+            return self._json(self._recurrencia(uid).l10n_pe_ne_list())
+        except Exception as e:  # noqa: BLE001
+            return self._fail(e)
+
+    @http.route("/ne/api/recurrencias", **_POST)
+    def save_recurrencia(self, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(lambda: self._recurrencia(uid).l10n_pe_ne_save(self._body()))
+
+    @http.route("/ne/api/recurrencias/<int:rec_id>", **_DEL)
+    def delete_recurrencia(self, rec_id, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(lambda: self._recurrencia(uid).l10n_pe_ne_delete(rec_id))
+
+    @http.route("/ne/api/recurrencias/<int:rec_id>/emitir", **_POST)
+    def emitir_recurrencia(self, rec_id, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(lambda: self._recurrencia(uid).l10n_pe_ne_emitir_ahora(rec_id))
+
     # ------------------------------------------------------------ rubro (Capa 1)
     @http.route("/ne/api/rubro", **_GET)
     def rubro(self, **kw):

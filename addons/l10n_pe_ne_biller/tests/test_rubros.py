@@ -63,12 +63,12 @@ class TestRubros(L10nPeSeedMixin, TransactionCase):
         self.assertEqual(efectivos, set(NUCLEO))
 
     def test_no_disponibles_se_filtran(self):
-        # educación trae V11/R10 en defaults, pero aún no están construidos; E11 (resumen
-        # diario) SÍ está construido (fase 2) y pasa el filtro.
+        # educación trae R10 (citas) en defaults pero aún no está construido; V11
+        # (recurrente) y E11 (resumen diario) SÍ lo están (fase 2) y pasan el filtro.
         self._set(["educacion"])
         efectivos = self.env.company.l10n_pe_ne_modulos_efectivos()
-        for cod in ("V11", "R10"):
-            self.assertNotIn(cod, efectivos)
+        self.assertNotIn("R10", efectivos)
+        self.assertIn("V11", efectivos)
         self.assertIn("E11", efectivos)
         self.assertIn("V06", efectivos)   # el ajuste experto sí está disponible
 

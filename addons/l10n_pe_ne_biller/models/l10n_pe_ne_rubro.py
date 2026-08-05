@@ -59,7 +59,7 @@ MODULOS = {
     "V08": ("Redondeo de efectivo (Ley 29571)", "V", True),
     "V09": ("Reserva / apartado (layaway)", "V", False),
     "V10": ("Venta al peso con balanza (EAN-13)", "V", True),
-    "V11": ("Facturación recurrente / membresías", "V", False),
+    "V11": ("Facturación recurrente / membresías", "V", True),
     # Inventario
     "I01": ("Stock perpetuo", "I", True),
     "I02": ("Kardex por producto", "I", True),

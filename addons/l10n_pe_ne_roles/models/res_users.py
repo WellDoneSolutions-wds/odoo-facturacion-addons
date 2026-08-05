@@ -44,6 +44,9 @@ _VIS_MENU = {
     # una bandeja ADENTRO. El despachador tiene la suya en Cotizaciones (tab Cola de despacho,
     # CN-01) — quitárselo repetiría el hallazgo histórico del cajero, esta vez con él.
     "veCotizaciones": ("puedeCotizar", "puedeCobrar", "puedeDespachar", "puedeSupervisar"),
+    # V11 (membresías/recurrentes): el cajero las cobra/da de alta en mostrador; el
+    # supervisor las configura. El módulo del rubro gatea el ítem del lado de la SPA.
+    "veRecurrentes": ("puedeCobrar", "puedeSupervisar"),
     "veOrdenes": ("puedeCotizar", "puedeCobrar", "puedeTaller",
                   "puedeDespachar", "puedeSupervisar"),
     "veGuias": ("puedeDespachar", "puedeSupervisar"),

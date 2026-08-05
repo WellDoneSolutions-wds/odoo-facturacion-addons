@@ -22,6 +22,9 @@
 | Caja (`veCaja`) | — | ✓ | — | — | ✓ aprueba | — | ✓ |
 | Nuevo comprobante (`veEmitir`, también gatea el CTA del topbar) | — | — | — | — | ✓ | — | ✓ |
 | Comprobantes (`veComprobantes`) | 👁 | ✓ | — | 👁 | ✓ | 👁 | ✓ |
+| Membresías (`veRecurrentes`, fase 2 rubros: además exige módulo V11) | — | ✓ cobra/da de alta | — | — | ✓ | — | ✓ |
+| Citas / turnos (`veCitas`, módulo R10) | ✓ agenda | ✓ | — | — | ✓ | — | ✓ |
+| Apartados (`veApartados`, módulo V09) | — | ✓ abona | — | — | ✓ | — | ✓ |
 | Cotizaciones (`veCotizaciones`) | ✓ | ✓ bandeja | — | ✓ cola de despacho (CN-01) | ✓ | — | ✓ |
 | Órdenes de taller (`veOrdenes`) | ✓ crea | ✓ cobra | ✓ su cola | ✓ entrega | ✓ | — | ✓ |
 | Guías de remisión (`veGuias`) | — | — | — | ✓ | ✓ | — | ✓ |

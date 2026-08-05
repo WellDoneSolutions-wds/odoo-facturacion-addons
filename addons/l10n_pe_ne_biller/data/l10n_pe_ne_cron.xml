@@ -62,4 +62,17 @@
     <field name="interval_type">minutes</field>
     <field name="active" eval="True"/>
   </record>
+
+  <!-- V11 · Facturación recurrente / membresías: emite los comprobantes de las
+       recurrencias activas cuya fecha llegó (gimnasios, pensiones, SaaS). Diario:
+       la granularidad de la recurrencia es el DÍA (dia_emision), no la hora. -->
+  <record id="ir_cron_l10n_pe_ne_recurrencias" model="ir.cron">
+    <field name="name">Facturador PE: facturación recurrente (membresías)</field>
+    <field name="model_id" ref="model_l10n_pe_ne_recurrencia"/>
+    <field name="state">code</field>
+    <field name="code">model._l10n_pe_ne_cron_recurrencias()</field>
+    <field name="interval_number">1</field>
+    <field name="interval_type">days</field>
+    <field name="active" eval="True"/>
+  </record>
 </odoo>

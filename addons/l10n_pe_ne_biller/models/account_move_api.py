@@ -81,6 +81,10 @@ class AccountMove(models.Model):
         g = float(payload.get("descuentoGlobal") or 0)
         lines = []
         for ln in payload.get("lineas") or []:
+            # Muro por rubro (Capa 1): el IVAP (1016) solo existe si el rubro lo trae
+            # (arrocera/agroindustria). Empresa sin rubro configurado pasa siempre.
+            if (ln.get("taxCode") or "") == "1016":
+                self._l10n_pe_ne_check_modulo("C12", "IVAP (arroz pilado)")
             tax = self._l10n_pe_ne_tax_by_code(ln.get("taxCode"))
             # Sin tax resuelta la línea saldría en el XML como 'gravada con IGV 0.00'
             # (rechazo SUNAT 3111): mejor cortar aquí con el dato accionable.
@@ -103,6 +107,9 @@ class AccountMove(models.Model):
                 taxes = tax + self._l10n_pe_ne_ensure_icbper_tax()
             isc_rate = float(ln.get("isc") or 0)
             if isc_rate > 0:
+                # Muro por rubro (Capa 1): el ISC solo existe si el rubro lo trae (grifo,
+                # licorería…). Empresa sin rubro configurado pasa siempre.
+                self._l10n_pe_ne_check_modulo("C07", "ISC (selectivo al consumo)")
                 # ISC (ad-valorem): se agrega a la línea; el IGV se recalcula sobre valor + ISC.
                 taxes = taxes + self._l10n_pe_ne_ensure_isc_tax(isc_rate)
             # Notas (07/08): solo resolver el producto, nunca crearlo — sus líneas pueden ser

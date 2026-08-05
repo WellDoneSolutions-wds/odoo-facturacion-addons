@@ -30,6 +30,11 @@ from . import l10n_pe_ne_lote
 from . import l10n_pe_ne_flota
 from . import l10n_pe_ne_establecimiento
 from . import l10n_pe_ne_serie
+from . import l10n_pe_ne_rubro
+from . import l10n_pe_ne_recurrencia
+from . import l10n_pe_ne_cita
+from . import l10n_pe_ne_variantes
+from . import l10n_pe_ne_apartado
 
 from . import res_partner
 

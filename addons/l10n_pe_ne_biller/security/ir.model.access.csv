@@ -25,3 +25,8 @@ access_ne_emisor_serie,ne.emisor.serie,model_l10n_pe_ne_serie,group_l10n_pe_ne_e
 access_ne_config_serie,ne.config.serie,model_l10n_pe_ne_serie,group_l10n_pe_ne_config_series,1,1,1,0
 access_ne_emisor_stock_lot,ne.emisor.stock.lot,stock.model_stock_lot,group_l10n_pe_ne_emisor,1,1,1,0
 access_ne_emisor_stock_move_line,ne.emisor.stock.move.line,stock.model_stock_move_line,group_l10n_pe_ne_emisor,1,0,0,0
+access_ne_emisor_rubro_auditoria,ne.emisor.rubro.auditoria,model_l10n_pe_ne_rubro_auditoria,group_l10n_pe_ne_emisor,1,0,0,0
+access_ne_emisor_recurrencia,ne.emisor.recurrencia,model_l10n_pe_ne_recurrencia,group_l10n_pe_ne_emisor,1,1,1,1
+access_ne_emisor_cita,ne.emisor.cita,model_l10n_pe_ne_cita,group_l10n_pe_ne_emisor,1,1,1,1
+access_ne_emisor_apartado,ne.emisor.apartado,model_l10n_pe_ne_apartado,group_l10n_pe_ne_emisor,1,1,1,1
+access_ne_emisor_apartado_abono,ne.emisor.apartado.abono,model_l10n_pe_ne_apartado_abono,group_l10n_pe_ne_emisor,1,1,1,1

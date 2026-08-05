@@ -592,6 +592,134 @@ class L10nPeNeApi(http.Controller):
             lambda: self._serie(uid).l10n_pe_ne_serie_toggle(rec_id, activa=False)
         )
 
+    # ---------------------------------------------- V11 · recurrentes / membresías
+    def _recurrencia(self, uid):
+        u = self._user(uid)
+        return request.env["l10n_pe_ne.recurrencia"].with_user(uid).with_company(u.company_id)
+
+    @http.route("/ne/api/recurrencias", **_GET)
+    def recurrencias(self, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        try:
+            return self._json(self._recurrencia(uid).l10n_pe_ne_list())
+        except Exception as e:  # noqa: BLE001
+            return self._fail(e)
+
+    @http.route("/ne/api/recurrencias", **_POST)
+    def save_recurrencia(self, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(lambda: self._recurrencia(uid).l10n_pe_ne_save(self._body()))
+
+    @http.route("/ne/api/recurrencias/<int:rec_id>", **_DEL)
+    def delete_recurrencia(self, rec_id, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(lambda: self._recurrencia(uid).l10n_pe_ne_delete(rec_id))
+
+    @http.route("/ne/api/recurrencias/<int:rec_id>/emitir", **_POST)
+    def emitir_recurrencia(self, rec_id, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(lambda: self._recurrencia(uid).l10n_pe_ne_emitir_ahora(rec_id))
+
+    # -------------------------------------------------- R10 · citas / turnos
+    def _cita(self, uid):
+        u = self._user(uid)
+        return request.env["l10n_pe_ne.cita"].with_user(uid).with_company(u.company_id)
+
+    @http.route("/ne/api/citas", **_GET)
+    def citas(self, fecha=None, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        try:
+            return self._json(self._cita(uid).l10n_pe_ne_list(fecha))
+        except Exception as e:  # noqa: BLE001
+            return self._fail(e)
+
+    @http.route("/ne/api/citas", **_POST)
+    def save_cita(self, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(lambda: self._cita(uid).l10n_pe_ne_save(self._body()))
+
+    @http.route("/ne/api/citas/<int:cita_id>", **_DEL)
+    def delete_cita(self, cita_id, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(lambda: self._cita(uid).l10n_pe_ne_delete(cita_id))
+
+    # ---------------------------------------------- V09 · apartados (layaway)
+    def _apartado(self, uid):
+        u = self._user(uid)
+        return request.env["l10n_pe_ne.apartado"].with_user(uid).with_company(u.company_id)
+
+    @http.route("/ne/api/apartados", **_GET)
+    def apartados(self, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        try:
+            return self._json(self._apartado(uid).l10n_pe_ne_list())
+        except Exception as e:  # noqa: BLE001
+            return self._fail(e)
+
+    @http.route("/ne/api/apartados", **_POST)
+    def save_apartado(self, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(lambda: self._apartado(uid).l10n_pe_ne_save(self._body()))
+
+    @http.route("/ne/api/apartados/<int:ap_id>/abonar", **_POST)
+    def abonar_apartado(self, ap_id, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(lambda: self._apartado(uid).l10n_pe_ne_abonar(ap_id, self._body()))
+
+    @http.route("/ne/api/apartados/<int:ap_id>/entregar", **_POST)
+    def entregar_apartado(self, ap_id, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(lambda: self._apartado(uid).l10n_pe_ne_entregar(ap_id, self._body()))
+
+    @http.route("/ne/api/apartados/<int:ap_id>", **_DEL)
+    def cancelar_apartado(self, ap_id, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(lambda: self._apartado(uid).l10n_pe_ne_cancelar(ap_id))
+
+    # ------------------------------------------------------------ rubro (Capa 1)
+    @http.route("/ne/api/rubro", **_GET)
+    def rubro(self, **kw):
+        """Catálogos + selección de rubro/módulos de la empresa (pantalla Negocio)."""
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        try:
+            return self._json(self._move(uid).l10n_pe_ne_rubro_config())
+        except Exception as e:  # noqa: BLE001
+            return self._fail(e)
+
+    @http.route("/ne/api/rubro", **_POST)
+    def set_rubro(self, **kw):
+        """Guarda rubro(s) y overrides. El muro (dueño/supervisor/admin) vive en el modelo."""
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(lambda: self._move(uid).l10n_pe_ne_set_rubro(self._body()))
+
     # ---------------------------------------------------------- datos negocio
     @http.route("/ne/api/negocio", **_GET)
     def negocio(self, **kw):
@@ -1185,6 +1313,14 @@ class L10nPeNeApi(http.Controller):
         return self._run(
             lambda: self._move(uid).l10n_pe_ne_create_producto(self._body())
         )
+
+    @http.route("/ne/api/productos/variantes", **_POST)
+    def generar_variantes(self, **kw):
+        """R11: genera productos hijos por combinación de atributos (talla/color)."""
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(lambda: self._move(uid).l10n_pe_ne_generar_variantes(self._body()))
 
     @http.route("/ne/api/productos/categorias", **_POST)
     def create_categoria(self, **kw):

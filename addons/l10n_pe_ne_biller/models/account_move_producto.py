@@ -319,8 +319,10 @@ class AccountMove(models.Model):
     @api.model
     def _l10n_pe_ne_kardex(self, product_id, desde=None, hasta=None):
         """Movimientos de stock 'done' de un producto con SALDO acumulado corriente. Cantidad-first
-        (el PLE 12.1 ya valoriza). El documento se deriva del enlace: comprobante / nota / ajuste.
-        Devuelve {"stock": float, "movimientos": [{fecha, documento, tipo, entrada, salida, saldo}]}."""
+        (el PLE 12.1 ya valoriza). Documento y CONCEPTO se derivan del enlace del movimiento.
+        Devuelve {"stock": float, "movimientos":
+            [{fecha, documento, concepto, tipo, entrada, salida, saldo}]}. `concepto` ∈
+            venta / devolucion / compra / nota_venta / ajuste / reversa (para leerlo de un vistazo)."""
         prod = self.env["product.product"].browse(int(product_id)).exists()
         if not prod:
             return {"stock": 0.0, "movimientos": []}
@@ -344,15 +346,27 @@ class AccountMove(models.Model):
             salida = qty if sale else 0.0
             saldo += entrada - salida
             mv = ml.move_id
-            if mv.l10n_pe_ne_move_id:
-                doc = mv.l10n_pe_ne_move_id.name
+            # Concepto del movimiento: para entender el PORQUÉ de cada línea sin adivinar por el
+            # documento. La reversa (anulación por rechazo SUNAT) se detecta primero porque también
+            # tiene comprobante enlazado.
+            if mv.l10n_pe_ne_reversa:
+                doc = (mv.l10n_pe_ne_move_id.name if mv.l10n_pe_ne_move_id else mv.origin) or "—"
+                concepto = "reversa"
+            elif mv.l10n_pe_ne_move_id:
+                comp = mv.l10n_pe_ne_move_id
+                doc = comp.name
+                concepto = ("devolucion" if comp.move_type == "out_refund"
+                            else "compra" if comp.move_type == "in_invoice" else "venta")
             elif mv.l10n_pe_ne_nota_venta_id:
                 doc = mv.l10n_pe_ne_nota_venta_id.name
+                concepto = "nota_venta" if salida else "devolucion"
             else:
                 doc = mv.origin
+                concepto = "ajuste"
             movimientos.append({
                 "fecha": str(ml.date)[:10] if ml.date else "",
                 "documento": doc or "—",
+                "concepto": concepto,
                 "tipo": "entrada" if entrada else "salida",
                 "entrada": round(entrada, 3), "salida": round(salida, 3),
                 "saldo": round(saldo, 3),

@@ -264,6 +264,7 @@ class ResUsers(models.Model):
         grupos = self._l10n_pe_ne_roles_a_grupos(roles)
         interno = self.env.ref(_GRUPO_INTERNO)
         whitelist = self._l10n_pe_ne_grupos_whitelist()
+        roles_antes = self._l10n_pe_ne_equipo_dict(target).get("roles", [])
         # Reemplaza SOLO los grupos de la whitelist: quita los no elegidos, añade los elegidos, y
         # conserva base.group_user y cualquier grupo fuera de la whitelist (p.ej. duenio: set_roles
         # nunca lo quita, así un dueño no se destituye por esta vía).
@@ -271,7 +272,21 @@ class ResUsers(models.Model):
         target.sudo().write({"group_ids":
             [(3, g.id) for g in a_quitar] + [(4, g.id) for g in grupos] + [(4, interno.id)]})
         self._l10n_pe_ne_assert_target_limpio(target)
-        return self._l10n_pe_ne_equipo_dict(target)
+        out = self._l10n_pe_ne_equipo_dict(target)
+        # Bitácora de configuración (spec rubros §15): el cambio de ROL de un usuario queda en
+        # la misma auditoría que el rubro/overrides — responsable, antes y después. Nunca debe
+        # frenar la operación: el write ya pasó todos los choke points.
+        try:
+            self.env["l10n_pe_ne.rubro_auditoria"].sudo().create({
+                "company_id": company.id,
+                "user_id": self.env.user.id,
+                "campo": "roles:%s" % (target.login or target.id),
+                "antes": ",".join(sorted(roles_antes)),
+                "despues": ",".join(sorted(out.get("roles", []))),
+            })
+        except Exception:  # noqa: BLE001
+            pass
+        return out
 
     @api.model
     def l10n_pe_ne_duenio_set_activo(self, target_id, activo):

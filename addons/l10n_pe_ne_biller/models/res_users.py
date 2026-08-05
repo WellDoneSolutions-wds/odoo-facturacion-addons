@@ -45,12 +45,14 @@ class ResUsers(models.Model):
         }
         # Capa 1 (rubro → módulos): la clave `modulos` SOLO viaja si la empresa configuró
         # rubro. Ausente = legacy = la SPA no oculta nada (mismo contrato «ausente ≠
-        # prohibido» de las claves ve* del menú por rol). El admin de plataforma queda
-        # FUERA — ve todo en cualquier empresa (misma doctrina que el menú por rol).
-        if not (perfil["isAdmin"] or self.has_group("base.group_erp_manager")):
-            efectivos = self.company_id.l10n_pe_ne_modulos_efectivos()
-            if efectivos is not None:
-                perfil["modulos"] = sorted(efectivos)
+        # prohibido» de las claves ve* del menú por rol).
+        # La VISIBILIDAD sigue la configuración del NEGOCIO para TODOS, admin incluido
+        # (decisión de producto: «lo que configuras es lo que ves» — el admin que quiera
+        # ver todo elige el tipo «Todos» en Configuración). Lo que se mantiene exento para
+        # el admin es el MURO de emisión (poder operar en soporte), no lo que se pinta.
+        efectivos = self.company_id.l10n_pe_ne_modulos_efectivos()
+        if efectivos is not None:
+            perfil["modulos"] = sorted(efectivos)
         # Onboarding (nivel 2): ¿la empresa YA eligió su tipo de negocio? A diferencia de
         # `modulos` (que el admin no recibe), este flag es un DATO de la empresa y viaja a
         # todos — dispara el asistente de bienvenida del dueño/supervisor la primera vez.

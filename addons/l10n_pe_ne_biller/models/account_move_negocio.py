@@ -30,12 +30,11 @@ class AccountMove(models.Model):
         }
         # Capa 1 (rubro → módulos): igual que en el perfil, la clave solo viaja con rubro
         # configurado — Emitir/POS gatean los regímenes con esto (ausente = sin gating).
-        # El admin de plataforma queda fuera (ve/opera todo, doctrina del menú por rol).
-        if not (self.env.user.has_group("base.group_system")
-                or self.env.user.has_group("base.group_erp_manager")):
-            efectivos = self.env.company.l10n_pe_ne_modulos_efectivos()
-            if efectivos is not None:
-                cfg["modulos"] = sorted(efectivos)
+        # Aplica a TODOS (admin incluido): la visibilidad sigue la configuración del negocio;
+        # el bypass del admin vive solo en el MURO de emisión (operar en soporte).
+        efectivos = self.env.company.l10n_pe_ne_modulos_efectivos()
+        if efectivos is not None:
+            cfg["modulos"] = sorted(efectivos)
         # Capa 1.5 (catálogos): unidades/medios/afectaciones/monedas del NEGOCIO. A diferencia
         # de los módulos, esto NO es un permiso sino la configuración operativa — aplica a todos
         # los usuarios (admin incluido: cobrar con los medios del negocio no es un bypass).

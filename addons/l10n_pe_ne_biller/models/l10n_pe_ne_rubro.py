@@ -57,7 +57,7 @@ MODULOS = {
     "V06": ("Venta a crédito con cuotas", "V", True),
     "V07": ("Medios de pago (efectivo, Yape, tarjeta)", "V", True),
     "V08": ("Redondeo de efectivo (Ley 29571)", "V", True),
-    "V09": ("Reserva / apartado (layaway)", "V", False),
+    "V09": ("Reserva / apartado (layaway)", "V", True),
     "V10": ("Venta al peso con balanza (EAN-13)", "V", True),
     "V11": ("Facturación recurrente / membresías", "V", True),
     # Inventario

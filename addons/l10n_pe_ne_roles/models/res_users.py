@@ -50,6 +50,8 @@ _VIS_MENU = {
     # R10 (citas/turnos): la agenda es de mostrador — vendedor agenda, cajero cobra al
     # llegar el cliente, supervisor supervisa. Gateado además por el módulo del rubro.
     "veCitas": ("puedeCotizar", "puedeCobrar", "puedeSupervisar"),
+    # V09 (apartados/layaway): el cajero recibe los abonos; el supervisor supervisa.
+    "veApartados": ("puedeCobrar", "puedeSupervisar"),
     "veOrdenes": ("puedeCotizar", "puedeCobrar", "puedeTaller",
                   "puedeDespachar", "puedeSupervisar"),
     "veGuias": ("puedeDespachar", "puedeSupervisar"),

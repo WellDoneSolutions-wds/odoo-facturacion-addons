@@ -657,6 +657,49 @@ class L10nPeNeApi(http.Controller):
             return self._unauth()
         return self._run(lambda: self._cita(uid).l10n_pe_ne_delete(cita_id))
 
+    # ---------------------------------------------- V09 · apartados (layaway)
+    def _apartado(self, uid):
+        u = self._user(uid)
+        return request.env["l10n_pe_ne.apartado"].with_user(uid).with_company(u.company_id)
+
+    @http.route("/ne/api/apartados", **_GET)
+    def apartados(self, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        try:
+            return self._json(self._apartado(uid).l10n_pe_ne_list())
+        except Exception as e:  # noqa: BLE001
+            return self._fail(e)
+
+    @http.route("/ne/api/apartados", **_POST)
+    def save_apartado(self, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(lambda: self._apartado(uid).l10n_pe_ne_save(self._body()))
+
+    @http.route("/ne/api/apartados/<int:ap_id>/abonar", **_POST)
+    def abonar_apartado(self, ap_id, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(lambda: self._apartado(uid).l10n_pe_ne_abonar(ap_id, self._body()))
+
+    @http.route("/ne/api/apartados/<int:ap_id>/entregar", **_POST)
+    def entregar_apartado(self, ap_id, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(lambda: self._apartado(uid).l10n_pe_ne_entregar(ap_id, self._body()))
+
+    @http.route("/ne/api/apartados/<int:ap_id>", **_DEL)
+    def cancelar_apartado(self, ap_id, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(lambda: self._apartado(uid).l10n_pe_ne_cancelar(ap_id))
+
     # ------------------------------------------------------------ rubro (Capa 1)
     @http.route("/ne/api/rubro", **_GET)
     def rubro(self, **kw):

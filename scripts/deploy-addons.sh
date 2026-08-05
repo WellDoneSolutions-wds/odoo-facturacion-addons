@@ -42,6 +42,12 @@ fi
 echo "Addons del repo: $MODULOS"
 SQL_IN=$(echo "$MODULOS" | sed "s/,/','/g")
 
+# Marcador del SHA desplegado: viaja DENTRO de la imagen (el COPY de addons/ lo incluye)
+# y al final se verifica que el contenedor que SIRVE lo tenga. Es la prueba de que el
+# código nuevo llegó de verdad al runtime — ver la nota del volumen anónimo más abajo.
+# (Untracked a propósito; .gitignore lo excluye y este script NUNCA usa git clean.)
+echo "$SHA" > addons/.deploy-sha
+
 cd /home/ubuntu
 mkdir -p backups
 
@@ -95,7 +101,15 @@ for ENTRY in "${PENDIENTES[@]}"; do
 done
 
 echo "Levantando stack con el código nuevo (BDs actualizadas:$ACTUALIZADAS)"
-docker compose up -d
+# --renew-anon-volumes es EL fix del deploy fantasma: la imagen base de Odoo declara
+# VOLUME /mnt/extra-addons, y `up` por defecto REUTILIZA el volumen anónimo del
+# contenedor anterior — el código viejo del volumen TAPABA el COPY de la imagen nueva
+# y el deploy terminaba "verde" sirviendo rutas viejas (visto el 2026-08-05: /ne/api
+# nuevos en 404 → CloudFront los convertía en el index del SPA). Con el flag, el
+# contenedor nace con un volumen fresco sembrado desde la imagen recién horneada.
+# --force-recreate: sin él, si la imagen no cambió de tag, up podría no recrear.
+# Solo el servicio odoo: Postgres no se toca (sus datos van en volumen NOMBRADO).
+docker compose up -d --force-recreate --renew-anon-volumes odoo
 
 OK=""
 for _ in $(seq 1 36); do
@@ -107,6 +121,16 @@ if [ -z "$OK" ]; then
   exit 1
 fi
 echo "Odoo responde OK"
+
+# ── Verificación anti-deploy-fantasma: el contenedor que SIRVE debe tener el SHA ────
+# Si el volumen anónimo (u otra regresión) volviera a tapar el código, esto corta el
+# deploy en ROJO en vez de dejarlo verde sirviendo rutas viejas.
+SIRVIENDO=$(docker compose exec -T odoo cat /mnt/extra-addons/.deploy-sha 2>/dev/null || true)
+if [ "$SIRVIENDO" != "$SHA" ]; then
+  echo "ERROR: el contenedor sirve '$SIRVIENDO' pero el deploy es '$SHA' — el código NO llegó al runtime (¿volumen tapando /mnt/extra-addons?)"
+  exit 1
+fi
+echo "Runtime verificado: sirviendo $SHA"
 
 DIST_ID=$(aws ssm get-parameter --name "$DIST_PARAM" \
   --query Parameter.Value --output text --region "$REGION")

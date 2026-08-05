@@ -195,6 +195,14 @@ class AccountMoveLine(models.Model):
         "cac:AdditionalItemProperty cat-55 código 7000 (Gastos Art. 37 Renta) en la línea. "
         "Cada línea de combustible puede tener su propia placa; las demás no la llevan.",
     )
+    l10n_pe_ne_chofer = fields.Char(
+        string="Chofer / conductor (combustible)",
+        copy=False,
+        help="Nombre del chofer del vehículo de ESTA línea (grifo/combustible), acompaña a la "
+        "placa. OJO: SUNAT NO tiene campo electrónico para el chofer (solo la placa, código "
+        "7000) — así que NO va al XML firmado; es un dato de la representación impresa (el "
+        "biller-pdf lo muestra bajo la dirección, como 'Atendido por'). Ver account_move_pdf.",
+    )
     # Lote/serie de una línea de COMPRA. El lote entra con la mercadería, así que se captura
     # en la compra y viaja con la línea hasta que _l10n_pe_ne_mover_stock_compra crea el
     # movimiento. En la VENTA no se pide: Odoo reserva y asigna el lote solo, por su

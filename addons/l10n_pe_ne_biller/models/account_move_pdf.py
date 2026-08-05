@@ -157,6 +157,12 @@ class AccountMove(models.Model):
         # Clave propia: reusar l10n_pe_ne_biller.timeout hacía que subir el
         # timeout de emisión (240s) arrastrara también la espera de un PDF.
         timeout = int(icp.get_param("l10n_pe_ne_biller.pdf_timeout", "60"))
+        # Chofer(es) del/los vehículo(s) de combustible (acompañan a la placa por línea). NO va al
+        # XML SUNAT (no es campo electrónico; solo la placa 7000 lo es) — es un dato de impresión,
+        # como "Atendido por". Se juntan los distintos no vacíos de las líneas (grifo = uno solo).
+        chofer = " / ".join(dict.fromkeys(
+            c for c in ((l.l10n_pe_ne_chofer or "").strip() for l in self.invoice_line_ids) if c
+        ))
         payload = {
             "ruc": self.company_id.vat or "",
             "tipoDoc": tipo,
@@ -172,6 +178,8 @@ class AccountMove(models.Model):
             # Vendedor/cajero que atendió (no va al XML SUNAT): va en ambos formatos como
             # "Atendido por" (el ticket ya lo traía en el bloque POS; ahora también el A4).
             "atendidoPor": self.invoice_user_id.name or "",
+            # Chofer del vehículo (combustible): dato de impresión, NO va al XML SUNAT (ver arriba).
+            "chofer": chofer,
             # Medios de pago del POS (Efectivo/Yape/Plin…): NO van al XML SUNAT. El A4 los
             # muestra junto a la forma de pago (param MEDIOS_PAGO); el ticket ya los trae en
             # el bloque POS (adicionalTxt). "" si no hay medios detallados.

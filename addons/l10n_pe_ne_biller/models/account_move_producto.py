@@ -3,6 +3,8 @@
 Extraído de account_move_biller.py (refactor sin cambio de comportamiento)."""
 import logging
 
+import pytz
+
 from odoo import _, api, fields, models
 from odoo.exceptions import UserError
 from ..tools.caja_arqueo import normalizar_medio
@@ -321,7 +323,7 @@ class AccountMove(models.Model):
         """Movimientos de stock 'done' de un producto con SALDO acumulado corriente. Cantidad-first
         (el PLE 12.1 ya valoriza). Documento y CONCEPTO se derivan del enlace del movimiento.
         Devuelve {"stock": float, "movimientos":
-            [{fecha, documento, concepto, tipo, entrada, salida, saldo}]}. `concepto` ∈
+            [{fecha, hora, documento, concepto, tipo, entrada, salida, saldo}]}. `concepto` ∈
             venta / devolucion / compra / nota_venta / ajuste / reversa (para leerlo de un vistazo)."""
         prod = self.env["product.product"].browse(int(product_id)).exists()
         if not prod:
@@ -335,6 +337,9 @@ class AccountMove(models.Model):
         lineas = self.env["stock.move.line"].search(dom, order="date asc, id asc")
         internas = self.env["stock.location"].search(
             [("usage", "=", "internal"), ("company_id", "in", [self.env.company.id, False])])
+        # Odoo guarda las fechas en UTC; se muestran en hora de Perú (una venta de las 15:49 no
+        # puede aparecer 20:49). America/Lima no tiene horario de verano, así que el offset es fijo.
+        tz = pytz.timezone("America/Lima")
         movimientos, saldo = [], 0.0
         for ml in lineas:
             entra = ml.location_dest_id in internas and ml.location_id not in internas
@@ -363,8 +368,14 @@ class AccountMove(models.Model):
             else:
                 doc = mv.origin
                 concepto = "ajuste"
+            if ml.date:
+                local = pytz.utc.localize(ml.date).astimezone(tz)
+                fecha, hora = local.strftime("%Y-%m-%d"), local.strftime("%H:%M")
+            else:
+                fecha, hora = "", ""
             movimientos.append({
-                "fecha": str(ml.date)[:10] if ml.date else "",
+                "fecha": fecha,
+                "hora": hora,
                 "documento": doc or "—",
                 "concepto": concepto,
                 "tipo": "entrada" if entrada else "salida",

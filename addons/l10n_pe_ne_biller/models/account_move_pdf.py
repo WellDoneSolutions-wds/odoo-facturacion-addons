@@ -176,6 +176,11 @@ class AccountMove(models.Model):
             # muestra junto a la forma de pago (param MEDIOS_PAGO); el ticket ya los trae en
             # el bloque POS (adicionalTxt). "" si no hay medios detallados.
             "mediosPago": self._l10n_pe_ne_medios_pago_texto(),
+            # Datos de pago del emisor (cuentas bancarias / CCI / Yape-Plin): texto libre de la
+            # compañía (el MISMO campo que ya imprime la cotización). NO va al XML SUNAT; el biller
+            # lo imprime en el bloque "DATOS DE PAGO" del pie. "" si no está configurado → el PDF
+            # no dibuja el bloque.
+            "datosPago": self.company_id.l10n_pe_ne_datos_pago or "",
         }
         # Logo del emisor (si lo tiene): va en ambos formatos (A4 y ticket).
         logo = self.company_id.logo

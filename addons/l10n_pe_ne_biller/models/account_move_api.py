@@ -103,6 +103,9 @@ class AccountMove(models.Model):
                 taxes = tax + self._l10n_pe_ne_ensure_icbper_tax()
             isc_rate = float(ln.get("isc") or 0)
             if isc_rate > 0:
+                # Muro por rubro (Capa 1): el ISC solo existe si el rubro lo trae (grifo,
+                # licorería…). Empresa sin rubro configurado pasa siempre.
+                self._l10n_pe_ne_check_modulo("C07", "ISC (selectivo al consumo)")
                 # ISC (ad-valorem): se agrega a la línea; el IGV se recalcula sobre valor + ISC.
                 taxes = taxes + self._l10n_pe_ne_ensure_isc_tax(isc_rate)
             # Notas (07/08): solo resolver el producto, nunca crearlo — sus líneas pueden ser

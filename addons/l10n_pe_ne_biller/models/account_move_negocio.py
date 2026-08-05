@@ -13,7 +13,7 @@ class AccountMove(models.Model):
     @api.model
     def l10n_pe_ne_config(self):
         """Parámetros que React debe leer DESDE Odoo (no hardcodear): tasa IGV y monto ICBPER por unidad."""
-        return {
+        cfg = {
             "igv": 18.0,
             "icbperRate": self._l10n_pe_ne_ensure_icbper_tax().amount,
             "agentePercepcion": bool(self.env.company.l10n_pe_ne_agente_percepcion),
@@ -28,6 +28,15 @@ class AccountMove(models.Model):
             # y ahí bloquear sí es lo honesto.
             "cajaAutoapertura": bool(self.env.company.l10n_pe_ne_caja_autoapertura),
         }
+        # Capa 1 (rubro → módulos): igual que en el perfil, la clave solo viaja con rubro
+        # configurado — Emitir/POS gatean los regímenes con esto (ausente = sin gating).
+        # El admin de plataforma queda fuera (ve/opera todo, doctrina del menú por rol).
+        if not (self.env.user.has_group("base.group_system")
+                or self.env.user.has_group("base.group_erp_manager")):
+            efectivos = self.env.company.l10n_pe_ne_modulos_efectivos()
+            if efectivos is not None:
+                cfg["modulos"] = sorted(efectivos)
+        return cfg
 
     @api.model
     def l10n_pe_ne_paises(self):

@@ -46,3 +46,4 @@ from . import test_producto_categorias
 from . import test_producto_marca
 from . import test_verificar_stock
 from . import test_inicial_credito_impreso
+from . import test_rubros

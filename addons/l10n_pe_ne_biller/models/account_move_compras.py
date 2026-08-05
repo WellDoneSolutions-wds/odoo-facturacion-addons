@@ -448,6 +448,18 @@ class AccountMove(models.Model):
             return {"ok": True, "modo": "anulado"}
 
     def _l10n_pe_ne_quick_flags(self, move, payload):
+        # Muro por rubro (Capa 1): un régimen tributario exige su módulo activo. Se corta
+        # aquí —el único punto donde la emisión lee estos flags— para que ninguna vía
+        # (SPA, curl, API) emita una detracción en una empresa cuyo rubro no la tiene.
+        # Empresa sin rubro configurado (legacy) pasa siempre.
+        if payload.get("detraccion"):
+            self._l10n_pe_ne_check_modulo("C04", "Detracción (SPOT)")
+        if payload.get("percepcion"):
+            self._l10n_pe_ne_check_modulo("C05", "Percepción del IGV")
+        if payload.get("ventaEstado"):
+            self._l10n_pe_ne_check_modulo("R08", "Venta al Estado")
+        if payload.get("proyectoId"):
+            self._l10n_pe_ne_check_modulo("R05", "Valorizaciones de obra")
         d = payload.get("detraccion")
         if d:
             move.l10n_pe_ne_detraccion = True

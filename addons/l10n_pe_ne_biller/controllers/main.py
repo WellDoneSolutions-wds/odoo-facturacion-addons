@@ -592,6 +592,26 @@ class L10nPeNeApi(http.Controller):
             lambda: self._serie(uid).l10n_pe_ne_serie_toggle(rec_id, activa=False)
         )
 
+    # ------------------------------------------------------------ rubro (Capa 1)
+    @http.route("/ne/api/rubro", **_GET)
+    def rubro(self, **kw):
+        """Catálogos + selección de rubro/módulos de la empresa (pantalla Negocio)."""
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        try:
+            return self._json(self._move(uid).l10n_pe_ne_rubro_config())
+        except Exception as e:  # noqa: BLE001
+            return self._fail(e)
+
+    @http.route("/ne/api/rubro", **_POST)
+    def set_rubro(self, **kw):
+        """Guarda rubro(s) y overrides. El muro (dueño/supervisor/admin) vive en el modelo."""
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(lambda: self._move(uid).l10n_pe_ne_set_rubro(self._body()))
+
     # ---------------------------------------------------------- datos negocio
     @http.route("/ne/api/negocio", **_GET)
     def negocio(self, **kw):

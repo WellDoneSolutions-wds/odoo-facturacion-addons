@@ -32,7 +32,7 @@ class ResUsers(models.Model):
         riesgo de divergir). El addon l10n_pe_ne_roles la EXTIENDE con super() para añadir las
         capacidades por rol (puedeCotizar, puedeCobrar, …). La SPA pinta el menú desde esto."""
         self.ensure_one()
-        return {
+        perfil = {
             "user": self.name,
             "login": self.login,
             "companyId": self.company_id.id,
@@ -43,6 +43,15 @@ class ResUsers(models.Model):
             "puedeConfigSeries": self._l10n_pe_ne_puede_config_series(),
             "mustChangePassword": self.l10n_pe_ne_must_change_password,
         }
+        # Capa 1 (rubro → módulos): la clave `modulos` SOLO viaja si la empresa configuró
+        # rubro. Ausente = legacy = la SPA no oculta nada (mismo contrato «ausente ≠
+        # prohibido» de las claves ve* del menú por rol). El admin de plataforma queda
+        # FUERA — ve todo en cualquier empresa (misma doctrina que el menú por rol).
+        if not (perfil["isAdmin"] or self.has_group("base.group_erp_manager")):
+            efectivos = self.company_id.l10n_pe_ne_modulos_efectivos()
+            if efectivos is not None:
+                perfil["modulos"] = sorted(efectivos)
+        return perfil
 
     def _l10n_pe_ne_puede_config_series(self):
         """Quién puede tocar el registro de series y el catálogo de establecimientos. Desde que

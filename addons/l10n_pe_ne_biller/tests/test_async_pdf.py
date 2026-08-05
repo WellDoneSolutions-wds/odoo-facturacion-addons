@@ -31,6 +31,9 @@ class TestAsyncPdf(EnvioSincronoMixin, TransactionCase):
         # descarga lo regenere. La compañía de una BD sembrada SÍ tiene logo → sin fijarlo, estos
         # tests medían el camino contrario al que dicen probar y el PDF nunca se adjuntaba.
         self.env.company.sudo().logo = False
+        # Mismo motivo: el worker tampoco pinta los datos de pago del emisor (no viajan en la cola).
+        # Una compañía sembrada podría tenerlos → los tests de "reusa el PDF del worker" bailarían.
+        self.env.company.sudo().l10n_pe_ne_datos_pago = False
         # La versión del template vive en un config param (default "1", que es la que estos
         # tests esperan). Una BD de dev lo tiene en otra versión: se fija para no heredarla.
         self.env['ir.config_parameter'].sudo().set_param('l10n_pe_ne_biller.pdf_ver', '1')
@@ -142,6 +145,18 @@ class TestAsyncPdf(EnvioSincronoMixin, TransactionCase):
         self.move._l10n_pe_attach_async_pdf(s3c, 'bucket', self.item)
         self.assertFalse(self.move.l10n_pe_biller_pdf,
                          "con dirección del cliente NO reusa el PDF (incompleto) del worker")
+        s3c.get_object.assert_not_called()
+
+    def test_attach_async_pdf_no_reusa_si_hay_datos_pago(self):
+        # El worker tampoco pinta el bloque "DATOS DE PAGO" del emisor (no viaja en la cola). Si la
+        # compañía tiene datos de pago configurados, ese PDF saldría incompleto → NO se adjunta y la
+        # descarga lo regenera por la ruta síncrona (que sí manda datosPago al micro). Sin esto, el
+        # bloque no se veía en los comprobantes del deploy (async) aunque sí en la cotización.
+        s3c = _s3_mock(b'%PDF-1.4 pdf del worker')
+        self.env.company.sudo().l10n_pe_ne_datos_pago = 'BCP Soles 191-1234567-0-01'
+        self.move._l10n_pe_attach_async_pdf(s3c, 'bucket', self.item)
+        self.assertFalse(self.move.l10n_pe_biller_pdf,
+                         "con datos de pago del emisor NO reusa el PDF (incompleto) del worker")
         s3c.get_object.assert_not_called()
 
     def test_attach_async_pdf_noop_sin_key_o_con_pdf(self):

@@ -201,7 +201,7 @@
                         <div t-if="o.company_id.l10n_pe_ne_datos_pago"
                              style="margin-top:14px; border:1px solid #e2e8f0; border-left:3px solid #334155; border-radius:8px; padding:10px 15px;">
                             <div style="font-size:10px; text-transform:uppercase; letter-spacing:.08em; color:#334155; font-weight:600; margin-bottom:4px;">Datos de pago</div>
-                            <div style="font-size:11px; color:#374151; white-space:pre-line;" t-esc="o.company_id.l10n_pe_ne_datos_pago"/>
+                            <div style="font-size:11px; color:#374151; white-space:pre-line;" t-out="o.company_id._l10n_pe_ne_datos_pago_marcado()"/>
                         </div>
 
                         <!-- Pie -->

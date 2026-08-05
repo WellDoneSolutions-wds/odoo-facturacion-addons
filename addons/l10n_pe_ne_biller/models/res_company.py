@@ -1,6 +1,8 @@
 import logging
+import re
 
 import requests
+from markupsafe import Markup, escape
 
 from odoo import _, api, fields, models
 from odoo.exceptions import AccessError, UserError
@@ -193,6 +195,29 @@ class ResCompany(models.Model):
         help="Cuentas bancarias / CCI del emisor para que el cliente pague. Texto libre "
              "(una cuenta por línea, p.ej. 'BCP Soles 191-1234567-0-01 · CCI 00219100...'). "
              "Se imprime en la cotización.")
+
+    def _l10n_pe_ne_datos_pago_marcado(self):
+        """Datos de pago con el NOMBRE DEL BANCO en negrita, para distinguirlo de los números. En
+        cada línea resalta el texto hasta el primer dígito (p.ej. 'BCP Soles' antes de '191-...';
+        'Yape / Plin:' antes de '987...'). Devuelve un Markup que sirve para AMBOS motores con el
+        MISMO formato: QWeb (cotización, HTML vía t-out) y el styled text de Jasper (comprobantes,
+        vía el param datosPago). El contenido del usuario se escapa (<, >, &) y solo se agrega la
+        etiqueta <b>, así que es seguro renderizarlo en crudo. Vacío -> Markup('')."""
+        self.ensure_one()
+        texto = self.l10n_pe_ne_datos_pago or ""
+        if not texto.strip():
+            return Markup("")
+        lineas = []
+        for linea in texto.split("\n"):
+            m = re.search(r"\d", linea)
+            if m and m.start() > 0:
+                etiqueta = linea[:m.start()].rstrip()  # 'BCP Soles' (sin el espacio final)
+                resto = linea[len(etiqueta):]           # ' 191-... · CCI ...' (con el espacio)
+                lineas.append(Markup("<b>%s</b>%s") % (etiqueta, resto))
+            else:
+                # Línea sin dígitos (o que empieza con dígito): sin negrita, solo escapada.
+                lineas.append(escape(linea))
+        return Markup("\n").join(lineas)
     l10n_pe_ne_api_key = fields.Char(
         string='API key del facturador', groups='base.group_system', copy=False,
         help="API key de autenticación de este emisor ante el microservicio (header X-Api-Key). "

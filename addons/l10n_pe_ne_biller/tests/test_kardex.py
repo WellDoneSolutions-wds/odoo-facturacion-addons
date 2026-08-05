@@ -19,6 +19,9 @@ class TestKardex(L10nPeSeedMixin, TransactionCase):
         m0, m1 = k["movimientos"]
         self.assertEqual((m0["entrada"], m0["salida"], m0["saldo"]), (100.0, 0.0, 100.0))
         self.assertEqual((m1["entrada"], m1["salida"], m1["saldo"]), (0.0, 3.0, 97.0))
+        # Concepto: los ajustes de inventario se etiquetan 'ajuste' (no tienen comprobante enlazado).
+        self.assertEqual(m0["concepto"], "ajuste")
+        self.assertEqual(m1["concepto"], "ajuste")
 
     def test_kardex_atribuye_documento_nota(self):
         NV = self.env["l10n_pe_ne.nota_venta"]
@@ -31,6 +34,7 @@ class TestKardex(L10nPeSeedMixin, TransactionCase):
         k = self.env["account.move"]._l10n_pe_ne_kardex(p.id)
         salida = [m for m in k["movimientos"] if m["salida"] > 0][-1]
         self.assertEqual(salida["salida"], 2.0)
-        # el documento del movimiento es el número de la nota
+        # el documento del movimiento es el número de la nota, y el concepto la clasifica
         nv = NV.browse(res["id"])
         self.assertEqual(salida["documento"], nv.name)
+        self.assertEqual(salida["concepto"], "nota_venta")

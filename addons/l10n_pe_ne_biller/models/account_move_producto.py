@@ -3,6 +3,8 @@
 Extraído de account_move_biller.py (refactor sin cambio de comportamiento)."""
 import logging
 
+import pytz
+
 from odoo import _, api, fields, models
 from odoo.exceptions import UserError
 from ..tools.caja_arqueo import normalizar_medio
@@ -319,8 +321,10 @@ class AccountMove(models.Model):
     @api.model
     def _l10n_pe_ne_kardex(self, product_id, desde=None, hasta=None):
         """Movimientos de stock 'done' de un producto con SALDO acumulado corriente. Cantidad-first
-        (el PLE 12.1 ya valoriza). El documento se deriva del enlace: comprobante / nota / ajuste.
-        Devuelve {"stock": float, "movimientos": [{fecha, documento, tipo, entrada, salida, saldo}]}."""
+        (el PLE 12.1 ya valoriza). Documento y CONCEPTO se derivan del enlace del movimiento.
+        Devuelve {"stock": float, "movimientos":
+            [{fecha, hora, documento, concepto, tipo, entrada, salida, saldo}]}. `concepto` ∈
+            venta / devolucion / compra / nota_venta / ajuste / reversa (para leerlo de un vistazo)."""
         prod = self.env["product.product"].browse(int(product_id)).exists()
         if not prod:
             return {"stock": 0.0, "movimientos": []}
@@ -333,6 +337,9 @@ class AccountMove(models.Model):
         lineas = self.env["stock.move.line"].search(dom, order="date asc, id asc")
         internas = self.env["stock.location"].search(
             [("usage", "=", "internal"), ("company_id", "in", [self.env.company.id, False])])
+        # Odoo guarda las fechas en UTC; se muestran en hora de Perú (una venta de las 15:49 no
+        # puede aparecer 20:49). America/Lima no tiene horario de verano, así que el offset es fijo.
+        tz = pytz.timezone("America/Lima")
         movimientos, saldo = [], 0.0
         for ml in lineas:
             entra = ml.location_dest_id in internas and ml.location_id not in internas
@@ -344,15 +351,33 @@ class AccountMove(models.Model):
             salida = qty if sale else 0.0
             saldo += entrada - salida
             mv = ml.move_id
-            if mv.l10n_pe_ne_move_id:
-                doc = mv.l10n_pe_ne_move_id.name
+            # Concepto del movimiento: para entender el PORQUÉ de cada línea sin adivinar por el
+            # documento. La reversa (anulación por rechazo SUNAT) se detecta primero porque también
+            # tiene comprobante enlazado.
+            if mv.l10n_pe_ne_reversa:
+                doc = (mv.l10n_pe_ne_move_id.name if mv.l10n_pe_ne_move_id else mv.origin) or "—"
+                concepto = "reversa"
+            elif mv.l10n_pe_ne_move_id:
+                comp = mv.l10n_pe_ne_move_id
+                doc = comp.name
+                concepto = ("devolucion" if comp.move_type == "out_refund"
+                            else "compra" if comp.move_type == "in_invoice" else "venta")
             elif mv.l10n_pe_ne_nota_venta_id:
                 doc = mv.l10n_pe_ne_nota_venta_id.name
+                concepto = "nota_venta" if salida else "devolucion"
             else:
                 doc = mv.origin
+                concepto = "ajuste"
+            if ml.date:
+                local = pytz.utc.localize(ml.date).astimezone(tz)
+                fecha, hora = local.strftime("%Y-%m-%d"), local.strftime("%H:%M")
+            else:
+                fecha, hora = "", ""
             movimientos.append({
-                "fecha": str(ml.date)[:10] if ml.date else "",
+                "fecha": fecha,
+                "hora": hora,
                 "documento": doc or "—",
+                "concepto": concepto,
                 "tipo": "entrada" if entrada else "salida",
                 "entrada": round(entrada, 3), "salida": round(salida, 3),
                 "saldo": round(saldo, 3),

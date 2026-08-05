@@ -422,14 +422,60 @@ class AccountMove(models.Model):
             })
         # Capa 1.5: al (re)elegir rubro se siembran los CATÁLOGOS (unidades/medios/afectaciones/
         # monedas) si el negocio aún no los configuró — nace configurado, el dueño solo ajusta.
-        if rubros and company._l10n_pe_ne_sembrar_catalogos():
+        conservados = None
+        if rubros and payload.get("aplicarCatalogos"):
+            # Cambio de TIPO DE NEGOCIO explícito: re-siembra los catálogos a la sugerencia del
+            # nuevo rubro, FUSIONANDO lo intocable (personalizados, en-uso, defaults vigentes).
+            conservados = company._l10n_pe_ne_resembrar_catalogos(rubros)
+        elif rubros and company._l10n_pe_ne_sembrar_catalogos():
             self.env["l10n_pe_ne.rubro_auditoria"].sudo().create({
                 "company_id": company.id, "user_id": self.env.user.id,
                 "campo": "catalogos(siembra)", "antes": "",
                 "despues": ",".join(rubros)})
         out = self.l10n_pe_ne_rubro_config()
         out["protegidos"] = protegidos   # la SPA avisa qué se mantuvo activo por estar en uso
+        if conservados is not None:
+            out["catalogosConservados"] = conservados
         return out
+
+    @api.model
+    def l10n_pe_ne_rubro_preview(self, payload):
+        """P3 · Preview del cambio de tipo de negocio (SIN escribir nada): qué módulos entran
+        y salen, qué queda protegido por estar en uso, y cómo quedarían los catálogos.
+        La SPA lo muestra ANTES del «Aplicar» — el select cambia todo, pero con los ojos
+        abiertos."""
+        payload = payload or {}
+        rubros = [r for r in (payload.get("rubros") or []) if r in RUBROS]
+        if not rubros:
+            raise UserError(_("Elige al menos un tipo de negocio para previsualizar."))
+        company = self.env.company
+
+        actuales = company.l10n_pe_ne_modulos_efectivos()   # None = legacy (ve todo)
+        nuevos = set(NUCLEO)
+        for r in rubros:
+            nuevos.update(RUBROS[r][2])
+        nuevos &= _DISPONIBLES
+        en_uso = company.l10n_pe_ne_modulos_en_uso() & _DISPONIBLES
+        protegidos = sorted(en_uso - nuevos)
+        efectivos_nuevos = nuevos | set(protegidos)
+
+        def _nombres(cods):
+            return [{"codigo": c, "nombre": MODULOS[c][0]} for c in sorted(cods)]
+
+        base_actual = actuales if actuales is not None else set(MODULOS) & _DISPONIBLES
+        cfg_nueva, conservados = company._l10n_pe_ne_calc_resiembra(rubros)
+        return {
+            "rubros": rubros,
+            "legacyAntes": actuales is None,   # antes veía TODO (sin rubro configurado)
+            "modulos": {
+                "entran": _nombres(efectivos_nuevos - base_actual),
+                "salen": _nombres(base_actual - efectivos_nuevos),
+                "protegidos": _nombres(protegidos),
+                "total": len(efectivos_nuevos),
+            },
+            "catalogos": cfg_nueva,
+            "catalogosConservados": conservados,
+        }
 
     # ------------------------------------------------------- muro de emisión
     def _l10n_pe_ne_check_modulo(self, cod, etiqueta):

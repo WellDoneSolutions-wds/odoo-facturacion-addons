@@ -122,6 +122,106 @@ class ResCompany(models.Model):
             _sembrado_para(rubros), ensure_ascii=False)
         return True
 
+    def _l10n_pe_ne_catalogos_en_uso(self):
+        """Qué elementos de los catálogos tienen USO REAL en la empresa — lo que un cambio de
+        tipo de negocio no puede borrar: las unidades de los productos del catálogo, los
+        medios con historia en caja, las afectaciones de los productos y el USD si ya se
+        emitió en dólares. Sondeos baratos (distinct/limit 1)."""
+        self.ensure_one()
+        # Unidades: las declaradas en los productos de la empresa (campo Char directo).
+        unidades = set()
+        for g in self.env["product.template"].sudo().read_group(
+                [("company_id", "in", (self.id, False)), ("l10n_pe_ne_unit_code", "!=", False)],
+                ["l10n_pe_ne_unit_code"], ["l10n_pe_ne_unit_code"], lazy=False):
+            cod = g.get("l10n_pe_ne_unit_code")
+            if cod in UNIDADES_CAT03:
+                unidades.add(cod)
+        # Medios: los que alguna vez entraron a una caja de la empresa.
+        medios = set()
+        for g in self.env["l10n_pe_ne.caja.movimiento"].sudo().read_group(
+                [("sesion_id.company_id", "=", self.id), ("medio", "!=", False)],
+                ["medio"], ["medio"], lazy=False):
+            if g.get("medio"):
+                medios.add(g["medio"])
+        # Afectaciones: los códigos de impuesto de los productos del catálogo.
+        afectaciones = set()
+        for g in self.env["account.tax"].sudo().read_group(
+                [("company_id", "=", self.id), ("type_tax_use", "=", "sale"),
+                 ("l10n_pe_edi_tax_code", "!=", False)],
+                ["l10n_pe_edi_tax_code"], ["l10n_pe_edi_tax_code"], lazy=False):
+            cod = g.get("l10n_pe_edi_tax_code")
+            if cod in AFECTACIONES:
+                afectaciones.add(cod)
+        usd = bool(self.env["account.move"].sudo().search(
+            [("company_id", "=", self.id), ("currency_id", "!=", self.currency_id.id)], limit=1))
+        return {"unidades": unidades, "medios": medios, "afectaciones": afectaciones, "usd": usd}
+
+    def _l10n_pe_ne_calc_resiembra(self, rubros):
+        """Calcula (SIN escribir) la config de catálogos que resultaría de cambiar el tipo de
+        negocio a `rubros`: la sugerencia del rubro FUSIONADA con lo intocable de la empresa
+        — personalizados de medios, elementos en uso y defaults vigentes que sigan activos.
+        Devuelve (cfg_nueva, conservados) para que el preview muestre qué se respeta."""
+        self.ensure_one()
+        nueva = _sembrado_para(rubros)
+        actual = self._l10n_pe_ne_cfg() or {}
+        en_uso = self._l10n_pe_ne_catalogos_en_uso()
+        conservados = {"unidades": [], "medios": [], "afectaciones": [], "monedas": []}
+
+        # Unidades: sugerencia ∪ en-uso. El default vigente se respeta si sigue activo.
+        u_act = set(nueva["unidades"]["activas"])
+        for cod in sorted(en_uso["unidades"] - u_act):
+            u_act.add(cod)
+            conservados["unidades"].append(cod)
+        u_def = (actual.get("unidades") or {}).get("default") or nueva["unidades"]["default"]
+        nueva["unidades"] = {"activas": sorted(u_act),
+                            "default": u_def if u_def in u_act else "NIU"}
+
+        # Medios: base del rubro + (en orden actual) los personalizados y los con historia.
+        lista = list(nueva["medios"]["lista"])
+        actuales = (actual.get("medios") or {}).get("lista") or []
+        for m in actuales:
+            es_personalizado = m not in MEDIOS_SEMILLA
+            if (es_personalizado or m in en_uso["medios"]) and m not in lista:
+                lista.append(m)
+                conservados["medios"].append(m)
+        m_def = (actual.get("medios") or {}).get("default") or nueva["medios"]["default"]
+        nueva["medios"] = {"lista": lista, "default": m_def if m_def in lista else lista[0]}
+
+        # Afectaciones: sugerencia ∪ en-uso; gratuitas de la sugerencia ∪ las ya activas.
+        a_act = set(nueva["afectaciones"]["activas"])
+        for cod in sorted(en_uso["afectaciones"] - a_act):
+            a_act.add(cod)
+            conservados["afectaciones"].append(cod)
+        g_act = set(nueva["afectaciones"]["gratuitas"]) | set(
+            (actual.get("afectaciones") or {}).get("gratuitas") or [])
+        a_def = (actual.get("afectaciones") or {}).get("default") or nueva["afectaciones"]["default"]
+        nueva["afectaciones"] = {"activas": sorted(a_act), "gratuitas": sorted(g_act),
+                                 "default": a_def if a_def in a_act else "1000"}
+
+        # Monedas: sugerencia ∪ USD si ya hay comprobantes en dólares (no se le quita a nadie).
+        mo = set(nueva["monedas"]["activas"])
+        if en_uso["usd"] and "USD" not in mo:
+            mo.add("USD")
+            conservados["monedas"].append("USD")
+        nueva["monedas"] = {"activas": sorted(mo)}
+        return nueva, conservados
+
+    def _l10n_pe_ne_resembrar_catalogos(self, rubros):
+        """Aplica la re-siembra calculada (cambio de tipo de negocio): escribe y audita."""
+        self.ensure_one()
+        nueva, conservados = self._l10n_pe_ne_calc_resiembra(rubros)
+        antes = self._l10n_pe_ne_cfg() or {}
+        if antes != nueva:
+            self.sudo().l10n_pe_ne_cfg_catalogos = json.dumps(nueva, ensure_ascii=False)
+            self.env["l10n_pe_ne.rubro_auditoria"].sudo().create({
+                "company_id": self.id,
+                "user_id": self.env.user.id,
+                "campo": "catalogos(resembrado)",
+                "antes": json.dumps(antes, ensure_ascii=False),
+                "despues": json.dumps(nueva, ensure_ascii=False),
+            })
+        return conservados
+
 
 class AccountMove(models.Model):
     _inherit = "account.move"

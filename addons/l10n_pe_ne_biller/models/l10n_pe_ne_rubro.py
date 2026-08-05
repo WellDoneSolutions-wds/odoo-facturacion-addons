@@ -420,6 +420,13 @@ class AccountMove(models.Model):
                 "antes": json.dumps(antes, ensure_ascii=False),
                 "despues": json.dumps(despues, ensure_ascii=False),
             })
+        # Capa 1.5: al (re)elegir rubro se siembran los CATÁLOGOS (unidades/medios/afectaciones/
+        # monedas) si el negocio aún no los configuró — nace configurado, el dueño solo ajusta.
+        if rubros and company._l10n_pe_ne_sembrar_catalogos():
+            self.env["l10n_pe_ne.rubro_auditoria"].sudo().create({
+                "company_id": company.id, "user_id": self.env.user.id,
+                "campo": "catalogos(siembra)", "antes": "",
+                "despues": ",".join(rubros)})
         out = self.l10n_pe_ne_rubro_config()
         out["protegidos"] = protegidos   # la SPA avisa qué se mantuvo activo por estar en uso
         return out

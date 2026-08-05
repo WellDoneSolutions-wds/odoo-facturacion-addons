@@ -52,6 +52,9 @@ _VIS_MENU = {
     "veCitas": ("puedeCotizar", "puedeCobrar", "puedeSupervisar"),
     # V09 (apartados/layaway): el cajero recibe los abonos; el supervisor supervisa.
     "veApartados": ("puedeCobrar", "puedeSupervisar"),
+    # Capa 1.5 (catálogos: impuestos/unidades/medios/monedas): configuración del negocio —
+    # solo quien supervisa; el resto CONSUME los catálogos en sus selects sin verlos aquí.
+    "veConfiguracion": ("puedeSupervisar",),
     "veOrdenes": ("puedeCotizar", "puedeCobrar", "puedeTaller",
                   "puedeDespachar", "puedeSupervisar"),
     "veGuias": ("puedeDespachar", "puedeSupervisar"),

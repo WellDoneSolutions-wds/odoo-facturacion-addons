@@ -366,6 +366,11 @@ class ResCompany(models.Model):
             if malos:
                 raise UserError(_("Rubro desconocido: %s") % ", ".join(malos))
             cvals['l10n_pe_ne_rubros'] = _json.dumps(list(vals['rubros']), ensure_ascii=False)
+            # Capa 1.5: el tenant nace con sus CATÁLOGOS sembrados por el rubro (unidades,
+            # medios, afectaciones, monedas) — listo para el backoffice de alta.
+            from .l10n_pe_ne_config_catalogos import _sembrado_para
+            cvals['l10n_pe_ne_cfg_catalogos'] = _json.dumps(
+                _sembrado_para(list(vals['rubros'])), ensure_ascii=False)
         created_company = not company
         if company:
             company.write(cvals)

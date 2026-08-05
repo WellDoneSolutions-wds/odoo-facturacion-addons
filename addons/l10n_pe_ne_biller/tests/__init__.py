@@ -51,3 +51,4 @@ from . import test_recurrencia
 from . import test_cita
 from . import test_variantes
 from . import test_apartado
+from . import test_config_catalogos

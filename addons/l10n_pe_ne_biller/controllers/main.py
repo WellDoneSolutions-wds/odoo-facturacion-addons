@@ -700,6 +700,25 @@ class L10nPeNeApi(http.Controller):
             return self._unauth()
         return self._run(lambda: self._apartado(uid).l10n_pe_ne_cancelar(ap_id))
 
+    # ---------------------------------------- catálogos del negocio (Capa 1.5)
+    @http.route("/ne/api/catalogos", **_GET)
+    def catalogos(self, **kw):
+        """Maestros + selección de catálogos (impuestos/unidades/medios/monedas)."""
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        try:
+            return self._json(self._move(uid).l10n_pe_ne_cfg_catalogos_get())
+        except Exception as e:  # noqa: BLE001
+            return self._fail(e)
+
+    @http.route("/ne/api/catalogos", **_POST)
+    def set_catalogos(self, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(lambda: self._move(uid).l10n_pe_ne_cfg_catalogos_set(self._body()))
+
     # ------------------------------------------------------------ rubro (Capa 1)
     @http.route("/ne/api/rubro", **_GET)
     def rubro(self, **kw):

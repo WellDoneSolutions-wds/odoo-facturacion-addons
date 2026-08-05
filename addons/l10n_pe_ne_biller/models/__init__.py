@@ -35,6 +35,7 @@ from . import l10n_pe_ne_recurrencia
 from . import l10n_pe_ne_cita
 from . import l10n_pe_ne_variantes
 from . import l10n_pe_ne_apartado
+from . import l10n_pe_ne_config_catalogos
 
 from . import res_partner
 

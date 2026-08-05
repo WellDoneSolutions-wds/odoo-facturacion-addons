@@ -36,6 +36,12 @@ class AccountMove(models.Model):
             efectivos = self.env.company.l10n_pe_ne_modulos_efectivos()
             if efectivos is not None:
                 cfg["modulos"] = sorted(efectivos)
+        # Capa 1.5 (catálogos): unidades/medios/afectaciones/monedas del NEGOCIO. A diferencia
+        # de los módulos, esto NO es un permiso sino la configuración operativa — aplica a todos
+        # los usuarios (admin incluido: cobrar con los medios del negocio no es un bypass).
+        catalogos = self.env.company._l10n_pe_ne_cfg()
+        if catalogos:
+            cfg["catalogos"] = catalogos
         return cfg
 
     @api.model

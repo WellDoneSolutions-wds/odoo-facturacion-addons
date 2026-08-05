@@ -427,6 +427,20 @@ class AccountMove(models.Model):
             # Cambio de TIPO DE NEGOCIO explícito: re-siembra los catálogos a la sugerencia del
             # nuevo rubro, FUSIONANDO lo intocable (personalizados, en-uso, defaults vigentes).
             conservados = company._l10n_pe_ne_resembrar_catalogos(rubros)
+        elif not rubros and payload.get("aplicarCatalogos"):
+            # «Todos — sin restricción»: el camino de vuelta. Módulos quedan legacy (rubros
+            # vacíos = sin gating) y los catálogos pasan a TODO el maestro, preservando los
+            # medios personalizados del negocio.
+            antes_cfg = company._l10n_pe_ne_cfg() or {}
+            todo = company._l10n_pe_ne_catalogos_todos()
+            if antes_cfg != todo:
+                company.sudo().l10n_pe_ne_cfg_catalogos = json.dumps(todo, ensure_ascii=False)
+                self.env["l10n_pe_ne.rubro_auditoria"].sudo().create({
+                    "company_id": company.id, "user_id": self.env.user.id,
+                    "campo": "catalogos(todos)",
+                    "antes": json.dumps(antes_cfg, ensure_ascii=False),
+                    "despues": json.dumps(todo, ensure_ascii=False)})
+            conservados = {"unidades": [], "medios": [], "afectaciones": [], "monedas": []}
         elif rubros and company._l10n_pe_ne_sembrar_catalogos():
             self.env["l10n_pe_ne.rubro_auditoria"].sudo().create({
                 "company_id": company.id, "user_id": self.env.user.id,
@@ -446,9 +460,26 @@ class AccountMove(models.Model):
         abiertos."""
         payload = payload or {}
         rubros = [r for r in (payload.get("rubros") or []) if r in RUBROS]
-        if not rubros:
-            raise UserError(_("Elige al menos un tipo de negocio para previsualizar."))
         company = self.env.company
+
+        # «Todos — sin restricción»: preview del camino de vuelta (rubros vacíos).
+        if not rubros:
+            actuales = company.l10n_pe_ne_modulos_efectivos()
+            base_actual = actuales if actuales is not None else set(MODULOS) & _DISPONIBLES
+            todos = set(MODULOS) & _DISPONIBLES
+            return {
+                "rubros": [],
+                "todos": True,
+                "legacyAntes": actuales is None,
+                "modulos": {
+                    "entran": [{"codigo": c, "nombre": MODULOS[c][0]} for c in sorted(todos - base_actual)],
+                    "salen": [],
+                    "protegidos": [],
+                    "total": len(todos),
+                },
+                "catalogos": company._l10n_pe_ne_catalogos_todos(),
+                "catalogosConservados": {"unidades": [], "medios": [], "afectaciones": [], "monedas": []},
+            }
 
         actuales = company.l10n_pe_ne_modulos_efectivos()   # None = legacy (ve todo)
         nuevos = set(NUCLEO)

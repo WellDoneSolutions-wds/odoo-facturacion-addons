@@ -206,6 +206,29 @@ class ResCompany(models.Model):
         nueva["monedas"] = {"activas": sorted(mo)}
         return nueva, conservados
 
+    def _l10n_pe_ne_catalogos_todos(self):
+        """Config «Todos — sin restricción»: TODO el maestro activo (unidades, afectaciones,
+        gratuitas, ambas monedas), PRESERVANDO los medios actuales del negocio (personalizados
+        y su orden) y completando con la semilla. Es el camino de vuelta desde un rubro al
+        estado «veo todo» — sin perder lo que el dueño agregó a mano."""
+        self.ensure_one()
+        actual = self._l10n_pe_ne_cfg() or {}
+        medios_actuales = (actual.get("medios") or {}).get("lista") or []
+        lista = list(medios_actuales)
+        for m in MEDIOS_SEMILLA:
+            if m not in lista:
+                lista.append(m)
+        m_def = (actual.get("medios") or {}).get("default") or "Efectivo"
+        u_def = (actual.get("unidades") or {}).get("default") or "NIU"
+        a_def = (actual.get("afectaciones") or {}).get("default") or "1000"
+        return {
+            "unidades": {"activas": sorted(UNIDADES_CAT03), "default": u_def},
+            "medios": {"lista": lista, "default": m_def if m_def in lista else lista[0]},
+            "afectaciones": {"activas": sorted(AFECTACIONES), "gratuitas": sorted(GRATUITAS),
+                             "default": a_def},
+            "monedas": {"activas": sorted(MONEDAS)},
+        }
+
     def _l10n_pe_ne_resembrar_catalogos(self, rubros):
         """Aplica la re-siembra calculada (cambio de tipo de negocio): escribe y audita."""
         self.ensure_one()

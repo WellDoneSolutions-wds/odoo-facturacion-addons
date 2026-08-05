@@ -166,3 +166,21 @@ class TestTipoDeNegocio(L10nPeSeedMixin, TransactionCase):
         self.AM.l10n_pe_ne_set_rubro({"rubros": ["restaurante"], "overrides": {}})   # sin flag
         cfg = self.env.company._l10n_pe_ne_cfg()
         self.assertNotIn("GRM", cfg["unidades"]["activas"])   # la config propia quedó intacta
+
+    def test_opcion_todos_vuelve_a_ver_todo_preservando_personalizados(self):
+        # De Restaurante con medio personalizado → «Todos»: módulos legacy (ve todo),
+        # catálogos completos y «Agora» sigue en la lista.
+        self.AM.l10n_pe_ne_set_rubro({"rubros": ["restaurante"], "overrides": {}, "aplicarCatalogos": True})
+        cfgR = self.env.company._l10n_pe_ne_cfg()
+        self.AM.l10n_pe_ne_cfg_catalogos_set({**cfgR, "medios": {"lista": cfgR["medios"]["lista"] + ["Agora"], "default": "Efectivo"}})
+        p = self.AM.l10n_pe_ne_rubro_preview({"rubros": []})
+        self.assertTrue(p["todos"])
+        self.assertGreater(len(p["modulos"]["entran"]), 0)   # recupera lo oculto
+        estado = self.AM.l10n_pe_ne_set_rubro({"rubros": [], "overrides": {}, "aplicarCatalogos": True})
+        self.assertIsNone(estado["modulos"])                 # legacy: sin gating de módulos
+        cfg = self.env.company._l10n_pe_ne_cfg()
+        self.assertEqual(len(cfg["unidades"]["activas"]), 22)   # maestro completo
+        self.assertIn("Agora", cfg["medios"]["lista"])           # personalizado preservado
+        self.assertIn("USD", cfg["monedas"]["activas"])
+        self.assertTrue(self.env["l10n_pe_ne.rubro_auditoria"].search(
+            [("company_id", "=", self.env.company.id), ("campo", "=", "catalogos(todos)")]))

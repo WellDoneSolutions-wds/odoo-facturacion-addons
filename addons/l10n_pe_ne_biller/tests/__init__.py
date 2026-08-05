@@ -49,3 +49,4 @@ from . import test_inicial_credito_impreso
 from . import test_rubros
 from . import test_recurrencia
 from . import test_cita
+from . import test_variantes

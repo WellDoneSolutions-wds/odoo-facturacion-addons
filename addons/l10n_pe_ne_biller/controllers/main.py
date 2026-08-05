@@ -1271,6 +1271,14 @@ class L10nPeNeApi(http.Controller):
             lambda: self._move(uid).l10n_pe_ne_create_producto(self._body())
         )
 
+    @http.route("/ne/api/productos/variantes", **_POST)
+    def generar_variantes(self, **kw):
+        """R11: genera productos hijos por combinación de atributos (talla/color)."""
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(lambda: self._move(uid).l10n_pe_ne_generar_variantes(self._body()))
+
     @http.route("/ne/api/productos/categorias", **_POST)
     def create_categoria(self, **kw):
         """Crea un departamento/subcategoría bajo 'Supermercado' (creable al vuelo desde el form).

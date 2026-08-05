@@ -98,7 +98,7 @@ MODULOS = {
     "R07": ("Exportación (DUA/DAM)", "R", True),
     "R08": ("Contratación estatal", "R", True),
     "R09": ("Cálculo por volumen/área (m³/m²)", "R", True),
-    "R10": ("Agenda de citas / turnos", "R", False),
+    "R10": ("Agenda de citas / turnos", "R", True),
     "R11": ("Variantes de producto (talla/color)", "R", False),
 }
 

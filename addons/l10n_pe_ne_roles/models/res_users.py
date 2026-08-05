@@ -47,6 +47,9 @@ _VIS_MENU = {
     # V11 (membresías/recurrentes): el cajero las cobra/da de alta en mostrador; el
     # supervisor las configura. El módulo del rubro gatea el ítem del lado de la SPA.
     "veRecurrentes": ("puedeCobrar", "puedeSupervisar"),
+    # R10 (citas/turnos): la agenda es de mostrador — vendedor agenda, cajero cobra al
+    # llegar el cliente, supervisor supervisa. Gateado además por el módulo del rubro.
+    "veCitas": ("puedeCotizar", "puedeCobrar", "puedeSupervisar"),
     "veOrdenes": ("puedeCotizar", "puedeCobrar", "puedeTaller",
                   "puedeDespachar", "puedeSupervisar"),
     "veGuias": ("puedeDespachar", "puedeSupervisar"),

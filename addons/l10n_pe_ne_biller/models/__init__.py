@@ -32,6 +32,7 @@ from . import l10n_pe_ne_establecimiento
 from . import l10n_pe_ne_serie
 from . import l10n_pe_ne_rubro
 from . import l10n_pe_ne_recurrencia
+from . import l10n_pe_ne_cita
 
 from . import res_partner
 

@@ -628,6 +628,35 @@ class L10nPeNeApi(http.Controller):
             return self._unauth()
         return self._run(lambda: self._recurrencia(uid).l10n_pe_ne_emitir_ahora(rec_id))
 
+    # -------------------------------------------------- R10 · citas / turnos
+    def _cita(self, uid):
+        u = self._user(uid)
+        return request.env["l10n_pe_ne.cita"].with_user(uid).with_company(u.company_id)
+
+    @http.route("/ne/api/citas", **_GET)
+    def citas(self, fecha=None, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        try:
+            return self._json(self._cita(uid).l10n_pe_ne_list(fecha))
+        except Exception as e:  # noqa: BLE001
+            return self._fail(e)
+
+    @http.route("/ne/api/citas", **_POST)
+    def save_cita(self, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(lambda: self._cita(uid).l10n_pe_ne_save(self._body()))
+
+    @http.route("/ne/api/citas/<int:cita_id>", **_DEL)
+    def delete_cita(self, cita_id, **kw):
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(lambda: self._cita(uid).l10n_pe_ne_delete(cita_id))
+
     # ------------------------------------------------------------ rubro (Capa 1)
     @http.route("/ne/api/rubro", **_GET)
     def rubro(self, **kw):

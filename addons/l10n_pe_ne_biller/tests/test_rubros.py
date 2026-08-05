@@ -63,14 +63,23 @@ class TestRubros(L10nPeSeedMixin, TransactionCase):
         self.assertEqual(efectivos, set(NUCLEO))
 
     def test_no_disponibles_se_filtran(self):
-        # educación trae R10 (citas) en defaults pero aún no está construido; V11
-        # (recurrente) y E11 (resumen diario) SÍ lo están (fase 2) y pasan el filtro.
-        self._set(["educacion"])
+        # El mecanismo de filtrado, independiente de qué quede por construir: se fuerza un
+        # módulo de educación como NO disponible y la resolución debe excluirlo (aunque el
+        # rubro lo traiga por defecto y un override intente encenderlo).
+        from unittest.mock import patch
+        from ..models import l10n_pe_ne_rubro as R
+        self._set(["educacion"], {"R10": True})
+        with patch.dict(R.MODULOS, {"R10": ("Agenda de citas / turnos", "R", False)}), \
+                patch.object(R, "_DISPONIBLES",
+                             frozenset(c for c, (_n, _c, d) in R.MODULOS.items() if d)):
+            efectivos = self.env.company.l10n_pe_ne_modulos_efectivos()
+            self.assertNotIn("R10", efectivos)
+        # Sin el parche, R10 (ya construido en fase 2) pasa el filtro normalmente.
         efectivos = self.env.company.l10n_pe_ne_modulos_efectivos()
-        self.assertNotIn("R10", efectivos)
+        self.assertIn("R10", efectivos)
         self.assertIn("V11", efectivos)
         self.assertIn("E11", efectivos)
-        self.assertIn("V06", efectivos)   # el ajuste experto sí está disponible
+        self.assertIn("V06", efectivos)   # el ajuste experto también disponible
 
     def test_arrocera_trae_ivap(self):
         # fase 2: C12 (IVAP) disponible — la arrocera lo recibe por defecto.

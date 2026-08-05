@@ -356,6 +356,16 @@ class ResCompany(models.Model):
             cvals['l10n_pe_ne_api_key'] = vals['apiKey']
         if vals.get('cuentaDetraccion'):
             cvals['l10n_pe_ne_cuenta_detraccion'] = vals['cuentaDetraccion']
+        # Capa 1 (rubro): el alta puede traer el/los rubro(s) del negocio para que el tenant
+        # nazca con sus módulos ya resueltos (spec §10 — flujo de onboarding). Import tardío:
+        # res_company se importa antes que l10n_pe_ne_rubro en __init__.
+        if vals.get('rubros'):
+            import json as _json
+            from .l10n_pe_ne_rubro import RUBROS as _RUBROS
+            malos = [r for r in vals['rubros'] if r not in _RUBROS]
+            if malos:
+                raise UserError(_("Rubro desconocido: %s") % ", ".join(malos))
+            cvals['l10n_pe_ne_rubros'] = _json.dumps(list(vals['rubros']), ensure_ascii=False)
         created_company = not company
         if company:
             company.write(cvals)

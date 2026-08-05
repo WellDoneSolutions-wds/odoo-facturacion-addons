@@ -150,6 +150,35 @@ class TestRubros(L10nPeSeedMixin, TransactionCase):
         self._set(["bodega"])
         self.assertNotIn("modulos", self.env.user.l10n_pe_ne_perfil())
 
+    # ------------------------------------------------- fase 3 · adopción / alta
+    def test_adopcion_solo_admin(self):
+        self._set(["bodega"], {"C04": True})
+        AM = self.env["account.move"]
+        cfg = AM.l10n_pe_ne_rubro_config()   # env de tests = admin
+        self.assertIn("adopcion", cfg)
+        self.assertGreaterEqual(cfg["adopcion"]["empresasPorRubro"].get("bodega", 0), 1)
+        self.assertGreaterEqual(cfg["adopcion"]["overridesActivados"].get("C04", 0), 1)
+        # el emisor normal NO ve la analítica del servidor
+        cfg2 = AM.with_user(self._emisor()).l10n_pe_ne_rubro_config()
+        self.assertNotIn("adopcion", cfg2)
+
+    def test_provision_tenant_con_rubro(self):
+        res = self.env["res.company"].l10n_pe_ne_provision_tenant({
+            "ruc": "20609999991", "razonSocial": "GYM TEST SAC",
+            "login": "gym.rubro@test", "password": "S3gura#2026x",
+            "rubros": ["gimnasio"]})
+        company = self.env["res.company"].sudo().search([("vat", "=", "20609999991")], limit=1)
+        self.assertTrue(company)
+        efectivos = company.l10n_pe_ne_modulos_efectivos()
+        self.assertIsNotNone(efectivos)      # nació CON rubro (no legacy)
+        self.assertIn("V11", efectivos)      # membresías, el módulo del gimnasio
+        self.assertTrue(res)
+        with self.assertRaises(UserError):   # rubro inexistente en el alta
+            self.env["res.company"].l10n_pe_ne_provision_tenant({
+                "ruc": "20609999992", "razonSocial": "X SAC",
+                "login": "x.rubro@test", "password": "S3gura#2026x",
+                "rubros": ["marciano"]})
+
     # ------------------------------------------------------------------- muro
     def test_muro_rechaza_y_audita(self):
         user = self._emisor()

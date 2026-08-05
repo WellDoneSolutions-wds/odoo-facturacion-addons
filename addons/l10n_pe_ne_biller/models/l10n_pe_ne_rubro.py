@@ -259,7 +259,7 @@ class AccountMove(models.Model):
         """Estado + catálogos para la pantalla «Rubro del negocio» (GET /ne/api/rubro)."""
         company = self.env.company
         efectivos = company.l10n_pe_ne_modulos_efectivos()
-        return {
+        out = {
             "catalogoRubros": [
                 {"codigo": cod, "nombre": nombre, "grupo": grupo,
                  "grupoNombre": GRUPOS[grupo], "modulos": list(mods)}
@@ -274,6 +274,22 @@ class AccountMove(models.Model):
             "overrides": _json_load(company.l10n_pe_ne_modulos_override, {}),
             "modulos": sorted(efectivos) if efectivos is not None else None,
         }
+        # Fase 3 · analítica de adopción (solo admin de plataforma): cuántas empresas del
+        # servidor usan cada rubro y qué módulos se activan más a mano por override. Es el
+        # dato para decidir qué opcional «se gana» el default de su rubro (spec, fase 3).
+        user = self.env.user
+        if user.has_group("base.group_system") or user.has_group("base.group_erp_manager"):
+            por_rubro, por_override = {}, {}
+            for c in self.env["res.company"].sudo().search([]):
+                for r in _json_load(c.l10n_pe_ne_rubros, []):
+                    if r in RUBROS:
+                        por_rubro[r] = por_rubro.get(r, 0) + 1
+                for cod, on in _json_load(c.l10n_pe_ne_modulos_override, {}).items():
+                    if on and cod in MODULOS:
+                        por_override[cod] = por_override.get(cod, 0) + 1
+            out["adopcion"] = {"empresasPorRubro": por_rubro,
+                               "overridesActivados": por_override}
+        return out
 
     def _l10n_pe_ne_puede_config_rubro(self):
         """Quién configura el rubro: dueño o supervisor de la empresa (spec §10), o el admin

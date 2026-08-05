@@ -145,10 +145,18 @@ class TestRubros(L10nPeSeedMixin, TransactionCase):
         self.assertIn("modulos", perfil)
         self.assertIn("V01", perfil["modulos"])
 
-    def test_perfil_admin_queda_fuera_de_la_capa_1(self):
-        # Super Admin (plataforma) ve todo: la clave modulos NO viaja aunque haya rubro.
+    def test_perfil_admin_tambien_ve_la_config_del_negocio(self):
+        # Decisión de producto: la VISIBILIDAD sigue la configuración del negocio para
+        # TODOS, admin incluido («lo que configuras es lo que ves»). El admin que quiera
+        # ver todo elige el tipo «Todos». Su bypass vive en el MURO, no en la UI.
         self._set(["bodega"])
-        self.assertNotIn("modulos", self.env.user.l10n_pe_ne_perfil())
+        perfil = self.env.user.l10n_pe_ne_perfil()   # env de tests = admin
+        self.assertIn("modulos", perfil)
+        self.assertIn("V01", perfil["modulos"])
+        self.assertNotIn("C04", perfil["modulos"])
+        # config() igual: el admin recibe la lista del negocio.
+        cfg = self.env["account.move"].l10n_pe_ne_config()
+        self.assertIn("modulos", cfg)
 
     # ------------------------------------------------- fase 3 · adopción / alta
     def test_adopcion_solo_admin(self):

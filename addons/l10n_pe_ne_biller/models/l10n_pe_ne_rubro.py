@@ -453,6 +453,97 @@ class AccountMove(models.Model):
         return out
 
     @api.model
+    def l10n_pe_ne_salud(self):
+        """B · «Salud del negocio»: checklist de completitud de la configuración, calculado
+        server-side en una pasada. Cada ítem trae ok + a dónde ir a resolverlo (ruta SPA).
+        No es un bloqueo: es la guía del dueño para dejar el negocio fino."""
+        company = self.env.company
+        p = company.partner_id
+        rubro_ok = bool([r for r in _json_load(company.l10n_pe_ne_rubros, []) if r in RUBROS])
+        series_ok = bool(self.env["l10n_pe_ne.serie"].sudo().search(
+            [("company_id", "=", company.id), ("activa", "=", True)], limit=1))
+        productos_ok = bool(self.env["product.template"].sudo().search(
+            [("company_id", "in", (company.id, False)), ("sale_ok", "=", True)], limit=1))
+        items = [
+            {"clave": "rubro", "titulo": "Tipo de negocio elegido", "ok": rubro_ok,
+             "detalle": "El menú y los catálogos se enfocan en tu rubro",
+             "ruta": "/configuracion"},
+            {"clave": "series", "titulo": "Series declaradas por local", "ok": series_ok,
+             "detalle": "Qué serie emite cada local (numeración fiscal)",
+             "ruta": "/series"},
+            {"clave": "logo", "titulo": "Logo del negocio", "ok": bool(company.logo),
+             "detalle": "Sale en el ticket y la representación A4",
+             "ruta": "/negocio"},
+            {"clave": "datosPago", "titulo": "Cuentas para tus clientes",
+             "ok": bool((company.l10n_pe_ne_datos_pago or "").strip()),
+             "detalle": "Cuentas/CCI que se imprimen en cotizaciones y comprobantes",
+             "ruta": "/negocio"},
+            {"clave": "direccion", "titulo": "Dirección fiscal completa",
+             "ok": bool((p.street or "").strip() and p.l10n_pe_district),
+             "detalle": "Va en el bloque emisor del XML a SUNAT",
+             "ruta": "/negocio"},
+            {"clave": "productos", "titulo": "Catálogo con productos", "ok": productos_ok,
+             "detalle": "Al menos un producto o servicio para vender",
+             "ruta": "/productos"},
+        ]
+        hechos = sum(1 for i in items if i["ok"])
+        return {"items": items, "hechos": hechos, "total": len(items),
+                "pct": round(hechos * 100 / len(items))}
+
+    @api.model
+    def l10n_pe_ne_auditoria_list(self, limit=25):
+        """C · Historial de configuración, legible: quién cambió qué y cuándo (rubro, módulos,
+        catálogos, roles, rechazos del muro). Solo quien puede configurar lo ve — es la
+        traza de decisiones del negocio."""
+        if not self._l10n_pe_ne_puede_config_rubro():
+            raise AccessError(_("Solo el dueño o supervisor puede ver el historial de configuración."))
+        filas = self.env["l10n_pe_ne.rubro_auditoria"].sudo().search(
+            [("company_id", "=", self.env.company.id)], limit=int(limit or 25))
+        out = []
+        for f in filas:
+            campo = f.campo or ""
+            if campo == "rubros":
+                antes = [RUBROS.get(r, (r,))[0] for r in _json_load(f.antes, [])]
+                despues = [RUBROS.get(r, (r,))[0] for r in _json_load(f.despues, [])]
+                titulo = "Cambio de tipo de negocio"
+                resumen = "%s → %s" % (", ".join(antes) or "Todos", ", ".join(despues) or "Todos")
+            elif campo == "overrides":
+                titulo = "Módulos ajustados a mano"
+                despues = _json_load(f.despues, {})
+                on = [MODULOS.get(c, (c,))[0] for c, v in despues.items() if v]
+                off = [MODULOS.get(c, (c,))[0] for c, v in despues.items() if not v]
+                partes = []
+                if on:
+                    partes.append("activó " + ", ".join(on))
+                if off:
+                    partes.append("apagó " + ", ".join(off))
+                resumen = "; ".join(partes) or "sin overrides"
+            elif campo.startswith("catalogos"):
+                titulo = {"catalogos": "Catálogos ajustados",
+                          "catalogos(siembra)": "Catálogos sembrados por el rubro",
+                          "catalogos(resembrado)": "Catálogos re-armados por cambio de tipo",
+                          "catalogos(todos)": "Catálogos abiertos a todo (sin restricción)",
+                          }.get(campo, "Catálogos")
+                resumen = ""
+            elif campo.startswith("roles:"):
+                titulo = "Roles de %s" % campo.split(":", 1)[1]
+                resumen = "%s → %s" % (f.antes or "—", f.despues or "—")
+            elif campo.startswith("rechazo:"):
+                cod = campo.split(":", 1)[1]
+                titulo = "Rechazo de seguridad (muro)"
+                resumen = "intento de usar %s sin el módulo activo" % MODULOS.get(cod, (cod,))[0]
+            else:
+                titulo = campo
+                resumen = ""
+            out.append({
+                "id": f.id, "titulo": titulo, "resumen": resumen,
+                "usuario": f.user_id.name or "—",
+                "fecha": fields.Datetime.to_string(f.create_date),
+                "esRechazo": campo.startswith("rechazo:"),
+            })
+        return out
+
+    @api.model
     def l10n_pe_ne_rubro_preview(self, payload):
         """P3 · Preview del cambio de tipo de negocio (SIN escribir nada): qué módulos entran
         y salen, qué queda protegido por estar en uso, y cómo quedarían los catálogos.
@@ -477,6 +568,7 @@ class AccountMove(models.Model):
                     "protegidos": [],
                     "total": len(todos),
                 },
+                "efectivos": sorted(todos),
                 "catalogos": company._l10n_pe_ne_catalogos_todos(),
                 "catalogosConservados": {"unidades": [], "medios": [], "afectaciones": [], "monedas": []},
             }
@@ -504,6 +596,7 @@ class AccountMove(models.Model):
                 "protegidos": _nombres(protegidos),
                 "total": len(efectivos_nuevos),
             },
+            "efectivos": sorted(efectivos_nuevos),
             "catalogos": cfg_nueva,
             "catalogosConservados": conservados,
         }

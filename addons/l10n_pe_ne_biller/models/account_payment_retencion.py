@@ -513,7 +513,11 @@ class AccountPayment(models.Model):
         # account_move_biller): subir el de emisión no debe alargar el del PDF.
         timeout = int(icp.get_param('l10n_pe_ne_biller.pdf_timeout', '60'))
         payload = {'ruc': self.company_id.vat or '', 'tipoDoc': tipo_doc,
-                   'xml': (xml_att.raw or b'').decode('utf-8')}
+                   'xml': (xml_att.raw or b'').decode('utf-8'),
+                   # Datos de pago del emisor (cuentas bancarias / CCI / Yape-Plin): mismo campo de
+                   # la compañía que usan la cotización y el resto de comprobantes. No va al XML
+                   # SUNAT; el biller lo imprime en el bloque "DATOS DE PAGO". "" => no se dibuja.
+                   'datosPago': self.company_id.l10n_pe_ne_datos_pago or ''}
         headers = {'X-Api-Key': self.company_id.sudo().l10n_pe_ne_api_key or ''}
         try:
             resp = requests.post(base + '/report/pdf', json=payload, headers=headers, timeout=(5, timeout))

@@ -731,6 +731,14 @@ class L10nPeNeApi(http.Controller):
         except Exception as e:  # noqa: BLE001
             return self._fail(e)
 
+    @http.route("/ne/api/rubro/preview", **_POST)
+    def rubro_preview(self, **kw):
+        """P3: preview del cambio de tipo de negocio — no escribe nada."""
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(lambda: self._move(uid).l10n_pe_ne_rubro_preview(self._body()))
+
     @http.route("/ne/api/rubro", **_POST)
     def set_rubro(self, **kw):
         """Guarda rubro(s) y overrides. El muro (dueño/supervisor/admin) vive en el modelo."""

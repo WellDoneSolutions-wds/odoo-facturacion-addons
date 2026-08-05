@@ -106,3 +106,63 @@ class TestConfigCatalogos(L10nPeSeedMixin, TransactionCase):
         cfg = company._l10n_pe_ne_cfg()
         self.assertIn("MTQ", cfg["unidades"]["activas"])   # nació con m³ activo
         self.assertIn("MTK", cfg["unidades"]["activas"])
+
+
+@tagged("post_install", "-at_install")
+class TestTipoDeNegocio(L10nPeSeedMixin, TransactionCase):
+    """P2/P3 · Cambio de tipo de negocio: preview sin efectos y re-siembra con fusión."""
+
+    def setUp(self):
+        super().setUp()
+        self.AM = self.env["account.move"]
+        self.env.company.sudo().write({
+            "l10n_pe_ne_rubros": "[]", "l10n_pe_ne_modulos_override": "{}",
+            "l10n_pe_ne_cfg_catalogos": ""})
+
+    def test_preview_no_escribe_y_describe_el_cambio(self):
+        antes_rubros = self.env.company.l10n_pe_ne_rubros
+        p = self.AM.l10n_pe_ne_rubro_preview({"rubros": ["restaurante"]})
+        self.assertTrue(p["legacyAntes"])   # la empresa veía todo
+        self.assertGreater(len(p["modulos"]["salen"]), 0)   # va a dejar de ver módulos
+        self.assertIn("GRM", p["catalogos"]["unidades"]["activas"])   # sugerencia del rubro
+        # y NO escribió nada:
+        self.assertEqual(self.env.company.l10n_pe_ne_rubros, antes_rubros)
+        self.assertFalse(self.env.company._l10n_pe_ne_cfg())
+
+    def test_cambio_de_tipo_resiembra_fusionando(self):
+        # Estado inicial: bodega con un medio PERSONALIZADO y una unidad EN USO (producto en
+        # galones). Cambiar a restaurante debe re-sembrar PERO conservar ambos.
+        self.AM.l10n_pe_ne_set_rubro({"rubros": ["bodega"], "overrides": {}})
+        self.AM.l10n_pe_ne_cfg_catalogos_set({
+            "unidades": {"activas": ["NIU", "ZZ", "KGM"], "default": "NIU"},
+            "medios": {"lista": ["Efectivo", "Yape", "Agora"], "default": "Yape"},
+            "afectaciones": {"activas": ["1000", "9997", "9998"], "gratuitas": ["11"], "default": "1000"},
+            "monedas": {"activas": ["PEN"]},
+        })
+        self.env["product.product"].create({
+            "name": "Combustible galón", "l10n_pe_ne_unit_code": "GLL",
+            "company_id": self.env.company.id})
+        estado = self.AM.l10n_pe_ne_set_rubro(
+            {"rubros": ["restaurante"], "overrides": {}, "aplicarCatalogos": True})
+        cfg = self.env.company._l10n_pe_ne_cfg()
+        self.assertIn("GRM", cfg["unidades"]["activas"])    # sugerencia del nuevo rubro
+        self.assertIn("GLL", cfg["unidades"]["activas"])    # conservada por EN USO
+        self.assertIn("Agora", cfg["medios"]["lista"])      # personalizado conservado
+        self.assertEqual(cfg["medios"]["default"], "Yape")  # default vigente respetado
+        self.assertIn("GLL", estado["catalogosConservados"]["unidades"])
+        self.assertIn("Agora", estado["catalogosConservados"]["medios"])
+        # auditoría del resembrado
+        self.assertTrue(self.env["l10n_pe_ne.rubro_auditoria"].search(
+            [("company_id", "=", self.env.company.id), ("campo", "=", "catalogos(resembrado)")]))
+
+    def test_sin_flag_no_pisa_config(self):
+        self.AM.l10n_pe_ne_set_rubro({"rubros": ["bodega"], "overrides": {}})
+        self.AM.l10n_pe_ne_cfg_catalogos_set({
+            "unidades": {"activas": ["NIU"], "default": "NIU"},
+            "medios": {"lista": ["Efectivo"], "default": "Efectivo"},
+            "afectaciones": {"activas": ["1000"], "gratuitas": [], "default": "1000"},
+            "monedas": {"activas": ["PEN"]},
+        })
+        self.AM.l10n_pe_ne_set_rubro({"rubros": ["restaurante"], "overrides": {}})   # sin flag
+        cfg = self.env.company._l10n_pe_ne_cfg()
+        self.assertNotIn("GRM", cfg["unidades"]["activas"])   # la config propia quedó intacta

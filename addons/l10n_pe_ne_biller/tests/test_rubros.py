@@ -239,3 +239,36 @@ class TestRubros(L10nPeSeedMixin, TransactionCase):
         # Super Admin opera todo aunque el rubro no tenga el módulo (regla 1 de la spec).
         self._set(["bodega"])
         self.env["account.move"]._l10n_pe_ne_check_modulo("C04", "Detracción (SPOT)")   # no lanza
+
+    # ------------------------------------------------- nivel 2 · salud / historial
+    def test_salud_checklist(self):
+        self._set()   # estado conocido: sin rubro (el test no depende de la BD que toque)
+        s = self.env["account.move"].l10n_pe_ne_salud()
+        self.assertEqual(s["total"], 6)
+        self.assertIn("pct", s)
+        rubro_item = next(i for i in s["items"] if i["clave"] == "rubro")
+        self.assertFalse(rubro_item["ok"])          # sin rubro configurado (setUp lo limpia)
+        self._set(["bodega"])
+        s2 = self.env["account.move"].l10n_pe_ne_salud()
+        self.assertTrue(next(i for i in s2["items"] if i["clave"] == "rubro")["ok"])
+        self.assertGreaterEqual(s2["hechos"], s["hechos"])
+
+    def test_auditoria_legible_y_gate(self):
+        AM = self.env["account.move"]
+        AM.l10n_pe_ne_set_rubro({"rubros": ["bodega"], "overrides": {"C04": True}})
+        filas = AM.l10n_pe_ne_auditoria_list()
+        titulos = [f["titulo"] for f in filas]
+        self.assertIn("Cambio de tipo de negocio", titulos)
+        cambio = next(f for f in filas if f["titulo"] == "Cambio de tipo de negocio")
+        self.assertIn("Bodega", cambio["resumen"])   # nombres legibles, no códigos
+        # el emisor raso NO ve el historial
+        from odoo.exceptions import AccessError as AE
+        with self.assertRaises(AE):
+            AM.with_user(self._emisor()).l10n_pe_ne_auditoria_list()
+
+    def test_perfil_trae_rubro_configurado(self):
+        user = self._emisor()
+        self._set()
+        self.assertFalse(user.with_user(user).l10n_pe_ne_perfil()["rubroConfigurado"])
+        self._set(["bodega"])
+        self.assertTrue(user.with_user(user).l10n_pe_ne_perfil()["rubroConfigurado"])

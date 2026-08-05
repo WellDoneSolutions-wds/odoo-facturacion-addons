@@ -51,6 +51,10 @@ class ResUsers(models.Model):
             efectivos = self.company_id.l10n_pe_ne_modulos_efectivos()
             if efectivos is not None:
                 perfil["modulos"] = sorted(efectivos)
+        # Onboarding (nivel 2): ¿la empresa YA eligió su tipo de negocio? A diferencia de
+        # `modulos` (que el admin no recibe), este flag es un DATO de la empresa y viaja a
+        # todos — dispara el asistente de bienvenida del dueño/supervisor la primera vez.
+        perfil["rubroConfigurado"] = self.company_id.l10n_pe_ne_modulos_efectivos() is not None
         return perfil
 
     def _l10n_pe_ne_puede_config_series(self):

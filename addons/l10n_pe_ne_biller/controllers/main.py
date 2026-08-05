@@ -731,6 +731,25 @@ class L10nPeNeApi(http.Controller):
         except Exception as e:  # noqa: BLE001
             return self._fail(e)
 
+    @http.route("/ne/api/salud", **_GET)
+    def salud(self, **kw):
+        """B · checklist de completitud del negocio."""
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        try:
+            return self._json(self._move(uid).l10n_pe_ne_salud())
+        except Exception as e:  # noqa: BLE001
+            return self._fail(e)
+
+    @http.route("/ne/api/auditoria", **_GET)
+    def auditoria(self, limit=25, **kw):
+        """C · historial de configuración legible (solo quien puede configurar)."""
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(lambda: self._move(uid).l10n_pe_ne_auditoria_list(limit))
+
     @http.route("/ne/api/rubro/preview", **_POST)
     def rubro_preview(self, **kw):
         """P3: preview del cambio de tipo de negocio — no escribe nada."""

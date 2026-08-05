@@ -234,6 +234,56 @@ class ResCompany(models.Model):
         efectivos = self.l10n_pe_ne_modulos_efectivos()
         return True if efectivos is None else cod in efectivos
 
+    def l10n_pe_ne_modulos_en_uso(self):
+        """Módulos con USO REAL en la historia de la empresa (fase 4 de la spec): comprobantes
+        con detracción, guías emitidas, cotizaciones, membresías… Se usa al elegir rubro para
+        PROTEGER lo que ya se usa (override automático) — elegir «Bodega» no puede empezar a
+        rechazar las detracciones que la empresa emite hace meses. Solo detecta lo que el motor
+        gatea (muro + menú); es un sondeo barato: un search limit=1 por módulo."""
+        self.ensure_one()
+        Move = self.env["account.move"].sudo()
+        dom = [("company_id", "=", self.id)]
+
+        def hay(model, extra=None):
+            return bool(self.env[model].sudo().search(
+                (extra or []) + [("company_id", "=", self.id)], limit=1))
+
+        def hay_move(extra):
+            return bool(Move.search(dom + extra, limit=1))
+
+        def hay_tax(code):
+            taxes = self.env["account.tax"].sudo().search(
+                [("company_id", "=", self.id), ("l10n_pe_edi_tax_code", "=", code)])
+            if not taxes:
+                return False
+            return bool(self.env["account.move.line"].sudo().search(
+                [("company_id", "=", self.id), ("tax_ids", "in", taxes.ids)], limit=1))
+
+        en_uso = set()
+        if hay_move([("l10n_pe_ne_detraccion", "=", True)]):
+            en_uso.add("C04")
+        if hay_move([("l10n_pe_ne_percepcion", "=", True)]):
+            en_uso.add("C05")
+        if hay_move([("l10n_pe_ne_estado_expediente", "!=", False)]):
+            en_uso.add("R08")
+        if hay_move([("l10n_pe_ne_proyecto_id", "!=", False)]):
+            en_uso.add("R05")
+        if hay_move([("l10n_pe_ne_tipo_doc", "=", "04")]):
+            en_uso.add("E05")
+        if hay_move([("currency_id", "!=", self.currency_id.id)]):
+            en_uso.add("E12")
+        if hay_tax("2000"):
+            en_uso.add("C07")
+        if hay_tax("1016"):
+            en_uso.add("C12")
+        for cod, model in (("E08", "l10n_pe_ne.guia_remision"), ("V04", "l10n_pe_ne.cotizacion"),
+                           ("V03", "l10n_pe_ne.nota_venta"), ("E14", "l10n_pe_ne.lote"),
+                           ("V11", "l10n_pe_ne.recurrencia"), ("R10", "l10n_pe_ne.cita"),
+                           ("V09", "l10n_pe_ne.apartado")):
+            if hay(model):
+                en_uso.add(cod)
+        return en_uso
+
 
 class RubroAuditoria(models.Model):
     """Bitácora de la configuración por rubro (spec §15): quién cambió qué y cuándo, y los
@@ -273,6 +323,9 @@ class AccountMove(models.Model):
             "rubros": _json_load(company.l10n_pe_ne_rubros, []),
             "overrides": _json_load(company.l10n_pe_ne_modulos_override, {}),
             "modulos": sorted(efectivos) if efectivos is not None else None,
+            # Fase 4: módulos con historia real — la UI los marca «en uso» y el guardado los
+            # protege con override automático si el rubro elegido no los trae.
+            "enUso": sorted(company.l10n_pe_ne_modulos_en_uso()),
         }
         # Fase 3 · analítica de adopción (solo admin de plataforma): cuántas empresas del
         # servidor usan cada rubro y qué módulos se activan más a mano por override. Es el
@@ -328,6 +381,28 @@ class AccountMove(models.Model):
         overrides = {c: bool(v) for c, v in overrides.items()}
 
         company = self.env.company
+        # Fase 4 · protección de lo EN USO (spec: «con todos sus módulos actualmente en uso
+        # marcados como activos (override), para que la migración nunca les oculte algo que ya
+        # estaban usando»): si la selección dejaría fuera un módulo con historia real, se
+        # enciende su override automáticamente. Elegir «Bodega» no puede empezar a rechazar
+        # las detracciones que la empresa emite hace meses. Un override en False EXPLÍCITO del
+        # payload se respeta (apagarlo a sabiendas es una decisión, no un accidente).
+        protegidos = []
+        if rubros:
+            activos = set(NUCLEO)
+            for r in rubros:
+                activos.update(RUBROS[r][2])
+            for cod, on in overrides.items():
+                if on:
+                    activos.add(cod)
+                elif cod not in NUCLEO:
+                    activos.discard(cod)
+            efectivos_sim = activos & _DISPONIBLES
+            en_uso = company.l10n_pe_ne_modulos_en_uso() & _DISPONIBLES
+            protegidos = sorted(cod for cod in en_uso - efectivos_sim
+                                if overrides.get(cod) is not False)
+            for cod in protegidos:
+                overrides[cod] = True
         cambios = (
             ("rubros", _json_load(company.l10n_pe_ne_rubros, []), rubros,
              "l10n_pe_ne_rubros"),
@@ -345,7 +420,9 @@ class AccountMove(models.Model):
                 "antes": json.dumps(antes, ensure_ascii=False),
                 "despues": json.dumps(despues, ensure_ascii=False),
             })
-        return self.l10n_pe_ne_rubro_config()
+        out = self.l10n_pe_ne_rubro_config()
+        out["protegidos"] = protegidos   # la SPA avisa qué se mantuvo activo por estar en uso
+        return out
 
     # ------------------------------------------------------- muro de emisión
     def _l10n_pe_ne_check_modulo(self, cod, etiqueta):

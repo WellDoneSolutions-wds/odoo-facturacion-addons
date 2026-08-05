@@ -179,6 +179,39 @@ class TestRubros(L10nPeSeedMixin, TransactionCase):
                 "login": "x.rubro@test", "password": "S3gura#2026x",
                 "rubros": ["marciano"]})
 
+    # ------------------------------------------------- fase 4 · protección en-uso
+    def _con_detraccion_en_historia(self):
+        """Garantiza que la empresa tenga al menos un comprobante con detracción (C04 en uso)."""
+        partner = self.env["res.partner"].create({
+            "name": "CLIENTE F4", "vat": "20100070970", "company_id": self.env.company.id})
+        self.env["account.move"].create({
+            "move_type": "out_invoice", "partner_id": partner.id,
+            "company_id": self.env.company.id, "l10n_pe_ne_detraccion": True})
+
+    def test_fase4_en_uso_detecta_detraccion(self):
+        self._con_detraccion_en_historia()
+        self.assertIn("C04", self.env.company.l10n_pe_ne_modulos_en_uso())
+
+    def test_fase4_elegir_rubro_protege_lo_en_uso(self):
+        # La empresa emite detracciones y elige Bodega (que no trae C04): el guardado la
+        # protege con un override automático — nada que ya se usa queda oculto (spec f4).
+        self._con_detraccion_en_historia()
+        AM = self.env["account.move"]
+        estado = AM.l10n_pe_ne_set_rubro({"rubros": ["bodega"], "overrides": {}})
+        self.assertIn("C04", estado["protegidos"])
+        self.assertIn("C04", estado["modulos"])
+        self.assertTrue(estado["overrides"].get("C04"))
+        self.assertIn("C04", estado["enUso"])
+
+    def test_fase4_apagado_explicito_se_respeta(self):
+        # Apagar a sabiendas un módulo en uso es una decisión, no un accidente: el override
+        # False explícito del payload NO se pisa.
+        self._con_detraccion_en_historia()
+        AM = self.env["account.move"]
+        estado = AM.l10n_pe_ne_set_rubro({"rubros": ["bodega"], "overrides": {"C04": False}})
+        self.assertNotIn("C04", estado["protegidos"])
+        self.assertNotIn("C04", estado["modulos"])
+
     # ------------------------------------------------------------------- muro
     def test_muro_rechaza_y_audita(self):
         user = self._emisor()

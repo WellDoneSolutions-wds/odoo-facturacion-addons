@@ -81,6 +81,10 @@ class AccountMove(models.Model):
         g = float(payload.get("descuentoGlobal") or 0)
         lines = []
         for ln in payload.get("lineas") or []:
+            # Muro por rubro (Capa 1): el IVAP (1016) solo existe si el rubro lo trae
+            # (arrocera/agroindustria). Empresa sin rubro configurado pasa siempre.
+            if (ln.get("taxCode") or "") == "1016":
+                self._l10n_pe_ne_check_modulo("C12", "IVAP (arroz pilado)")
             tax = self._l10n_pe_ne_tax_by_code(ln.get("taxCode"))
             # Sin tax resuelta la línea saldría en el XML como 'gravada con IGV 0.00'
             # (rechazo SUNAT 3111): mejor cortar aquí con el dato accionable.

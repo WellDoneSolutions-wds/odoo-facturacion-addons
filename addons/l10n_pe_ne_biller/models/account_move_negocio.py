@@ -171,6 +171,12 @@ class AccountMove(models.Model):
             # de gastos para precargar la casilla: no es una regla del sistema, es cómo paga este
             # negocio, y eso solo lo sabe el dueño.
             "gastoDeCaja": bool(company.l10n_pe_ne_gasto_de_caja),
+            # E11 · Resumen Diario de Boletas (RC): con esto activo las boletas NO se envían una
+            # a una — el cron diario las agrupa y declara por resumen (_l10n_pe_cron_resumen_
+            # boletas). El motor ya existía gated por este parámetro; aquí solo se le da UI.
+            "boletasResumen": (self.env["ir.config_parameter"].sudo()
+                               .get_param("l10n_pe_ne_biller.boletas_resumen", "")
+                               .strip().lower() in ("1", "true")),
         }
 
     def l10n_pe_ne_get_logo(self):
@@ -275,6 +281,12 @@ class AccountMove(models.Model):
             company.l10n_pe_ne_caja_autoapertura = bool(vals.get("cajaAutoapertura"))
         if "gastoDeCaja" in vals:
             company.l10n_pe_ne_gasto_de_caja = bool(vals.get("gastoDeCaja"))
+        # E11 · Resumen Diario (RC): enciende/apaga el parámetro que gatea el cron. Cambia CÓMO
+        # se declaran las boletas ante SUNAT (una a una vs agrupadas) — decisión del dueño.
+        if "boletasResumen" in vals:
+            self.env["ir.config_parameter"].sudo().set_param(
+                "l10n_pe_ne_biller.boletas_resumen",
+                "1" if vals.get("boletasResumen") else "0")
         # C2: tolerancia de descuadre al cerrar caja. El vacío NO es 0: es "no lo toques" —el
         # formulario del negocio manda todos sus campos en cada guardado, y un input que quedó
         # en blanco por una recarga a medias no puede dejar al RUC en tolerancia cero (que

@@ -63,12 +63,33 @@ class TestRubros(L10nPeSeedMixin, TransactionCase):
         self.assertEqual(efectivos, set(NUCLEO))
 
     def test_no_disponibles_se_filtran(self):
-        # educación trae V11/R10/E11 en defaults, pero aún no están construidos
+        # educación trae V11/R10 en defaults, pero aún no están construidos; E11 (resumen
+        # diario) SÍ está construido (fase 2) y pasa el filtro.
         self._set(["educacion"])
         efectivos = self.env.company.l10n_pe_ne_modulos_efectivos()
-        for cod in ("V11", "R10", "E11"):
+        for cod in ("V11", "R10"):
             self.assertNotIn(cod, efectivos)
+        self.assertIn("E11", efectivos)
         self.assertIn("V06", efectivos)   # el ajuste experto sí está disponible
+
+    def test_arrocera_trae_ivap(self):
+        # fase 2: C12 (IVAP) disponible — la arrocera lo recibe por defecto.
+        self._set(["arrocera"])
+        efectivos = self.env.company.l10n_pe_ne_modulos_efectivos()
+        self.assertIn("C12", efectivos)
+        self.assertIn("E05", efectivos)   # liquidación de compra (compra a productores)
+
+    def test_muro_ivap_rechaza_en_rubro_sin_c12(self):
+        # una bodega no vende arroz pilado en primera venta: línea 1016 → rechazo del muro.
+        user = self._emisor()
+        AM = self.env["account.move"].with_user(user)
+        self._set(["bodega"])
+        lanzo = False
+        try:
+            AM._l10n_pe_ne_check_modulo("C12", "IVAP (arroz pilado)")
+        except UserError:
+            lanzo = True
+        self.assertTrue(lanzo)
 
     def test_catalogo_consistente(self):
         # todo default de rubro y todo código de NUCLEO existen en MODULOS

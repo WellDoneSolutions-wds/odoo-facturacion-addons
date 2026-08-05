@@ -44,7 +44,7 @@ MODULOS = {
     "E08": ("Guía de remisión — remitente", "E", True),
     "E09": ("Guía de remisión — transportista", "E", True),
     "E10": ("Comunicación de baja", "E", True),
-    "E11": ("Resumen diario de boletas", "E", False),
+    "E11": ("Resumen diario de boletas", "E", True),
     "E12": ("Multi-moneda (PEN/USD)", "E", True),
     "E13": ("Series por establecimiento", "E", True),
     "E14": ("Emisión masiva desde Excel", "E", True),
@@ -58,7 +58,7 @@ MODULOS = {
     "V07": ("Medios de pago (efectivo, Yape, tarjeta)", "V", True),
     "V08": ("Redondeo de efectivo (Ley 29571)", "V", True),
     "V09": ("Reserva / apartado (layaway)", "V", False),
-    "V10": ("Venta al peso con balanza (EAN-13)", "V", False),
+    "V10": ("Venta al peso con balanza (EAN-13)", "V", True),
     "V11": ("Facturación recurrente / membresías", "V", False),
     # Inventario
     "I01": ("Stock perpetuo", "I", True),
@@ -79,7 +79,7 @@ MODULOS = {
     "C09": ("Bancarización (Ley 28194)", "C", True),
     "C10": ("Registro de compras / crédito fiscal", "C", True),
     "C11": ("Consulta pública de comprobantes", "C", True),
-    "C12": ("IVAP (arroz pilado)", "C", False),
+    "C12": ("IVAP (arroz pilado)", "C", True),
     "C13": ("Partes vinculadas / umbrales UIT", "C", True),
     # Gestión
     "G01": ("Caja: apertura, cierre y arqueo", "G", True),

@@ -144,6 +144,10 @@ class AccountMove(models.Model):
             if ln.get("placa"):
                 # Placa del vehículo POR LÍNEA (grifo/combustible) → cat-55 código 7000 en el XML.
                 lvals["l10n_pe_ne_placa"] = str(ln["placa"]).strip().upper()
+            if ln.get("chofer"):
+                # Chofer que acompaña a la placa (grifo/combustible). NO va al XML SUNAT (no es
+                # campo electrónico); solo se imprime en la representación. Ver account_move_pdf.
+                lvals["l10n_pe_ne_chofer"] = str(ln["chofer"]).strip()
             if ln.get("afectacionGratuita"):
                 lvals["l10n_pe_ne_afectacion_gratuita"] = ln["afectacionGratuita"]
             if ln.get("fraccionar"):

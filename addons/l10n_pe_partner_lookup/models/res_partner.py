@@ -1,4 +1,5 @@
 import logging
+import time
 
 import requests
 
@@ -31,6 +32,11 @@ def _dynamo_resource(region):
 # Tiempo máximo (segundos) que esperamos a la API antes de rendirnos. Corto a
 # propósito: si el servicio externo está caído, la facturación no debe colgarse.
 LOOKUP_TIMEOUT = 8
+
+# TTL de la cache global RUC/DNI (docs/Cache-de-Identidad-RUC-DNI.md del repo
+# de infra): el RUC muta más (estado/dirección) que la identidad de un DNI.
+CACHE_TTL_RUC = 30 * 24 * 3600
+CACHE_TTL_DNI = 90 * 24 * 3600
 
 # SUNAT (consulta pública e-consultaruc), usada como último recurso.
 SUNAT_URL = "https://e-consultaruc.sunat.gob.pe/cl-ti-itmrconsruc/jcrS00Alias"
@@ -174,6 +180,52 @@ class ResPartner(models.Model):
         if not item:
             return None
         return self._l10n_pe_normalize_payload(item)
+
+    @api.model
+    def _l10n_pe_cache_writeback(self, doc_number, vals):
+        """Escribe en la cache DynamoDB el resultado de un fallback exitoso.
+
+        La cache nace vacía y nadie más la puebla (selección de proveedor
+        pendiente): sin write-back, TODA consulta paga el scraping de SUNAT.
+        Best-effort: cualquier fallo se loguea y el lookup sigue — el dato ya
+        está en mano, la cache es solo optimización."""
+        icp = self.env['ir.config_parameter'].sudo()
+        if (icp.get_param('l10n_pe_partner_lookup.mode') or 'api') != 'dynamodb':
+            return
+        arn_region, table_name = self._l10n_pe_parse_dynamo_table(
+            icp.get_param('l10n_pe_partner_lookup.dynamo_table'))
+        region = arn_region or icp.get_param('l10n_pe_partner_lookup.aws_region')
+        if not (boto3 and region and table_name):
+            return
+        hash_key = icp.get_param('l10n_pe_partner_lookup.dynamo_hash_key') or 'tipo_documento'
+        range_key = icp.get_param('l10n_pe_partner_lookup.dynamo_range_key') or 'numero_documento'
+        # Espejo EXACTO de la clave del read path: tipo por longitud del
+        # documento CONSULTADO. Para un DNI cuya respuesta trae el RUC10 de la
+        # persona, la clave sigue siendo el DNI (así el próximo tecleo hace
+        # hit) y el documento devuelto viaja en nroDocumento, que
+        # _l10n_pe_normalize_payload prioriza sobre la clave.
+        doc_type = 'RUC' if len(doc_number) == 11 else 'DNI'
+        item = {
+            'nroDocumento': vals['doc_number'],
+            'nombre_razon_social': vals['name'],
+            'fuente': 'sunat',
+            'expires_at': int(time.time())
+            + (CACHE_TTL_RUC if doc_type == 'RUC' else CACHE_TTL_DNI),
+        }
+        if vals.get('address'):
+            item['direccion'] = vals['address']
+        if vals.get('state'):
+            item['estado'] = vals['state']
+        # Los atributos de CLAVE van al final: si el nombre configurado
+        # colisiona con uno del payload, la clave gana.
+        item[hash_key] = doc_type
+        item[range_key] = doc_number
+        try:
+            _dynamo_resource(region).Table(table_name).put_item(Item=item)
+        except Exception:  # noqa: BLE001 — best-effort por diseño
+            _logger.warning(
+                "l10n_pe_partner_lookup: write-back a la cache falló para %s",
+                doc_number, exc_info=True)
 
     @api.model
     def _l10n_pe_normalize_payload(self, payload):
@@ -485,15 +537,31 @@ class ResPartner(models.Model):
                 'Content-Type': 'application/x-www-form-urlencoded',
                 'Referer': SUNAT_WARMUP_URL,
             })
-            session.get(SUNAT_WARMUP_URL, timeout=LOOKUP_TIMEOUT)  # cookies de sesión
-            response = session.post(SUNAT_URL, data=payload, timeout=LOOKUP_TIMEOUT)
+            # Un retry SOLO ante Timeout: el p95 de e-consultaruc a veces
+            # supera LOOKUP_TIMEOUT, pero la conexión ya caliente responde en
+            # décimas — el segundo intento entra casi siempre (medido: 2.7s
+            # frío / 0.2s caliente desde el EC2).
+            for intento in (1, 2):
+                try:
+                    session.get(SUNAT_WARMUP_URL, timeout=LOOKUP_TIMEOUT)  # cookies de sesión
+                    response = session.post(SUNAT_URL, data=payload, timeout=LOOKUP_TIMEOUT)
+                    break
+                except requests.Timeout:
+                    if intento == 2:
+                        raise
+                    _logger.info(
+                        "l10n_pe_partner_lookup: timeout de SUNAT para %s — reintentando",
+                        doc_number)
             response.raise_for_status()
         except requests.RequestException:
             _logger.warning(
                 "l10n_pe_partner_lookup: SUNAT no respondió para %s",
                 doc_number, exc_info=True)
             return None
-        return self._l10n_pe_parse_sunat_html(response.text, doc_number)
+        vals = self._l10n_pe_parse_sunat_html(response.text, doc_number)
+        if vals:
+            self._l10n_pe_cache_writeback(doc_number, vals)
+        return vals
 
     @api.model
     def _l10n_pe_parse_sunat_html(self, html_text, queried_doc):

@@ -79,6 +79,53 @@ DETRACCION_TASAS = {
     "036": 1.0, "039": 10.0, "040": 4.0, "041": 15.0,
 }
 
+# Descripción del catálogo 54 (código → nombre del bien/servicio). Para el desplegable de la
+# plantilla de importación (que el usuario elija el código sin memorizarlo). Espejo de
+# ne-express/lib/detracciones.ts — los códigos son estables (SUNAT casi no los cambia). Incluye
+# 028/044/045, que no tienen tasa fija o llegaron después y no están en DETRACCION_TASAS. Servicios
+# primero (los más emitidos), luego bienes; el dict preserva el orden para el desplegable.
+DETRACCION_DESC = {
+    # Servicios (Anexo 3)
+    "012": "Intermediación laboral y tercerización",
+    "019": "Arrendamiento de bienes",
+    "020": "Mantenimiento y reparación de bienes muebles",
+    "021": "Movimiento de carga",
+    "022": "Otros servicios empresariales",
+    "024": "Comisión mercantil",
+    "025": "Fabricación de bienes por encargo",
+    "026": "Servicio de transporte de personas",
+    "027": "Servicio de transporte de carga",
+    "028": "Transporte de pasajeros",
+    "030": "Contratos de construcción",
+    "037": "Demás servicios gravados con el IGV",
+    "044": "Servicio de beneficio de minerales metálicos",
+    "099": "Ley 30737",
+    # Bienes (Anexo 2)
+    "001": "Azúcar y melaza de caña",
+    "002": "Arroz",
+    "003": "Alcohol etílico",
+    "004": "Recursos hidrobiológicos",
+    "005": "Maíz amarillo duro",
+    "007": "Caña de azúcar",
+    "008": "Madera",
+    "009": "Arena y piedra",
+    "010": "Residuos, subproductos y desperdicios",
+    "011": "Bienes gravados por renuncia a la exoneración",
+    "014": "Carnes y despojos comestibles",
+    "016": "Aceite de pescado",
+    "017": "Harina, polvo y pellets de pescado",
+    "023": "Leche cruda entera",
+    "031": "Oro gravado con el IGV",
+    "032": "Páprika y otros frutos (capsicum/pimienta)",
+    "034": "Minerales metálicos no auríferos",
+    "035": "Bienes exonerados del IGV",
+    "036": "Oro y minerales metálicos exonerados del IGV",
+    "039": "Minerales no metálicos",
+    "040": "Primera venta de inmuebles gravada con el IGV",
+    "041": "Plomo",
+    "045": "Minerales de oro y sus concentrados gravados con el IGV",
+}
+
 # Código de unidad de medida de SUNAT (cat. 03 / UN-ECE Rec. 20) por XMLID de la unidad estándar
 # de Odoo. Mapeo replicado de l10n_pe_edi (enterprise). Se resuelve en runtime porque las UoM base
 # son `noupdate` y un data file de otro módulo no las actualiza; para unidades personalizadas, el

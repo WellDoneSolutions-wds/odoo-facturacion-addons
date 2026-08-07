@@ -169,6 +169,20 @@ class TestImportProductos(TransactionCase):
         self.assertEqual(p.l10n_pe_ne_stock_minimo, 8.0)
         self.assertEqual(p.tracking, "lot")
 
+    def test_detraccion_del_desplegable_toma_solo_el_codigo(self):
+        """El desplegable trae 'CÓDIGO · descripción'; el parser guarda solo el código. También
+        acepta el código pelado y rechaza basura."""
+        res = self._import(
+            ["CÓDIGO", "NOMBRE", "PRECIO VENTA", "DETRACCIÓN"],
+            [["DET-1", "FLETE", 800, "027 · Servicio de transporte de carga"],
+             ["DET-2", "ALQUILER", 800, "019"]])
+        self.assertFalse(res.get("errores"), res)
+        self.assertEqual(self._get("DET-1").l10n_pe_ne_detraccion_cod, "027")
+        self.assertEqual(self._get("DET-2").l10n_pe_ne_detraccion_cod, "019")
+        bad = self._import(["CÓDIGO", "NOMBRE", "PRECIO VENTA", "DETRACCIÓN"],
+                           [["DET-X", "X", 800, "transporte"]])
+        self.assertTrue(bad.get("errores"), bad)
+
     def test_activo_no_archiva_el_producto(self):
         res = self._import(
             ["CÓDIGO", "NOMBRE", "PRECIO VENTA", "ACTIVO"],

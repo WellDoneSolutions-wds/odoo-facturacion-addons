@@ -7,7 +7,7 @@ import re
 
 from odoo import _, api, fields, models
 from odoo.exceptions import UserError
-from .account_move_biller import DEFAULT_UNIT_CODE, UNIDAD_IMPORT, AFECT_IMPORT, TIPO_IMPORT, _UNIDAD_CODES
+from .account_move_biller import DEFAULT_UNIT_CODE, UNIDAD_IMPORT, AFECT_IMPORT, TIPO_IMPORT, _UNIDAD_CODES, DETRACCION_DESC
 
 
 class AccountMove(models.Model):
@@ -56,6 +56,7 @@ class AccountMove(models.Model):
         deptos = [d.name for d in root.child_id]
         subcats = sorted({s.name for d in root.child_id for s in d.child_id})
         marcas = [m.name for m in self.env["l10n_pe_ne.marca"].search([])]
+        detras = ["%s · %s" % (c, d) for c, d in DETRACCION_DESC.items()]
 
         buf = io.BytesIO()
         wb = xlsxwriter.Workbook(buf, {"in_memory": True})
@@ -74,7 +75,8 @@ class AccountMove(models.Model):
         # Hoja OCULTA con las listas de reuso, referenciada por los desplegables dinámicos.
         wl = wb.add_worksheet("Listas")
         for cidx, (titulo, valores) in enumerate([
-            ("CATEGORIAS", deptos), ("SUBCATEGORIAS", subcats), ("MARCAS", marcas)]):
+            ("CATEGORIAS", deptos), ("SUBCATEGORIAS", subcats), ("MARCAS", marcas),
+            ("DETRACCIONES", detras)]):
             wl.write(0, cidx, titulo)
             for i, v in enumerate(valores, 1):
                 wl.write(i, cidx, v)
@@ -131,8 +133,8 @@ class AccountMove(models.Model):
             "SI solo si es una BOLSA PLÁSTICA (cobra ICBPER por unidad al venderla). "
             "Para todo lo demás: NO o vacío."), note)
         ws.write_comment(0, col["DETRACCIÓN"], (
-            "Opcional. Código cat. 54 de SUNAT (3 dígitos, ej. 027 transporte de carga) si el "
-            "producto está sujeto a detracción. Vacío = no sujeto."), note)
+            "Opcional. Elige del desplegable el bien/servicio sujeto a detracción (catálogo 54 de "
+            "SUNAT). Al importar se guarda solo el código (ej. 027). Vacío = no sujeto."), note)
         ws.write_comment(0, col["ACTIVO"], "Sí/No. No = archivado (no aparece en el catálogo ni al emitir). Vacío = Sí.", note)
 
         # ── Desplegables de valores fijos ──
@@ -178,6 +180,11 @@ class AccountMove(models.Model):
         if marcas:
             dv("MARCA", {"validate": "list", "source": rango(2, len(marcas)),
                 "input_title": "Marca", "input_message": "Existente o nueva (se reutiliza/crea).", **pick})
+        # DETRACCIÓN: catálogo 54 (código · descripción). Al importar se toma solo el código.
+        dv("DETRACCIÓN", {"validate": "list", "source": rango(3, len(detras)),
+            "error_type": "information", "input_title": "Detracción (cat. 54)",
+            "input_message": "Elige el bien/servicio sujeto a detracción. Vacío = no sujeto. "
+                             "Al importar se usa solo el código (los 3 dígitos)."})
 
         ws.freeze_panes(1, 0)
         wi = wb.add_worksheet("Instrucciones")
@@ -200,7 +207,7 @@ class AccountMove(models.Model):
             "9. COSTO: precio de compra referencial (no factura). PRECIO VENTA: el precio de venta.",
             "10. INCLUYE IGV: Sí = el precio ya trae IGV (lo normal). No = sin IGV; se le suma 18% si la afectación es GRAVADO.",
             "11. AFECTACIÓN: GRAVADO (con IGV 18%, lo normal), EXONERADO/INAFECTO (sin IGV), EXPORTACION/GRATUITO. Vacío = GRAVADO.",
-            "12. BOLSA = SI solo para bolsas plásticas (cobran ICBPER). DETRACCIÓN: código cat. 54 (3 dígitos) si aplica.",
+            "12. BOLSA = SI solo para bolsas plásticas (cobran ICBPER). DETRACCIÓN: elige del desplegable (catálogo 54); se guarda solo el código.",
             "13. ACTIVO = No archiva el producto (no aparece en el catálogo ni al emitir).",
             "14. Sube el archivo, revisa el resumen (nuevos / actualizados / errores) y recién ahí confirma.",
         ]):
@@ -441,10 +448,14 @@ class AccountMove(models.Model):
             bolsa_raw = norm(cell(row, "bolsa"))
             bolsa_provisto = bool(bolsa_raw)
             bolsa = bolsa_raw in ("si", "s")  # ICBPER: SI/NO
-            detra_raw = txt(cell(row, "detraccion"))
-            detra_provisto = bool(detra_raw)
+            # DETRACCIÓN: el desplegable trae "027 · Servicio…"; se toma solo el código (los 3
+            # primeros dígitos). También acepta el código pelado "027" (plantilla vieja / a mano).
+            detra_cell = txt(cell(row, "detraccion"))
+            detra_provisto = bool(detra_cell)
+            m_detra = re.match(r"^\s*(\d{3})\b", detra_cell)
+            detra_raw = m_detra.group(1) if m_detra else detra_cell
             if detra_provisto and not re.fullmatch(r"[0-9]{3}", detra_raw):
-                errores.append({"fila": n, "msg": "DETRACCIÓN debe ser el código de 3 dígitos del catálogo 54 (ej. 027) o vacío"})
+                errores.append({"fila": n, "msg": "DETRACCIÓN inválida: elige del desplegable (catálogo 54) o escribe el código de 3 dígitos (ej. 027)"})
                 continue
             barcode = txt(cell(row, "codigo de barras"))
             # ── Columnas de la plantilla completa (todas opcionales; "provisto" = trae valor) ──

@@ -22,104 +22,187 @@ class AccountMove(models.Model):
         import io
         import base64
         import xlsxwriter
+        from xlsxwriter.utility import xl_col_to_name
 
-        headers = ["CÓDIGO", "CÓDIGO DE BARRAS", "NOMBRE", "TIPO", "UNIDAD", "PRECIO VENTA", "COSTO", "AFECTACIÓN", "BOLSA", "DETRACCIÓN"]
-        ejemplos = [
-            ["PROD0001", "7751234000018", "CEMENTO SOL 42.5 KG", "BIEN", "UNIDAD", 33.90, 28.00, "GRAVADO", "NO", ""],
-            ["PROD0002", "7751234000025", "FIERRO CORRUGADO 1/2 PULG", "BIEN", "KILOGRAMO", 4.50, 3.20, "GRAVADO", "NO", ""],
-            ["SERV0001", "", "SERVICIO DE CONSULTORÍA", "SERVICIO", "", 150.00, "", "GRAVADO", "NO", ""],
-            ["PROD0004", "", "BOLSA PLÁSTICA", "BIEN", "UNIDAD", 0.50, 0.10, "GRAVADO", "SI", ""],
+        # Plantilla COMPLETA: además del caso común (código/nombre/precio) trae categoría,
+        # subcategoría, marca, control de stock, rastreo, existencia inicial/mínima y activo — para
+        # migrar un catálogo entero de una. Solo CÓDIGO y NOMBRE son obligatorios; el resto es
+        # opcional ("vacío = default al crear / mantener al actualizar"). El parser mapea por NOMBRE
+        # de cabecera, así que el orden es libre y las plantillas viejas (10 columnas) siguen valiendo.
+        headers = [
+            "CÓDIGO", "CÓDIGO DE BARRAS", "NOMBRE",
+            "CATEGORÍA", "SUBCATEGORÍA", "MARCA",
+            "TIPO", "UNIDAD", "CONTROLA STOCK", "RASTREO",
+            "STOCK INICIAL", "STOCK MÍNIMO",
+            "COSTO", "PRECIO VENTA", "INCLUYE IGV",
+            "AFECTACIÓN", "BOLSA", "DETRACCIÓN", "ACTIVO",
         ]
+        col = {h: i for i, h in enumerate(headers)}
+        ejemplos = [
+            ["PROD0001", "7751234000018", "CEMENTO SOL 42.5 KG", "Bazar y hogar", "Ferretería básica", "Sol",
+             "BIEN", "UNIDAD", "Sí", "Sin rastreo", 500, 50, 28.00, 33.90, "Sí", "GRAVADO", "NO", "", "Sí"],
+            ["PROD0002", "7751234000025", "LECHE GLORIA 400 G", "Lácteos y huevos", "Leche", "Gloria",
+             "BIEN", "UNIDAD", "Sí", "Por lote", 300, 24, 3.20, 4.50, "Sí", "GRAVADO", "NO", "", "Sí"],
+            ["SERV0001", "", "SERVICIO DE CONSULTORÍA", "", "", "",
+             "SERVICIO", "", "No", "Sin rastreo", "", "", "", 150.00, "Sí", "GRAVADO", "NO", "", "Sí"],
+            ["PROD0004", "", "BOLSA PLÁSTICA", "Bazar y hogar", "Bolsas", "",
+             "BIEN", "UNIDAD", "No", "Sin rastreo", "", "", 0.10, 0.50, "Sí", "GRAVADO", "SI", "", "Sí"],
+        ]
+        # Listas de REUSO del propio negocio para los desplegables de categoría/subcategoría/marca:
+        # que el usuario elija lo que ya tiene (y no duplique 'Coca Cola' vs 'Coca-Cola'). El árbol se
+        # siembra la primera vez si está vacío. Son sugerencias: también puede escribir una nueva.
+        Cat = self.env["product.category"]
+        root = Cat._l10n_pe_ne_root()
+        deptos = [d.name for d in root.child_id]
+        subcats = sorted({s.name for d in root.child_id for s in d.child_id})
+        marcas = [m.name for m in self.env["l10n_pe_ne.marca"].search([])]
+
         buf = io.BytesIO()
         wb = xlsxwriter.Workbook(buf, {"in_memory": True})
         ws = wb.add_worksheet("Productos")
         head = wb.add_format({"bold": True, "bg_color": "#2563eb", "font_color": "white", "border": 1})
-        # El código de barras se escribe como TEXTO para no perder ceros a la izquierda
-        # ni que Excel lo pase a notación científica (ej. 7.75E+12).
+        # Código de barras y detracción como TEXTO: sus valores empiezan con cero / son largos y
+        # Excel los rompería (ceros perdidos o notación científica 7.75E+12).
         txtfmt = wb.add_format({"num_format": "@"})
         for c, h in enumerate(headers):
             ws.write(0, c, h, head)
-            # DETRACCIÓN también va como TEXTO: sus códigos (027, 019, 022...) empiezan con
-            # cero y Excel se lo comería si la celda quedara en formato numérico.
-            ws.set_column(c, c, max(16, len(h) + 4), txtfmt if c in (1, 9) else None)
+            as_text = h in ("CÓDIGO DE BARRAS", "DETRACCIÓN")
+            ws.set_column(c, c, max(13, len(h) + 3), txtfmt if as_text else None)
         for r, row in enumerate(ejemplos, 1):
             ws.write_row(r, 0, row)
+
+        # Hoja OCULTA con las listas de reuso, referenciada por los desplegables dinámicos.
+        wl = wb.add_worksheet("Listas")
+        for cidx, (titulo, valores) in enumerate([
+            ("CATEGORIAS", deptos), ("SUBCATEGORIAS", subcats), ("MARCAS", marcas)]):
+            wl.write(0, cidx, titulo)
+            for i, v in enumerate(valores, 1):
+                wl.write(i, cidx, v)
+        wl.hide()
+
+        def rango(cidx, n):
+            L = xl_col_to_name(cidx)
+            return "=Listas!$%s$2:$%s$%d" % (L, L, n + 1)
+
+        last = len(ejemplos) + 1000  # el desplegable aplica a un buen rango de filas por llenar
+
+        def dv(nombre, opts):
+            c = col[nombre]
+            ws.data_validation(1, c, last, c, opts)
+
         # Comentarios de ayuda al pasar el mouse por la cabecera (el triangulito rojo).
-        note = {"x_scale": 2.2, "y_scale": 1.8, "author": "Ekipu"}
-        ws.write_comment(0, 1, (
-            "Opcional. El código de barras (EAN) que trae el producto, para escanearlo "
-            "en el POS. Déjalo vacío si el producto no tiene."), note)
-        ws.write_comment(0, 3, (
-            "BIEN o SERVICIO. Un SERVICIO no lleva stock en Odoo y va con unidad ZZ a SUNAT.\n"
-            "Si lo dejas vacío se deduce de la UNIDAD (SERVICIO/ZZ → servicio; el resto → bien)."), note)
-        ws.write_comment(0, 5, "Precio final CON IGV incluido (lo que paga el cliente).", note)
-        ws.write_comment(0, 6, "Opcional. Precio de compra referencial. NO afecta la facturación.", note)
-        ws.write_comment(0, 7, (
-            "Tipo de afectación de IGV. Elígelo del desplegable.\n"
-            "• GRAVADO = con IGV 18% (lo normal)\n"
-            "• EXONERADO / INAFECTO = sin IGV\n"
-            "• EXPORTACION / GRATUITO = casos especiales\n"
-            "Si lo dejas vacío se asume GRAVADO."), note)
-        ws.write_comment(0, 8, (
-            "SI / NO. Márcalo SI solo si el producto es una BOLSA PLÁSTICA: "
-            "cobra el ICBPER (monto fijo por unidad) al venderlo. Vacío = NO."), note)
-        ws.write_comment(0, 9, (
-            "Opcional. Código cat. 54 de SUNAT si el producto está sujeto a detracción "
-            "(ej. 027 transporte de carga). Vacío = no sujeto."), note)
-        # Desplegable (select) BIEN/SERVICIO para TIPO.
-        ws.data_validation(1, 3, 1000, 3, {
-            "validate": "list", "source": ["BIEN", "SERVICIO"],
+        note = {"x_scale": 2.4, "y_scale": 2.0, "author": "Ekipu"}
+        ws.write_comment(0, col["CÓDIGO DE BARRAS"], (
+            "Opcional. El código de barras (EAN) del producto, para escanearlo en el POS. "
+            "Vacío si no tiene. No puede repetirse entre productos."), note)
+        ws.write_comment(0, col["CATEGORÍA"], (
+            "Opcional. Departamento del catálogo (Abarrotes, Bebidas…). Elige uno de la lista "
+            "o escribe uno nuevo: si no existe, se crea."), note)
+        ws.write_comment(0, col["SUBCATEGORÍA"], (
+            "Opcional. Subcategoría dentro de la CATEGORÍA (Arroz, Agua…). Existente o nueva "
+            "(se crea bajo la categoría)."), note)
+        ws.write_comment(0, col["MARCA"], (
+            "Opcional. Marca comercial (Gloria, Sol…). Elige una existente o escribe una nueva; "
+            "se reutiliza para no duplicar."), note)
+        ws.write_comment(0, col["TIPO"], (
+            "BIEN o SERVICIO. Un SERVICIO no lleva stock y va con unidad ZZ a SUNAT.\n"
+            "Vacío = se deduce de la UNIDAD (SERVICIO/ZZ → servicio; el resto → bien)."), note)
+        ws.write_comment(0, col["CONTROLA STOCK"], (
+            "Sí/No. Sí = se le llevan existencias (inventario/kardex). Servicios: No.\n"
+            "Vacío = No al crear."), note)
+        ws.write_comment(0, col["RASTREO"], (
+            "Solo si controla stock. 'Por lote' (alimentos/farmacia) o 'Por serie' (IMEI, uno por "
+            "unidad). Vacío = Sin rastreo."), note)
+        ws.write_comment(0, col["STOCK INICIAL"], (
+            "Opcional y solo al CREAR: existencia con la que arranca el producto (si controla "
+            "stock). Al actualizar se ignora — usa 'Ajustar stock'."), note)
+        ws.write_comment(0, col["STOCK MÍNIMO"], (
+            "Opcional. Umbral de reposición: la app avisa 'bajo mínimo' cuando el stock cae a este "
+            "valor o menos."), note)
+        ws.write_comment(0, col["COSTO"], "Opcional. Precio de compra referencial. NO afecta la facturación.", note)
+        ws.write_comment(0, col["PRECIO VENTA"], "Precio de venta. Por defecto se entiende CON IGV incluido (ver INCLUYE IGV).", note)
+        ws.write_comment(0, col["INCLUYE IGV"], (
+            "Sí = el PRECIO VENTA ya incluye IGV (lo normal, lo que paga el cliente).\n"
+            "No = es sin IGV; se le suma el 18% si la afectación es GRAVADO. Vacío = Sí."), note)
+        ws.write_comment(0, col["AFECTACIÓN"], (
+            "Afectación de IGV. GRAVADO = con IGV 18% (lo normal). EXONERADO/INAFECTO = sin IGV. "
+            "EXPORTACION/GRATUITO = casos especiales. Vacío = GRAVADO."), note)
+        ws.write_comment(0, col["BOLSA"], (
+            "SI solo si es una BOLSA PLÁSTICA (cobra ICBPER por unidad al venderla). "
+            "Para todo lo demás: NO o vacío."), note)
+        ws.write_comment(0, col["DETRACCIÓN"], (
+            "Opcional. Código cat. 54 de SUNAT (3 dígitos, ej. 027 transporte de carga) si el "
+            "producto está sujeto a detracción. Vacío = no sujeto."), note)
+        ws.write_comment(0, col["ACTIVO"], "Sí/No. No = archivado (no aparece en el catálogo ni al emitir). Vacío = Sí.", note)
+
+        # ── Desplegables de valores fijos ──
+        dv("TIPO", {"validate": "list", "source": ["BIEN", "SERVICIO"],
             "input_title": "Bien o servicio",
-            "input_message": (
-                "SERVICIO no lleva stock (va con unidad ZZ a SUNAT); BIEN sí puede llevar.\n"
-                "Vacío = se deduce de la UNIDAD.")})
-        # Desplegable (select) para UNIDAD, con ayuda al hacer clic en la celda. (El bien/servicio va
-        # en la columna TIPO; acá es solo la unidad de medida.)
-        ws.data_validation(1, 4, 1000, 4, {
-            "validate": "list", "source": [
+            "input_message": "SERVICIO no lleva stock (unidad ZZ a SUNAT). Vacío = se deduce de la UNIDAD."})
+        dv("UNIDAD", {"validate": "list", "source": [
                 "UNIDAD", "KILOGRAMO", "GRAMO", "LITRO", "GALON", "CAJA",
                 "METRO", "METRO CUADRADO", "METRO CUBICO", "MILLAR", "DOCENA", "HORA", "DIA"],
             "input_title": "Unidad de medida",
             "input_message": "Elige de la lista o escribe el código SUNAT (NIU, KGM…). Vacío = UNIDAD."})
-        # Desplegable (select) para AFECTACIÓN, con ayuda + alerta suave si no es de la lista.
-        ws.data_validation(1, 7, 1000, 7, {
-            "validate": "list", "source": [
+        dv("CONTROLA STOCK", {"validate": "list", "source": ["Sí", "No"], "error_type": "information",
+            "input_title": "¿Controla stock?",
+            "input_message": "Sí = se le llevan existencias. Servicios: No. Vacío = No."})
+        dv("RASTREO", {"validate": "list", "source": ["Sin rastreo", "Por lote", "Por serie"],
+            "error_type": "information", "input_title": "Rastreo",
+            "input_message": "Solo si controla stock. Por lote / Por serie. Vacío = Sin rastreo."})
+        dv("INCLUYE IGV", {"validate": "list", "source": ["Sí", "No"], "error_type": "information",
+            "input_title": "¿El precio incluye IGV?",
+            "input_message": "Sí = el precio ya trae IGV (lo normal). No = sin IGV (se suma 18% si es GRAVADO). Vacío = Sí."})
+        dv("AFECTACIÓN", {"validate": "list", "source": [
                 "GRAVADO", "EXONERADO", "INAFECTO", "EXPORTACION", "GRATUITO"],
             "input_title": "Afectación de IGV",
-            "input_message": (
-                "GRAVADO = con IGV 18% (lo normal).\n"
-                "EXONERADO / INAFECTO = sin IGV.\n"
-                "Vacío = GRAVADO."),
-            "error_type": "information",
-            "error_title": "Valor sugerido",
+            "input_message": "GRAVADO = con IGV 18%. EXONERADO/INAFECTO = sin IGV. Vacío = GRAVADO.",
+            "error_type": "information", "error_title": "Valor sugerido",
             "error_message": "Usa: GRAVADO, EXONERADO, INAFECTO, EXPORTACION o GRATUITO."})
-        # Desplegable (select) SI/NO para BOLSA (ICBPER).
-        ws.data_validation(1, 8, 1000, 8, {
-            "validate": "list", "source": ["SI", "NO"],
+        dv("BOLSA", {"validate": "list", "source": ["SI", "NO"],
             "input_title": "Bolsa plástica (ICBPER)",
-            "input_message": (
-                "SI solo si es una bolsa plástica: cobra ICBPER por unidad.\n"
-                "Para todo lo demás: NO (o déjalo vacío).")})
+            "input_message": "SI solo si es una bolsa plástica. Para el resto: NO o vacío."})
+        dv("ACTIVO", {"validate": "list", "source": ["Sí", "No"], "error_type": "information",
+            "input_title": "¿Activo?",
+            "input_message": "No = archivado (no aparece). Vacío = Sí."})
+
+        # ── Desplegables DINÁMICOS (reuso del catálogo del negocio; permiten escribir uno nuevo) ──
+        pick = {"error_type": "information", "error_title": "Se creará",
+                "error_message": "Si no está en la lista, se creará al importar."}
+        if deptos:
+            dv("CATEGORÍA", {"validate": "list", "source": rango(0, len(deptos)),
+                "input_title": "Categoría", "input_message": "Elige una existente o escribe una nueva (se crea).", **pick})
+        if subcats:
+            dv("SUBCATEGORÍA", {"validate": "list", "source": rango(1, len(subcats)),
+                "input_title": "Subcategoría", "input_message": "Dentro de la categoría. Existente o nueva (se crea).", **pick})
+        if marcas:
+            dv("MARCA", {"validate": "list", "source": rango(2, len(marcas)),
+                "input_title": "Marca", "input_message": "Existente o nueva (se reutiliza/crea).", **pick})
+
         ws.freeze_panes(1, 0)
         wi = wb.add_worksheet("Instrucciones")
-        wi.set_column(0, 0, 110)
+        wi.set_column(0, 0, 115)
         for r, line in enumerate([
-            "Ekipu — Plantilla de importación de productos",
+            "Ekipu — Plantilla de importación de productos (completa)",
             "",
-            "1. Una fila = un producto. 'CÓDIGO' es la clave: si ya existe, se ACTUALIZA; si no, se CREA.",
-            "   Al ACTUALIZAR, una celda VACÍA MANTIENE el valor actual del producto (no lo borra ni lo resetea).",
-            "2. 'CÓDIGO DE BARRAS' es opcional: el EAN del producto para escanearlo en el POS. No puede repetirse entre productos.",
-            "3. 'NOMBRE' es obligatorio. 'PRECIO VENTA' es el precio final CON IGV incluido.",
-            "4. 'TIPO' (elígelo del desplegable): BIEN o SERVICIO. Un servicio no lleva stock y va con unidad ZZ a SUNAT.",
-            "     Si lo dejas vacío se deduce de la UNIDAD (SERVICIO/ZZ → servicio; el resto → bien).",
-            "5. 'UNIDAD': el nombre (UNIDAD, KILOGRAMO, HORA…) o el código SUNAT (NIU, KGM…). Vacío = UNIDAD (NIU), o ZZ si el TIPO es SERVICIO.",
-            "6. 'AFECTACIÓN' (elígela del desplegable de la celda): define el IGV del producto.",
-            "     • GRAVADO = lleva IGV 18% (la mayoría de productos).  • EXONERADO / INAFECTO = sin IGV.",
-            "     • EXPORTACION / GRATUITO = casos especiales.  Si la dejas vacía se asume GRAVADO.",
-            "7. 'COSTO' es opcional (precio de compra, referencial). No afecta la facturación.",
-            "8. 'BOLSA' = SI solo para bolsas plásticas (cobran ICBPER por unidad al venderlas). Para el resto: NO o vacío.",
-            "9. 'DETRACCIÓN' es opcional: código cat. 54 de SUNAT (3 dígitos, ej. 027 transporte de carga) si el producto está sujeto a detracción. Vacío = no sujeto.",
-            "10. Sube el archivo, revisa el resumen (nuevos / actualizados / errores) y recién ahí confirma.",
+            "Solo CÓDIGO y NOMBRE son obligatorios. Todo lo demás es opcional.",
+            "  • Al CREAR: una celda vacía toma el valor por defecto.",
+            "  • Al ACTUALIZAR (el CÓDIGO ya existe): una celda vacía MANTIENE el valor actual (no lo borra).",
+            "",
+            "1. CÓDIGO es la clave: si ya existe se ACTUALIZA; si no, se CREA.",
+            "2. CÓDIGO DE BARRAS: el EAN para escanear en el POS. No puede repetirse entre productos.",
+            "3. CATEGORÍA / SUBCATEGORÍA: elige del desplegable (tu catálogo) o escribe una nueva — si no existe, se crea.",
+            "4. MARCA: igual; se reutiliza la existente (sin acento/mayúsculas no duplican) o se crea la nueva.",
+            "5. TIPO: BIEN o SERVICIO. Un servicio no lleva stock y va con unidad ZZ a SUNAT. Vacío = se deduce de la UNIDAD.",
+            "6. UNIDAD: el nombre (UNIDAD, KILOGRAMO, HORA…) o el código SUNAT (NIU, KGM…). Vacío = UNIDAD (NIU), o ZZ si es SERVICIO.",
+            "7. CONTROLA STOCK: Sí = se le llevan existencias. RASTREO (Por lote / Por serie) solo aplica si controla stock.",
+            "8. STOCK INICIAL: existencia con la que arranca — SOLO al crear y si controla stock. STOCK MÍNIMO: umbral de aviso de reposición.",
+            "9. COSTO: precio de compra referencial (no factura). PRECIO VENTA: el precio de venta.",
+            "10. INCLUYE IGV: Sí = el precio ya trae IGV (lo normal). No = sin IGV; se le suma 18% si la afectación es GRAVADO.",
+            "11. AFECTACIÓN: GRAVADO (con IGV 18%, lo normal), EXONERADO/INAFECTO (sin IGV), EXPORTACION/GRATUITO. Vacío = GRAVADO.",
+            "12. BOLSA = SI solo para bolsas plásticas (cobran ICBPER). DETRACCIÓN: código cat. 54 (3 dígitos) si aplica.",
+            "13. ACTIVO = No archiva el producto (no aparece en el catálogo ni al emitir).",
+            "14. Sube el archivo, revisa el resumen (nuevos / actualizados / errores) y recién ahí confirma.",
         ]):
             wi.write(r, 0, line)
         wb.close()
@@ -260,6 +343,62 @@ class AccountMove(models.Model):
                 ids += icbper_tax.ids
             return ids
 
+        # get-or-create de categoría/subcategoría y marca por NOMBRE (case-insensitive), para que el
+        # Excel reutilice lo que el negocio ya tiene y no duplique por tipeo. Solo se invoca al
+        # COMMIT (el dry-run no crea nada). Cache por archivo para no repetir búsquedas/altas.
+        Category = self.env["product.category"]
+        Marca = self.env["l10n_pe_ne.marca"]
+        _cat_cache = {}
+        _marca_cache = {}
+
+        def categ_id_de(categoria, subcategoria):
+            """categ_id más específico (subcategoría si vino; si no, la categoría) bajo la raíz
+            'Supermercado', creando lo que falte. None si no vino ninguna."""
+            categoria = (categoria or "").strip()
+            subcategoria = (subcategoria or "").strip()
+            if not categoria and not subcategoria:
+                return None
+            key = (categoria.lower(), subcategoria.lower())
+            if key in _cat_cache:
+                return _cat_cache[key]
+            root = Category._l10n_pe_ne_root()
+            dep = None
+            if categoria:
+                dep = Category.search(
+                    [("name", "=ilike", categoria), ("parent_id", "=", root.id)], limit=1)
+                if not dep:
+                    dep = Category.browse(Category._l10n_pe_ne_crear_bajo_super(categoria)["id"])
+            parent = dep or root
+            target = dep
+            if subcategoria:
+                sub = Category.search(
+                    [("name", "=ilike", subcategoria), ("parent_id", "=", parent.id)], limit=1)
+                if not sub:
+                    sub = Category.browse(Category._l10n_pe_ne_crear_bajo_super(
+                        subcategoria, parent_id=dep.id if dep else None)["id"])
+                target = sub
+            res = target.id if target else None
+            _cat_cache[key] = res
+            return res
+
+        def marca_id_de(marca):
+            marca = (marca or "").strip()
+            if not marca:
+                return None
+            k = marca.lower()
+            if k not in _marca_cache:
+                _marca_cache[k] = Marca.l10n_pe_ne_crear_marca(marca)["id"]
+            return _marca_cache[k]
+
+        def precio_con_igv(precio, incluye_igv, afe_code):
+            """El catálogo guarda list_price CON IGV. Si el usuario declaró el precio SIN IGV
+            (INCLUYE IGV = No), se le suma el 18% solo cuando la afectación es GRAVADO."""
+            if precio is None:
+                return None
+            if incluye_igv or afe_code != "1000":
+                return precio
+            return round(precio * 1.18, 6)
+
         creados = actualizados = 0
         errores = []
         avisos = []
@@ -308,8 +447,34 @@ class AccountMove(models.Model):
                 errores.append({"fila": n, "msg": "DETRACCIÓN debe ser el código de 3 dígitos del catálogo 54 (ej. 027) o vacío"})
                 continue
             barcode = txt(cell(row, "codigo de barras"))
+            # ── Columnas de la plantilla completa (todas opcionales; "provisto" = trae valor) ──
+            categoria = txt(cell(row, "categoria"))
+            subcategoria = txt(cell(row, "subcategoria"))
+            marca = txt(cell(row, "marca"))
+            ctrl_raw = norm(cell(row, "controla stock"))
+            ctrl_provisto = bool(ctrl_raw)
+            controla_stock = ctrl_raw in ("si", "s", "sí", "true", "1", "x")
+            ras_raw = norm(cell(row, "rastreo"))
+            ras_provisto = bool(ras_raw)
+            if "lote" in ras_raw or "lot" in ras_raw:
+                rastreo_val = "lote"
+            elif "serie" in ras_raw or "serial" in ras_raw or "imei" in ras_raw:
+                rastreo_val = "serie"
+            else:
+                rastreo_val = ""  # sin rastreo / ninguno
+            s_inicial = num(cell(row, "stock inicial"))
+            s_minimo = num(cell(row, "stock minimo"))
+            if s_inicial == "ERROR" or s_minimo == "ERROR":
+                errores.append({"fila": n, "msg": "STOCK INICIAL o STOCK MÍNIMO no es un número válido"})
+                continue
+            act_raw = norm(cell(row, "activo"))
+            act_provisto = bool(act_raw)
+            activo = act_raw not in ("no", "n", "false", "0")  # vacío/ Sí → activo
+            igv_raw = norm(cell(row, "incluye igv"))
+            incluye_igv = igv_raw not in ("no", "n", "false", "0")  # vacío = Sí (con IGV)
+            precio = precio_con_igv(precio, incluye_igv, afe_code)
 
-            existing = Product.search([("default_code", "=", cod)], limit=1)
+            existing = Product.with_context(active_test=False).search([("default_code", "=", cod)], limit=1)
             # El código de barras no puede pertenecer a OTRO producto (Odoo lo exige único).
             if barcode:
                 dup = Product.search([("barcode", "=", barcode)], limit=1)
@@ -349,7 +514,24 @@ class AccountMove(models.Model):
                     vals["taxes_id"] = [(6, 0, tax_ids_de(
                         afe_code if afe_provisto else cur_afe,
                         bolsa if bolsa_provisto else cur_bolsa))]
+                if ctrl_provisto:
+                    vals["is_storable"] = controla_stock
+                if ras_provisto:
+                    vals["tracking"] = self._l10n_pe_ne_rastreo_producto(rastreo_val)
+                if s_minimo is not None:
+                    vals["l10n_pe_ne_stock_minimo"] = s_minimo
+                if act_provisto:
+                    vals["active"] = activo
+                cat_id = categ_id_de(categoria, subcategoria)
+                if cat_id:
+                    vals["categ_id"] = cat_id
+                mid = marca_id_de(marca)
+                if mid:
+                    vals["l10n_pe_ne_marca_id"] = mid
                 existing.write(vals)
+                # STOCK INICIAL solo tiene sentido al CREAR (fijaría el stock, pisando el real).
+                if s_inicial is not None and s_inicial > 0:
+                    avisos.append({"fila": n, "msg": "STOCK INICIAL ignorado: '%s' ya existe (usa Ajustar stock)" % cod})
                 if not repetido:
                     actualizados += 1
             else:
@@ -367,7 +549,25 @@ class AccountMove(models.Model):
                     vals["l10n_pe_ne_detraccion_cod"] = detra_raw
                 if barcode:
                     vals["barcode"] = barcode
-                Product.create(vals)
+                if ctrl_provisto:
+                    vals["is_storable"] = controla_stock
+                if ras_provisto:
+                    vals["tracking"] = self._l10n_pe_ne_rastreo_producto(rastreo_val)
+                if s_minimo is not None:
+                    vals["l10n_pe_ne_stock_minimo"] = s_minimo
+                if act_provisto:
+                    vals["active"] = activo
+                cat_id = categ_id_de(categoria, subcategoria)
+                if cat_id:
+                    vals["categ_id"] = cat_id
+                mid = marca_id_de(marca)
+                if mid:
+                    vals["l10n_pe_ne_marca_id"] = mid
+                p = Product.create(vals)
+                # Existencia inicial: solo si el producto lleva stock y vino > 0 (reusa el motor de
+                # ajuste 'fijar', que deja el stock EN esa cantidad).
+                if s_inicial and s_inicial > 0 and vals.get("is_storable"):
+                    self._l10n_pe_ne_ajustar_stock(p.id, "fijar", s_inicial, _("Existencia inicial (importación)"))
                 if not repetido:
                     creados += 1
         return {"commit": commit, "creados": creados, "actualizados": actualizados,

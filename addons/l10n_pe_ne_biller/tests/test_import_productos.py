@@ -124,3 +124,56 @@ class TestImportProductos(TransactionCase):
             ["CÓDIGO", "NOMBRE", "PRECIO VENTA"],
             [["DRY", "A", 10], ["DRY", "B", 20]], commit=False)
         self.assertEqual(res["creados"], 1)
+
+    # -- plantilla completa: categoría/marca, stock, incluye igv, activo ------
+    def test_categoria_subcategoria_marca_get_or_create(self):
+        """CATEGORÍA/SUBCATEGORÍA/MARCA por nombre: crea lo que falta bajo el árbol y reutiliza
+        (case-insensitive) sin duplicar entre productos."""
+        res = self._import(
+            ["CÓDIGO", "NOMBRE", "PRECIO VENTA", "CATEGORÍA", "SUBCATEGORÍA", "MARCA"],
+            [["CM-1", "SHAMPOO X", 10, "Cuidado personal", "Shampoo Import", "MarcaZ"],
+             ["CM-2", "SHAMPOO Y", 12, "cuidado personal", "shampoo import", "marcaz"]])
+        self.assertFalse(res.get("errores"), res)
+        p1, p2 = self._get("CM-1"), self._get("CM-2")
+        # Ambos caen en la MISMA subcategoría (no se duplicó por mayúsculas/acentos)…
+        self.assertTrue(p1.categ_id)
+        self.assertEqual(p1.categ_id, p2.categ_id)
+        self.assertEqual(p1.categ_id.name, "Shampoo Import")
+        # El departamento se REUSA case-insensitive (la BD puede tenerlo como "Cuidado Personal").
+        self.assertEqual(p1.categ_id.parent_id.name.lower(), "cuidado personal")
+        # …y en la misma marca.
+        self.assertTrue(p1.l10n_pe_ne_marca_id)
+        self.assertEqual(p1.l10n_pe_ne_marca_id, p2.l10n_pe_ne_marca_id)
+        self.assertEqual(
+            self.env["l10n_pe_ne.marca"].search_count([("name", "=ilike", "marcaz")]), 1)
+
+    def test_incluye_igv_no_suma_igv_solo_si_gravado(self):
+        """INCLUYE IGV = No → el precio viene SIN IGV: +18% si es GRAVADO, tal cual si no."""
+        res = self._import(
+            ["CÓDIGO", "NOMBRE", "PRECIO VENTA", "INCLUYE IGV", "AFECTACIÓN"],
+            [["IGV-G", "GRAV", 100, "No", "GRAVADO"],
+             ["IGV-E", "EXO", 100, "No", "EXONERADO"],
+             ["IGV-S", "CONIGV", 118, "Sí", "GRAVADO"]])
+        self.assertFalse(res.get("errores"), res)
+        self.assertEqual(self._get("IGV-G").list_price, 118.0)   # gravado → +18%
+        self.assertEqual(self._get("IGV-E").list_price, 100.0)   # exonerado → sin cambio
+        self.assertEqual(self._get("IGV-S").list_price, 118.0)   # ya con IGV → tal cual
+
+    def test_controla_stock_minimo_y_rastreo(self):
+        res = self._import(
+            ["CÓDIGO", "NOMBRE", "PRECIO VENTA", "CONTROLA STOCK", "STOCK MÍNIMO", "RASTREO"],
+            [["ST-1", "CLAVO", 5, "Sí", 8, "Por lote"]])
+        self.assertFalse(res.get("errores"), res)
+        p = self._get("ST-1")
+        self.assertTrue(p.is_storable)
+        self.assertEqual(p.l10n_pe_ne_stock_minimo, 8.0)
+        self.assertEqual(p.tracking, "lot")
+
+    def test_activo_no_archiva_el_producto(self):
+        res = self._import(
+            ["CÓDIGO", "NOMBRE", "PRECIO VENTA", "ACTIVO"],
+            [["ACT-N", "ARCHIVADO", 5, "No"], ["ACT-S", "VIGENTE", 5, "Sí"]])
+        self.assertFalse(res.get("errores"), res)
+        self.assertFalse(self.Product.with_context(active_test=False).search(
+            [("default_code", "=", "ACT-N")]).active)
+        self.assertTrue(self._get("ACT-S").active)

@@ -1477,6 +1477,22 @@ class L10nPeNeApi(http.Controller):
             return self._unauth()
         return self._run(lambda: self._move(uid).l10n_pe_ne_importar_clientes(self._body()))
 
+    @http.route("/ne/api/import/preparar", **_POST)
+    def import_preparar(self, **kw):
+        """Sube el archivo UNA vez y devuelve un token. Body {kind, contentB64}."""
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(lambda: self._move(uid).l10n_pe_ne_import_preparar(self._body()))
+
+    @http.route("/ne/api/import/lote", **_POST)
+    def import_lote(self, **kw):
+        """Procesa un lote del archivo ya subido. Body {token, commit, offset}."""
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(lambda: self._move(uid).l10n_pe_ne_import_lote(self._body()))
+
     @http.route("/ne/api/productos/<int:rec_id>", **_PUT)
     def update_producto(self, rec_id, **kw):
         uid = self._identify()

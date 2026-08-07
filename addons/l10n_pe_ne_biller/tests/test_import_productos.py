@@ -17,7 +17,7 @@ class TestImportProductos(TransactionCase):
         self.Move = self.env['account.move']
         self.Product = self.env['product.product']
 
-    def _import(self, headers, rows, commit=True):
+    def _xlsx(self, headers, rows):
         buf = io.BytesIO()
         wb = xlsxwriter.Workbook(buf, {"in_memory": True})
         ws = wb.add_worksheet("Productos")
@@ -25,8 +25,11 @@ class TestImportProductos(TransactionCase):
         for i, row in enumerate(rows, 1):
             ws.write_row(i, 0, row)
         wb.close()
+        return base64.b64encode(buf.getvalue()).decode()
+
+    def _import(self, headers, rows, commit=True):
         return self.Move.l10n_pe_ne_importar_productos({
-            "contentB64": base64.b64encode(buf.getvalue()).decode(), "commit": commit})
+            "contentB64": self._xlsx(headers, rows), "commit": commit})
 
     def _get(self, cod):
         return self.Product.search([('default_code', '=', cod)], limit=1)
@@ -124,6 +127,49 @@ class TestImportProductos(TransactionCase):
             ["CÓDIGO", "NOMBRE", "PRECIO VENTA"],
             [["DRY", "A", 10], ["DRY", "B", 20]], commit=False)
         self.assertEqual(res["creados"], 1)
+
+    # -- procesamiento por lotes (offset/limit) + aviso de nombre repetido -----
+    def test_lotes_offset_limit_y_total_filas(self):
+        """Con offset/limit procesa solo la tanda; totalFilas informa el total del archivo, para
+        que el front pagine sin chocar con el timeout del gateway (504)."""
+        rows = [["LOTE-%02d" % i, "P%d" % i, 10] for i in range(6)]
+        r0 = self._import(["CÓDIGO", "NOMBRE", "PRECIO VENTA"], rows, commit=False)
+        self.assertEqual(r0["totalFilas"], 6)
+        # Primer lote de 4: procesa 4 (todas nuevas en dry-run).
+        r1 = self.Move.l10n_pe_ne_importar_productos({
+            "contentB64": self._xlsx(["CÓDIGO", "NOMBRE", "PRECIO VENTA"], rows),
+            "commit": False, "offset": 0, "limit": 4})
+        self.assertEqual(r1["creados"], 4)
+        self.assertEqual(r1["totalFilas"], 6)
+        # Segundo lote: las 2 restantes.
+        r2 = self.Move.l10n_pe_ne_importar_productos({
+            "contentB64": self._xlsx(["CÓDIGO", "NOMBRE", "PRECIO VENTA"], rows),
+            "commit": False, "offset": 4, "limit": 4})
+        self.assertEqual(r2["creados"], 2)
+
+    def test_preparar_token_y_lote_avanza_hasta_done(self):
+        """parse-once: preparar guarda el archivo bajo un token; lote() procesa por tandas
+        avanzando por nextOffset hasta done, sin re-subir el archivo."""
+        b64 = self._xlsx(["CÓDIGO", "NOMBRE", "PRECIO VENTA"],
+                         [["TK-%02d" % i, "P%d" % i, 10] for i in range(5)])
+        prep = self.Move.l10n_pe_ne_import_preparar({"kind": "productos", "contentB64": b64})
+        self.assertTrue(prep["token"])
+        self.assertEqual(prep["totalFilas"], 5)
+        off, creados, guard = 0, 0, 0
+        while True:
+            rep = self.Move.l10n_pe_ne_import_lote({"token": prep["token"], "commit": True, "offset": off})
+            creados += rep["creados"]; off = rep["nextOffset"]; guard += 1
+            if rep["done"] or guard > 50:
+                break
+        self.assertEqual(creados, 5)
+        self.assertTrue(self._get("TK-00"))
+
+    def test_aviso_nombre_repetido_no_bloquea(self):
+        res = self._import(["CÓDIGO", "NOMBRE", "PRECIO VENTA"],
+                           [["NR-1", "Yogurt X", 10], ["NR-2", "Yogurt X", 12], ["NR-3", "Otro", 5]])
+        self.assertFalse(res.get("errores"), res)          # no bloquea
+        self.assertEqual(res["creados"], 3)                 # los 3 se crean (código distinto)
+        self.assertTrue(any("se repiten" in a["msg"] for a in res["avisos"]), res)
 
     # -- plantilla completa: categoría/marca, stock, incluye igv, activo ------
     def test_categoria_subcategoria_marca_get_or_create(self):

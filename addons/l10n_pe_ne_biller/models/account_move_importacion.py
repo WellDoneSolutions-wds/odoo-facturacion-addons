@@ -628,3 +628,189 @@ class AccountMove(models.Model):
                 "errores": errores, "avisos": avisos,
                 "totalOk": creados + actualizados, "totalError": len(errores)}
 
+    # ------------------------------------------------------- importación clientes
+    @api.model
+    def l10n_pe_ne_plantilla_clientes(self):
+        """Plantilla xlsx para importar/actualizar clientes (los campos del caso común de
+        facturación). Hoja 'Clientes' con cabeceras + ejemplos + desplegable de tipo de documento,
+        y una hoja 'Instrucciones'. Devuelve {filename, contentB64}."""
+        import io
+        import base64
+        import xlsxwriter
+
+        headers = ["TIPO DE DOCUMENTO", "NÚMERO DE DOCUMENTO", "RAZÓN SOCIAL O NOMBRE",
+                   "EMAIL", "TELÉFONO", "DIRECCIÓN"]
+        col = {h: i for i, h in enumerate(headers)}
+        ejemplos = [
+            ["RUC", "20123456789", "COMERCIAL LOS ANDES S.A.C.", "ventas@losandes.pe", "01 555 1234", "Av. Industrial 123, Lima"],
+            ["DNI", "12345678", "JUAN PÉREZ QUISPE", "", "987654321", ""],
+            ["Carné de extranjería", "001234567", "MARÍA GARCÍA", "maria@correo.com", "", "Calle Las Flores 456"],
+        ]
+        buf = io.BytesIO()
+        wb = xlsxwriter.Workbook(buf, {"in_memory": True})
+        ws = wb.add_worksheet("Clientes")
+        head = wb.add_format({"bold": True, "bg_color": "#2563eb", "font_color": "white", "border": 1})
+        # El número de documento va como TEXTO: los DNI/CE pueden empezar con cero y Excel se los
+        # comería, y un RUC de 11 dígitos se iría a notación científica en formato numérico.
+        txtfmt = wb.add_format({"num_format": "@"})
+        for c, h in enumerate(headers):
+            ws.write(0, c, h, head)
+            ws.set_column(c, c, max(16, len(h) + 4), txtfmt if h == "NÚMERO DE DOCUMENTO" else None)
+        for r, row in enumerate(ejemplos, 1):
+            ws.write_row(r, 0, row)
+        note = {"x_scale": 2.4, "y_scale": 1.8, "author": "Ekipu"}
+        ws.write_comment(0, col["TIPO DE DOCUMENTO"], (
+            "Elige del desplegable: RUC, DNI, Carné de extranjería o Pasaporte. Si lo dejas vacío "
+            "se deduce del NÚMERO (11 dígitos → RUC, 8 → DNI)."), note)
+        ws.write_comment(0, col["NÚMERO DE DOCUMENTO"], (
+            "Obligatorio. Es la CLAVE: si ya existe un cliente con ese documento, se ACTUALIZA; si "
+            "no, se CREA. RUC = 11 dígitos, DNI = 8."), note)
+        ws.write_comment(0, col["RAZÓN SOCIAL O NOMBRE"], "Obligatorio. La razón social (empresa) o el nombre de la persona.", note)
+        ws.write_comment(0, col["DIRECCIÓN"], "Opcional. Domicilio del cliente (se usa en el comprobante).", note)
+        # Desplegable de tipo de documento.
+        ws.data_validation(1, col["TIPO DE DOCUMENTO"], 1005, col["TIPO DE DOCUMENTO"], {
+            "validate": "list", "source": ["RUC", "DNI", "Carné de extranjería", "Pasaporte"],
+            "error_type": "information", "input_title": "Tipo de documento",
+            "input_message": "RUC (empresa, 11 díg.), DNI (persona, 8 díg.), Carné de extranjería o "
+                             "Pasaporte. Vacío = se deduce del número."})
+        ws.freeze_panes(1, 0)
+        wi = wb.add_worksheet("Instrucciones")
+        wi.set_column(0, 0, 115)
+        for r, line in enumerate([
+            "Ekipu — Plantilla de importación de clientes",
+            "",
+            "Obligatorios: TIPO DE DOCUMENTO (o se deduce del número), NÚMERO DE DOCUMENTO y RAZÓN SOCIAL O NOMBRE.",
+            "",
+            "1. NÚMERO DE DOCUMENTO es la clave: si ya existe un cliente con ese documento se ACTUALIZA; si no, se CREA.",
+            "   Al ACTUALIZAR, una celda vacía MANTIENE el valor actual (no lo borra).",
+            "2. TIPO DE DOCUMENTO: elige del desplegable. Vacío = se deduce (11 dígitos → RUC, 8 → DNI).",
+            "3. RUC = 11 dígitos; DNI = 8 dígitos. Carné de extranjería / Pasaporte: tal como figura.",
+            "4. EMAIL, TELÉFONO y DIRECCIÓN son opcionales. La dirección se usa en el comprobante.",
+            "5. Sube el archivo, revisa el resumen (nuevos / actualizados / errores) y recién ahí confirma.",
+        ]):
+            wi.write(r, 0, line)
+        wb.close()
+        return {"filename": "plantilla-clientes-ekipu.xlsx",
+                "contentB64": base64.b64encode(buf.getvalue()).decode("ascii")}
+
+    @api.model
+    def l10n_pe_ne_importar_clientes(self, payload):
+        """Importa/actualiza clientes desde el xlsx. payload = {contentB64, commit}. UPSERT por
+        NÚMERO DE DOCUMENTO (vat). commit=False → dry-run (no escribe). Aislado por compañía."""
+        import io
+        import base64
+        import unicodedata
+
+        payload = payload or {}
+        commit = bool(payload.get("commit"))
+        try:
+            data = base64.b64decode(payload.get("contentB64") or "")
+        except Exception:
+            raise UserError(_("Archivo inválido."))
+        import openpyxl
+        try:
+            wb = openpyxl.load_workbook(io.BytesIO(data), data_only=True, read_only=True)
+        except Exception:
+            raise UserError(_("No se pudo leer el archivo. Sube un .xlsx válido (no un .xls antiguo)."))
+        ws = wb["Clientes"] if "Clientes" in wb.sheetnames else wb[wb.sheetnames[0]]
+        rows = list(ws.iter_rows(values_only=True))
+        if not rows:
+            raise UserError(_("El archivo está vacío."))
+
+        def norm(h):
+            s = unicodedata.normalize("NFKD", str(h or "")).encode("ascii", "ignore").decode("ascii")
+            return " ".join(s.lower().split())
+
+        header = [norm(h) for h in rows[0]]
+        idx = {h: i for i, h in enumerate(header) if h}
+        faltan = [etq for etq, k in (("NÚMERO DE DOCUMENTO", "numero de documento"),
+                                     ("RAZÓN SOCIAL O NOMBRE", "razon social o nombre")) if k not in idx]
+        if faltan:
+            raise UserError(_("Faltan columnas obligatorias: %s. Usa la plantilla.") % ", ".join(faltan))
+
+        def cell(row, name):
+            i = idx.get(name)
+            return row[i] if i is not None and i < len(row) else None
+
+        def txt(v):
+            if v is None:
+                return ""
+            if isinstance(v, float) and v.is_integer():
+                return str(int(v))
+            return str(v).strip()
+
+        # Etiqueta del desplegable / código del catálogo → l10n_pe_vat_code (6 RUC, 1 DNI, 4 CE, 7 pas).
+        TDOC = {
+            "ruc": "6", "dni": "1", "pasaporte": "7", "carne de extranjeria": "4",
+            "carnet de extranjeria": "4", "ce": "4", "6": "6", "1": "1", "4": "4", "7": "7",
+        }
+        Partner = self.env["res.partner"]
+        company = self.env.company
+        creados = actualizados = 0
+        errores = []
+        avisos = []
+        vistos = {}
+        for n, row in enumerate(rows[1:], start=2):
+            if row is None or all(c is None or str(c).strip() == "" for c in row):
+                continue
+            num = txt(cell(row, "numero de documento"))
+            nombre = txt(cell(row, "razon social o nombre"))
+            if not num:
+                errores.append({"fila": n, "msg": "Falta el NÚMERO DE DOCUMENTO"})
+                continue
+            if not nombre:
+                errores.append({"fila": n, "msg": "Falta la RAZÓN SOCIAL O NOMBRE"})
+                continue
+            code = TDOC.get(norm(cell(row, "tipo de documento")), "")
+            if not code:  # deducir del número si no vino el tipo
+                if re.fullmatch(r"\d{11}", num):
+                    code = "6"
+                elif re.fullmatch(r"\d{8}", num):
+                    code = "1"
+                else:
+                    errores.append({"fila": n, "msg": "Indica el TIPO DE DOCUMENTO (RUC/DNI/Carné de extranjería/Pasaporte)"})
+                    continue
+            if code == "6" and not re.fullmatch(r"\d{11}", num):
+                errores.append({"fila": n, "msg": "El RUC debe tener 11 dígitos"})
+                continue
+            if code == "1" and not re.fullmatch(r"\d{8}", num):
+                errores.append({"fila": n, "msg": "El DNI debe tener 8 dígitos"})
+                continue
+            repetido = num in vistos
+            if repetido:
+                avisos.append({"fila": n, "msg": "Documento '%s' repetido (ya venía en la fila %d); vale la última fila" % (num, vistos[num])})
+            else:
+                vistos[num] = n
+            existing = Partner.with_context(active_test=False).search(
+                [("vat", "=", num), ("company_id", "in", (False, company.id))], limit=1)
+            if not commit:
+                if not repetido:
+                    actualizados += 1 if existing else 0
+                    creados += 0 if existing else 1
+                continue
+            # "vacío = mantener": solo se envían a _partner_apply los campos que trajeron valor.
+            c = {"razonSocial": nombre, "numDoc": num, "tipoDoc": code}
+            for key, name in (("email", "email"), ("telefono", "telefono"), ("direccion", "direccion")):
+                v = txt(cell(row, name))
+                if v:
+                    c[key] = v
+            if existing:
+                self._l10n_pe_ne_partner_apply(existing, c)
+                if not existing.customer_rank:
+                    existing.customer_rank = 1
+                if not repetido:
+                    actualizados += 1
+            else:
+                t = self._l10n_pe_ne_ident_type(code)
+                p = Partner.create({
+                    "name": nombre, "vat": num, "customer_rank": 1, "company_id": company.id,
+                    "l10n_latam_identification_type_id": t.id if t else False,
+                })
+                self._l10n_pe_ne_partner_apply(p, {k: v for k, v in c.items()
+                                                   if k in ("email", "telefono", "direccion")})
+                if not repetido:
+                    creados += 1
+        return {"commit": commit, "creados": creados, "actualizados": actualizados,
+                "errores": errores, "avisos": avisos,
+                "totalOk": creados + actualizados, "totalError": len(errores)}
+

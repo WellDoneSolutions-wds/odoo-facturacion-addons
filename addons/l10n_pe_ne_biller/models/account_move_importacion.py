@@ -449,11 +449,38 @@ class AccountMove(models.Model):
                 return precio
             return round(precio * 1.18, 6)
 
+        # Procesamiento POR LOTES (evita el 504 del gateway con archivos grandes): el front sube en
+        # tandas con offset/limit y agrega el reporte; `totalFilas` le dice cuántas quedan. Cada lote
+        # es una transacción atómica y, como el UPSERT es por CÓDIGO, reintentar un lote no duplica.
+        data_rows = rows[1:]
+        total_filas = len(data_rows)
+        offset = max(0, int(payload.get("offset") or 0))
+        limit = int(payload.get("limit") or 0)
+        sub = data_rows[offset:offset + limit] if limit > 0 else data_rows[offset:]
+
+        # Prefetch del lote en 2 consultas (no una por fila): existentes por código y por barcode.
+        cods_lote = {txt(cell(r, "codigo")) for r in sub if txt(cell(r, "codigo"))}
+        bars_lote = {txt(cell(r, "codigo de barras")) for r in sub if txt(cell(r, "codigo de barras"))}
+        pre_cod = {p.default_code: p for p in Product.with_context(active_test=False).search(
+            [("default_code", "in", list(cods_lote))])} if cods_lote else {}
+        pre_bar = {p.barcode: p for p in Product.search(
+            [("barcode", "in", list(bars_lote))])} if bars_lote else {}
+
         creados = actualizados = 0
         errores = []
         avisos = []
-        vistos = {}  # CÓDIGO → fila donde apareció por primera vez (duplicados dentro del archivo)
-        for n, row in enumerate(rows[1:], start=2):
+        vistos = {}  # CÓDIGO → fila donde apareció por primera vez (duplicados DENTRO del lote)
+        # Aviso (no bloqueante) de NOMBRE repetido: se calcula sobre TODO el archivo y se reporta UNA
+        # vez (en el primer lote). Nombres iguales con CÓDIGO distinto = productos DISTINTOS por diseño;
+        # solo se avisa por si fue sin querer (higiene de catálogo).
+        if offset == 0:
+            from collections import Counter
+            noms = Counter(txt(cell(r, "nombre")) for r in data_rows if txt(cell(r, "nombre")))
+            reps = sorted(nom for nom, c in noms.items() if c > 1)
+            if reps:
+                avisos.append({"fila": 0, "msg": "%d nombre(s) se repiten en el archivo (p. ej. %s) — se importan como productos DISTINTOS por tener código distinto; revisa si fue intencional" % (len(reps), ", ".join(reps[:3]))})
+        for k, row in enumerate(sub):
+            n = k + 2 + offset  # número de fila real en la hoja (1 = cabecera)
             if row is None or all(c is None or str(c).strip() == "" for c in row):
                 continue
             cod = txt(cell(row, "codigo"))
@@ -528,10 +555,10 @@ class AccountMove(models.Model):
             incluye_igv = igv_raw not in ("no", "n", "false", "0")  # vacío = Sí (con IGV)
             precio = precio_con_igv(precio, incluye_igv, afe_code)
 
-            existing = Product.with_context(active_test=False).search([("default_code", "=", cod)], limit=1)
+            existing = pre_cod.get(cod) or Product.browse()
             # El código de barras no puede pertenecer a OTRO producto (Odoo lo exige único).
             if barcode:
-                dup = Product.search([("barcode", "=", barcode)], limit=1)
+                dup = pre_bar.get(barcode)
                 if dup and dup.id != existing.id:
                     errores.append({"fila": n, "msg": "El código de barras '%s' ya pertenece a otro producto" % barcode})
                     continue
@@ -618,6 +645,11 @@ class AccountMove(models.Model):
                 if mid:
                     vals["l10n_pe_ne_marca_id"] = mid
                 p = Product.create(vals)
+                # Registra el recién creado en la cache del lote: si el mismo CÓDIGO/barcode vuelve
+                # a aparecer en este lote, se ACTUALIZA (no se crea un duplicado).
+                pre_cod[cod] = p
+                if barcode:
+                    pre_bar[barcode] = p
                 # Existencia inicial: solo si el producto lleva stock y vino > 0 (reusa el motor de
                 # ajuste 'fijar', que deja el stock EN esa cantidad).
                 if s_inicial and s_inicial > 0 and vals.get("is_storable"):
@@ -626,7 +658,8 @@ class AccountMove(models.Model):
                     creados += 1
         return {"commit": commit, "creados": creados, "actualizados": actualizados,
                 "errores": errores, "avisos": avisos,
-                "totalOk": creados + actualizados, "totalError": len(errores)}
+                "totalOk": creados + actualizados, "totalError": len(errores),
+                "totalFilas": total_filas}
 
     # ------------------------------------------------------- importación clientes
     @api.model
@@ -746,11 +779,23 @@ class AccountMove(models.Model):
         }
         Partner = self.env["res.partner"]
         company = self.env.company
+        # Procesamiento POR LOTES (evita el 504): el front sube en tandas con offset/limit; `totalFilas`
+        # le dice cuántas quedan. UPSERT por documento → reintentar un lote no duplica.
+        data_rows = rows[1:]
+        total_filas = len(data_rows)
+        offset = max(0, int(payload.get("offset") or 0))
+        limit = int(payload.get("limit") or 0)
+        sub = data_rows[offset:offset + limit] if limit > 0 else data_rows[offset:]
+        # Prefetch de existentes por documento (vat) en una sola consulta.
+        docs_lote = {txt(cell(r, "numero de documento")) for r in sub if txt(cell(r, "numero de documento"))}
+        pre_doc = {p.vat: p for p in Partner.with_context(active_test=False).search(
+            [("vat", "in", list(docs_lote)), ("company_id", "in", (False, company.id))])} if docs_lote else {}
         creados = actualizados = 0
         errores = []
         avisos = []
         vistos = {}
-        for n, row in enumerate(rows[1:], start=2):
+        for k, row in enumerate(sub):
+            n = k + 2 + offset  # número de fila real en la hoja
             if row is None or all(c is None or str(c).strip() == "" for c in row):
                 continue
             num = txt(cell(row, "numero de documento"))
@@ -781,8 +826,7 @@ class AccountMove(models.Model):
                 avisos.append({"fila": n, "msg": "Documento '%s' repetido (ya venía en la fila %d); vale la última fila" % (num, vistos[num])})
             else:
                 vistos[num] = n
-            existing = Partner.with_context(active_test=False).search(
-                [("vat", "=", num), ("company_id", "in", (False, company.id))], limit=1)
+            existing = pre_doc.get(num) or Partner.browse()
             if not commit:
                 if not repetido:
                     actualizados += 1 if existing else 0
@@ -808,9 +852,11 @@ class AccountMove(models.Model):
                 })
                 self._l10n_pe_ne_partner_apply(p, {k: v for k, v in c.items()
                                                    if k in ("email", "telefono", "direccion")})
+                pre_doc[num] = p  # el mismo documento repetido en el lote ACTUALIZA, no duplica
                 if not repetido:
                     creados += 1
         return {"commit": commit, "creados": creados, "actualizados": actualizados,
                 "errores": errores, "avisos": avisos,
-                "totalOk": creados + actualizados, "totalError": len(errores)}
+                "totalOk": creados + actualizados, "totalError": len(errores),
+                "totalFilas": total_filas}
 

@@ -730,6 +730,9 @@ class AccountMove(models.Model):
                 "total": m.amount_total,
                 "moneda": m.currency_id.name or "PEN",
                 "cliente": m.partner_id.name or "",
+                # Documento del cliente (RUC/DNI/CE/pasaporte) para mostrarlo bajo el nombre en la
+                # lista — identifica al cliente y distingue homónimos. Misma fuente que el detalle.
+                "clienteDoc": m.partner_id.vat or "",
                 "fechaEmision": m.invoice_date.strftime("%Y-%m-%d")
                 if m.invoice_date
                 else "",

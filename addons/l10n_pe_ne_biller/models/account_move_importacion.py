@@ -21,6 +21,7 @@ class AccountMove(models.Model):
         Devuelve {filename, contentB64}. Mismo estilo visual que la plantilla de la masiva."""
         import io
         import base64
+        import unicodedata
         import xlsxwriter
         from xlsxwriter.utility import xl_col_to_name
 
@@ -55,6 +56,9 @@ class AccountMove(models.Model):
         root = Cat._l10n_pe_ne_root()
         deptos = [d.name for d in root.child_id]
         subcats = sorted({s.name for d in root.child_id for s in d.child_id})
+        # Mapa categoría → sus subcategorías, para el desplegable DEPENDIENTE (la subcategoría
+        # muestra solo las de la categoría elegida) vía rangos con nombre + INDIRECT.
+        cat_subs = [(d.name, [s.name for s in d.child_id]) for d in root.child_id]
         marcas = [m.name for m in self.env["l10n_pe_ne.marca"].search([])]
         detras = ["%s · %s" % (c, d) for c, d in DETRACCION_DESC.items()]
 
@@ -80,6 +84,32 @@ class AccountMove(models.Model):
             wl.write(0, cidx, titulo)
             for i, v in enumerate(valores, 1):
                 wl.write(i, cidx, v)
+        # Una columna por categoría (a partir de la F) con SUS subcategorías, y un rango con nombre
+        # por categoría, para que la SUBCATEGORÍA se filtre por la CATEGORÍA elegida (INDIRECT).
+        # El nombre de rango de Excel no admite espacios (sí acentos): espacio / '/' / '-' → '_';
+        # el mismo reemplazo se hace en la fórmula, así ambos lados coinciden.
+        def nombre_rango(cat):
+            # Nombre de rango de Excel: sin acentos (á→a) y con espacio / '/' / '-' → '_', 1:1 con la
+            # fórmula INDIRECT. Cualquier otro char no válido se descarta (esa categoría no filtra,
+            # pero no rompe la generación). No colapsa separadores, para calzar exacto con la fórmula.
+            s = unicodedata.normalize("NFKD", (cat or "").strip()).encode("ascii", "ignore").decode("ascii")
+            for ch in (" ", "/", "-"):
+                s = s.replace(ch, "_")
+            s = "".join(c for c in s if c.isalnum() or c == "_")
+            return "cat_" + s if s else ""
+        usados = set()
+        for j, (dname, subs) in enumerate(cat_subs):
+            if not subs:
+                continue
+            ci = 5 + j  # columnas F, G, H, … (deja E libre como separador visual)
+            L = xl_col_to_name(ci)
+            wl.write(0, ci, dname)
+            for i, s in enumerate(subs, 1):
+                wl.write(i, ci, s)
+            nm = nombre_rango(dname)
+            if nm and nm not in usados:
+                wb.define_name(nm, "=Listas!$%s$2:$%s$%d" % (L, L, len(subs) + 1))
+                usados.add(nm)
         wl.hide()
 
         def rango(cidx, n):
@@ -101,8 +131,8 @@ class AccountMove(models.Model):
             "Opcional. Departamento del catálogo (Abarrotes, Bebidas…). Elige uno de la lista "
             "o escribe uno nuevo: si no existe, se crea."), note)
         ws.write_comment(0, col["SUBCATEGORÍA"], (
-            "Opcional. Subcategoría dentro de la CATEGORÍA (Arroz, Agua…). Existente o nueva "
-            "(se crea bajo la categoría)."), note)
+            "Opcional. El desplegable muestra solo las subcategorías de la CATEGORÍA que elegiste "
+            "en esta fila. Existente o nueva (se crea bajo esa categoría). Elige primero la CATEGORÍA."), note)
         ws.write_comment(0, col["MARCA"], (
             "Opcional. Marca comercial (Gloria, Sol…). Elige una existente o escribe una nueva; "
             "se reutiliza para no duplicar."), note)
@@ -175,8 +205,21 @@ class AccountMove(models.Model):
             dv("CATEGORÍA", {"validate": "list", "source": rango(0, len(deptos)),
                 "input_title": "Categoría", "input_message": "Elige una existente o escribe una nueva (se crea).", **pick})
         if subcats:
-            dv("SUBCATEGORÍA", {"validate": "list", "source": rango(1, len(subcats)),
-                "input_title": "Subcategoría", "input_message": "Dentro de la categoría. Existente o nueva (se crea).", **pick})
+            # DEPENDIENTE: muestra solo las subcategorías de la CATEGORÍA de la misma fila. INDIRECT
+            # arma el nombre de rango "cat_<Categoría con _>". Si la categoría está vacía o es nueva
+            # (sin rango), no filtra pero deja escribir (no bloqueante) — la subcategoría igual se crea.
+            catL = xl_col_to_name(col["CATEGORÍA"])
+            # INDIRECT arma "cat_<Categoría>" con el MISMO saneo que nombre_rango: quita acentos
+            # (á→a, ñ→n, ü→u) y pasa espacio / '/' / '-' → '_'. Así el nombre calza aunque la
+            # categoría tenga acentos o espacios.
+            cref = "$%s2" % catL
+            subcat_src = (
+                '=INDIRECT("cat_"&SUBSTITUTE(SUBSTITUTE(SUBSTITUTE(SUBSTITUTE(SUBSTITUTE(SUBSTITUTE('
+                'SUBSTITUTE(SUBSTITUTE(SUBSTITUTE(SUBSTITUTE(%s,"á","a"),"é","e"),"í","i"),"ó","o"),'
+                '"ú","u"),"ñ","n"),"ü","u")," ","_"),"/","_"),"-","_"))' % cref)
+            dv("SUBCATEGORÍA", {"validate": "list", "source": subcat_src,
+                "input_title": "Subcategoría", "error_type": "information", "error_title": "Se creará",
+                "input_message": "Se filtra por la CATEGORÍA elegida. Elige una o escribe una nueva (se crea)."})
         if marcas:
             dv("MARCA", {"validate": "list", "source": rango(2, len(marcas)),
                 "input_title": "Marca", "input_message": "Existente o nueva (se reutiliza/crea).", **pick})
@@ -198,7 +241,7 @@ class AccountMove(models.Model):
             "",
             "1. CÓDIGO es la clave: si ya existe se ACTUALIZA; si no, se CREA.",
             "2. CÓDIGO DE BARRAS: el EAN para escanear en el POS. No puede repetirse entre productos.",
-            "3. CATEGORÍA / SUBCATEGORÍA: elige del desplegable (tu catálogo) o escribe una nueva — si no existe, se crea.",
+            "3. CATEGORÍA / SUBCATEGORÍA: elige del desplegable o escribe una nueva (si no existe, se crea). La SUBCATEGORÍA se filtra por la CATEGORÍA elegida — elige primero la categoría.",
             "4. MARCA: igual; se reutiliza la existente (sin acento/mayúsculas no duplican) o se crea la nueva.",
             "5. TIPO: BIEN o SERVICIO. Un servicio no lleva stock y va con unidad ZZ a SUNAT. Vacío = se deduce de la UNIDAD.",
             "6. UNIDAD: el nombre (UNIDAD, KILOGRAMO, HORA…) o el código SUNAT (NIU, KGM…). Vacío = UNIDAD (NIU), o ZZ si es SERVICIO.",

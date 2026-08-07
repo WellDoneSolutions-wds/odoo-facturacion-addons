@@ -318,30 +318,43 @@ class AccountMove(models.Model):
         return {"actualizados": len(prods)}
 
     @api.model
-    def l10n_pe_ne_importar_productos(self, payload):
-        """Importa/actualiza productos desde el xlsx de la plantilla. payload = {contentB64, commit}.
-        UPSERT por CÓDIGO. commit=False → solo valida y devuelve el reporte (dry-run, no escribe);
-        commit=True → aplica y devuelve creados/actualizados/errores. Aislado por compañía."""
+    def _l10n_pe_ne_leer_xlsx(self, contentB64, hoja):
+        """Decodifica el base64 y devuelve las filas (lista de tuplas; rows[0] = cabecera)."""
         import io
         import base64
-        import unicodedata
-
-        payload = payload or {}
-        commit = bool(payload.get("commit"))
+        import openpyxl
         try:
-            data = base64.b64decode(payload.get("contentB64") or "")
+            data = base64.b64decode(contentB64 or "")
         except Exception:
             raise UserError(_("Archivo inválido."))
-
-        import openpyxl
         try:
             wb = openpyxl.load_workbook(io.BytesIO(data), data_only=True, read_only=True)
         except Exception:
             raise UserError(_("No se pudo leer el archivo. Sube un .xlsx válido (no un .xls antiguo)."))
-        ws = wb["Productos"] if "Productos" in wb.sheetnames else wb[wb.sheetnames[0]]
+        ws = wb[hoja] if hoja in wb.sheetnames else wb[wb.sheetnames[0]]
         rows = list(ws.iter_rows(values_only=True))
         if not rows:
             raise UserError(_("El archivo está vacío."))
+        return rows
+
+    @api.model
+    def l10n_pe_ne_importar_productos(self, payload):
+        """Compat single-shot: decodifica el archivo y procesa un tramo (offset/limit) o todo.
+        El camino rápido por lotes es preparar()+lote() (parsea el archivo UNA sola vez). UPSERT
+        por CÓDIGO; commit=False = dry-run; aislado por compañía."""
+        payload = payload or {}
+        rows = self._l10n_pe_ne_leer_xlsx(payload.get("contentB64"), "Productos")
+        return self._l10n_pe_ne_importar_productos_core(
+            rows, bool(payload.get("commit")), offset=int(payload.get("offset") or 0),
+            window=int(payload.get("limit") or 0), budget=0.0)
+
+    def _l10n_pe_ne_importar_productos_core(self, rows, commit, offset=0, window=0, budget=0.0):
+        """Núcleo del import de productos sobre filas YA parseadas. `window` acota el prefetch
+        (0 = todo el resto); `budget` en segundos corta el lote por tiempo (0 = sin corte). Devuelve
+        el reporte + nextOffset/done para que el front continúe la importación por lotes."""
+        import time
+        import unicodedata
+        t_ini = time.time()
 
         def norm(h):
             s = unicodedata.normalize("NFKD", str(h or "")).encode("ascii", "ignore").decode("ascii")
@@ -454,9 +467,9 @@ class AccountMove(models.Model):
         # es una transacción atómica y, como el UPSERT es por CÓDIGO, reintentar un lote no duplica.
         data_rows = rows[1:]
         total_filas = len(data_rows)
-        offset = max(0, int(payload.get("offset") or 0))
-        limit = int(payload.get("limit") or 0)
-        sub = data_rows[offset:offset + limit] if limit > 0 else data_rows[offset:]
+        offset = max(0, offset)
+        fin = (offset + window) if window > 0 else total_filas
+        sub = data_rows[offset:fin]
 
         # Prefetch del lote en 2 consultas (no una por fila): existentes por código y por barcode.
         cods_lote = {txt(cell(r, "codigo")) for r in sub if txt(cell(r, "codigo"))}
@@ -479,6 +492,7 @@ class AccountMove(models.Model):
             reps = sorted(nom for nom, c in noms.items() if c > 1)
             if reps:
                 avisos.append({"fila": 0, "msg": "%d nombre(s) se repiten en el archivo (p. ej. %s) — se importan como productos DISTINTOS por tener código distinto; revisa si fue intencional" % (len(reps), ", ".join(reps[:3]))})
+        procesadas = len(sub)  # cuántas filas del tramo se consumieron (para nextOffset)
         for k, row in enumerate(sub):
             n = k + 2 + offset  # número de fila real en la hoja (1 = cabecera)
             if row is None or all(c is None or str(c).strip() == "" for c in row):
@@ -656,10 +670,17 @@ class AccountMove(models.Model):
                     self._l10n_pe_ne_ajustar_stock(p.id, "fijar", s_inicial, _("Existencia inicial (importación)"))
                 if not repetido:
                     creados += 1
+            # Presupuesto de tiempo: corta el lote tras una fila completa si se pasó, para que NINGUNA
+            # request se acerque al timeout del gateway aunque las filas sean caras (stock, categorías).
+            if budget and (time.time() - t_ini) > budget:
+                procesadas = k + 1
+                break
+        next_offset = offset + procesadas
         return {"commit": commit, "creados": creados, "actualizados": actualizados,
                 "errores": errores, "avisos": avisos,
                 "totalOk": creados + actualizados, "totalError": len(errores),
-                "totalFilas": total_filas}
+                "totalFilas": total_filas, "nextOffset": next_offset,
+                "done": next_offset >= total_filas}
 
     # ------------------------------------------------------- importación clientes
     @api.model
@@ -728,27 +749,19 @@ class AccountMove(models.Model):
 
     @api.model
     def l10n_pe_ne_importar_clientes(self, payload):
-        """Importa/actualiza clientes desde el xlsx. payload = {contentB64, commit}. UPSERT por
-        NÚMERO DE DOCUMENTO (vat). commit=False → dry-run (no escribe). Aislado por compañía."""
-        import io
-        import base64
-        import unicodedata
-
+        """Compat single-shot. UPSERT por NÚMERO DE DOCUMENTO (vat); commit=False = dry-run. El
+        camino rápido por lotes es preparar()+lote()."""
         payload = payload or {}
-        commit = bool(payload.get("commit"))
-        try:
-            data = base64.b64decode(payload.get("contentB64") or "")
-        except Exception:
-            raise UserError(_("Archivo inválido."))
-        import openpyxl
-        try:
-            wb = openpyxl.load_workbook(io.BytesIO(data), data_only=True, read_only=True)
-        except Exception:
-            raise UserError(_("No se pudo leer el archivo. Sube un .xlsx válido (no un .xls antiguo)."))
-        ws = wb["Clientes"] if "Clientes" in wb.sheetnames else wb[wb.sheetnames[0]]
-        rows = list(ws.iter_rows(values_only=True))
-        if not rows:
-            raise UserError(_("El archivo está vacío."))
+        rows = self._l10n_pe_ne_leer_xlsx(payload.get("contentB64"), "Clientes")
+        return self._l10n_pe_ne_importar_clientes_core(
+            rows, bool(payload.get("commit")), offset=int(payload.get("offset") or 0),
+            window=int(payload.get("limit") or 0), budget=0.0)
+
+    def _l10n_pe_ne_importar_clientes_core(self, rows, commit, offset=0, window=0, budget=0.0):
+        """Núcleo del import de clientes sobre filas YA parseadas (ver _importar_productos_core)."""
+        import time
+        import unicodedata
+        t_ini = time.time()
 
         def norm(h):
             s = unicodedata.normalize("NFKD", str(h or "")).encode("ascii", "ignore").decode("ascii")
@@ -783,9 +796,9 @@ class AccountMove(models.Model):
         # le dice cuántas quedan. UPSERT por documento → reintentar un lote no duplica.
         data_rows = rows[1:]
         total_filas = len(data_rows)
-        offset = max(0, int(payload.get("offset") or 0))
-        limit = int(payload.get("limit") or 0)
-        sub = data_rows[offset:offset + limit] if limit > 0 else data_rows[offset:]
+        offset = max(0, offset)
+        fin = (offset + window) if window > 0 else total_filas
+        sub = data_rows[offset:fin]
         # Prefetch de existentes por documento (vat) en una sola consulta.
         docs_lote = {txt(cell(r, "numero de documento")) for r in sub if txt(cell(r, "numero de documento"))}
         pre_doc = {p.vat: p for p in Partner.with_context(active_test=False).search(
@@ -794,6 +807,7 @@ class AccountMove(models.Model):
         errores = []
         avisos = []
         vistos = {}
+        procesadas = len(sub)
         for k, row in enumerate(sub):
             n = k + 2 + offset  # número de fila real en la hoja
             if row is None or all(c is None or str(c).strip() == "" for c in row):
@@ -855,8 +869,55 @@ class AccountMove(models.Model):
                 pre_doc[num] = p  # el mismo documento repetido en el lote ACTUALIZA, no duplica
                 if not repetido:
                     creados += 1
+            if budget and (time.time() - t_ini) > budget:
+                procesadas = k + 1
+                break
+        next_offset = offset + procesadas
         return {"commit": commit, "creados": creados, "actualizados": actualizados,
                 "errores": errores, "avisos": avisos,
                 "totalOk": creados + actualizados, "totalError": len(errores),
-                "totalFilas": total_filas}
+                "totalFilas": total_filas, "nextOffset": next_offset,
+                "done": next_offset >= total_filas}
+
+    # ------------------------------------------------------- lotes: parse-once + tiempo
+    # Ventana de prefetch y presupuesto de tiempo por lote. La ventana acota cuántas filas se
+    # prefetchean/consideran de una; el presupuesto corta el lote por tiempo (robustez ante filas
+    # caras: ninguna request se acerca al timeout del gateway). El front avanza por nextOffset.
+    _IMPORT_WINDOW = 800
+    _IMPORT_BUDGET_S = 18.0
+
+    @api.model
+    def l10n_pe_ne_import_preparar(self, payload):
+        """Sube el archivo UNA vez: lo parsea, valida cabeceras y guarda las filas bajo un token.
+        payload = {kind: 'productos'|'clientes', contentB64}. Devuelve {token, totalFilas}."""
+        payload = payload or {}
+        kind = payload.get("kind")
+        if kind not in ("productos", "clientes"):
+            raise UserError(_("Tipo de importación no soportado."))
+        hoja, oblig = ("Productos", ("codigo", "nombre")) if kind == "productos" else \
+            ("Clientes", ("numero de documento", "razon social o nombre"))
+        rows = self._l10n_pe_ne_leer_xlsx(payload.get("contentB64"), hoja)
+        import unicodedata
+
+        def norm(h):
+            s = unicodedata.normalize("NFKD", str(h or "")).encode("ascii", "ignore").decode("ascii")
+            return " ".join(s.lower().split())
+        idx = {norm(h) for h in rows[0] if norm(h)}
+        faltan = [k for k in oblig if k not in idx]
+        if faltan:
+            raise UserError(_("Faltan columnas obligatorias en la plantilla. Usa la plantilla de %s.") % kind)
+        token = self.env["l10n_pe_ne.import.session"]._crear(kind, rows)
+        return {"token": token, "totalFilas": max(0, len(rows) - 1)}
+
+    @api.model
+    def l10n_pe_ne_import_lote(self, payload):
+        """Procesa UN lote del archivo ya subido. payload = {token, commit, offset}. Corta por
+        ventana/tiempo y devuelve el reporte + nextOffset/done; el front repite hasta done."""
+        payload = payload or {}
+        kind, rows, _total = self.env["l10n_pe_ne.import.session"]._rows(payload.get("token"))
+        commit = bool(payload.get("commit"))
+        offset = int(payload.get("offset") or 0)
+        core = (self._l10n_pe_ne_importar_productos_core if kind == "productos"
+                else self._l10n_pe_ne_importar_clientes_core)
+        return core(rows, commit, offset=offset, window=self._IMPORT_WINDOW, budget=self._IMPORT_BUDGET_S)
 

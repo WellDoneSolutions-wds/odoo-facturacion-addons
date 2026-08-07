@@ -147,6 +147,23 @@ class TestImportProductos(TransactionCase):
             "commit": False, "offset": 4, "limit": 4})
         self.assertEqual(r2["creados"], 2)
 
+    def test_preparar_token_y_lote_avanza_hasta_done(self):
+        """parse-once: preparar guarda el archivo bajo un token; lote() procesa por tandas
+        avanzando por nextOffset hasta done, sin re-subir el archivo."""
+        b64 = self._xlsx(["CÓDIGO", "NOMBRE", "PRECIO VENTA"],
+                         [["TK-%02d" % i, "P%d" % i, 10] for i in range(5)])
+        prep = self.Move.l10n_pe_ne_import_preparar({"kind": "productos", "contentB64": b64})
+        self.assertTrue(prep["token"])
+        self.assertEqual(prep["totalFilas"], 5)
+        off, creados, guard = 0, 0, 0
+        while True:
+            rep = self.Move.l10n_pe_ne_import_lote({"token": prep["token"], "commit": True, "offset": off})
+            creados += rep["creados"]; off = rep["nextOffset"]; guard += 1
+            if rep["done"] or guard > 50:
+                break
+        self.assertEqual(creados, 5)
+        self.assertTrue(self._get("TK-00"))
+
     def test_aviso_nombre_repetido_no_bloquea(self):
         res = self._import(["CÓDIGO", "NOMBRE", "PRECIO VENTA"],
                            [["NR-1", "Yogurt X", 10], ["NR-2", "Yogurt X", 12], ["NR-3", "Otro", 5]])

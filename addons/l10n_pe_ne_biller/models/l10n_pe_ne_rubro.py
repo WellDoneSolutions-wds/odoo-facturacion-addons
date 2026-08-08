@@ -755,6 +755,10 @@ class AccountMove(models.Model):
                 "efectivos": sorted(todos),
                 "catalogos": company._l10n_pe_ne_catalogos_todos(),
                 "catalogosConservados": {"unidades": [], "medios": [], "afectaciones": [], "monedas": []},
+                # «Todos» ABRE el catálogo completo y preserva los medios del negocio: por
+                # definición no retira nada. Va explícito para que la SPA no tenga que
+                # distinguir entre «no retira nada» y «este backend no me lo dice».
+                "catalogosRetirados": {"unidades": [], "medios": [], "afectaciones": [], "monedas": []},
             }
 
         actuales = company.l10n_pe_ne_modulos_efectivos()   # None = legacy (ve todo)
@@ -772,14 +776,20 @@ class AccountMove(models.Model):
                 nuevos.discard(cod)
         nuevos = _con_dependencias(nuevos) & _DISPONIBLES
         en_uso = company.l10n_pe_ne_modulos_en_uso() & _DISPONIBLES
-        protegidos = sorted(en_uso - nuevos)
+        # MISMO criterio que l10n_pe_ne_set_rubro: un override en False EXPLÍCITO se respeta
+        # y NO se protege (apagar algo a sabiendas es una decisión). Sin este filtro el
+        # preview pintaba como «conservado» un módulo que el aplicar sí iba a quitar —
+        # mentía exactamente sobre la promesa que vende.
+        overrides_guardados = _json_load(company.l10n_pe_ne_modulos_override, {})
+        protegidos = sorted(cod for cod in en_uso - nuevos
+                            if overrides_guardados.get(cod) is not False)
         efectivos_nuevos = _con_dependencias(nuevos | set(protegidos)) & _DISPONIBLES
 
         def _nombres(cods):
             return [{"codigo": c, "nombre": MODULOS[c][0]} for c in sorted(cods)]
 
         base_actual = actuales if actuales is not None else set(MODULOS) & _DISPONIBLES
-        cfg_nueva, conservados = company._l10n_pe_ne_calc_resiembra(rubros)
+        cfg_nueva, conservados, retirados = company._l10n_pe_ne_calc_resiembra(rubros)
         return {
             "rubros": rubros,
             "legacyAntes": actuales is None,   # antes veía TODO (sin rubro configurado)
@@ -792,6 +802,9 @@ class AccountMove(models.Model):
             "efectivos": sorted(efectivos_nuevos),
             "catalogos": cfg_nueva,
             "catalogosConservados": conservados,
+            # Lo que la empresa PIERDE en catálogos al aplicar. La re-siembra pisa el JSON
+            # entero y no hay deshacer, así que esto tiene que verse ANTES de aplicar.
+            "catalogosRetirados": retirados,
         }
 
     # ------------------------------------------------------- muro de emisión

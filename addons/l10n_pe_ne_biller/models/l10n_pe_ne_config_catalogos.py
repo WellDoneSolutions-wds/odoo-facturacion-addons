@@ -160,7 +160,16 @@ class ResCompany(models.Model):
         """Calcula (SIN escribir) la config de catálogos que resultaría de cambiar el tipo de
         negocio a `rubros`: la sugerencia del rubro FUSIONADA con lo intocable de la empresa
         — personalizados de medios, elementos en uso y defaults vigentes que sigan activos.
-        Devuelve (cfg_nueva, conservados) para que el preview muestre qué se respeta."""
+
+        Devuelve (cfg_nueva, conservados, RETIRADOS).
+
+        `retirados` es lo que la empresa tiene activo HOY y la config nueva ya no trae. Existe
+        porque la re-siembra pisa el JSON entero y es IRREVERSIBLE: lo que el dueño activó a
+        mano y todavía no tiene rastro persistente (una unidad sin producto, una afectación
+        sin impuesto, USD si aún no facturó en dólares, un medio de la semilla que no ha
+        cobrado) se pierde sin vuelta. El preview mostraba solo los CONTADORES del destino, o
+        sea el usuario nunca veía la pérdida — y el encabezado de la pantalla llegó a
+        prometer que no la había. Un dato que ya estaba calculado aquí y no salía."""
         self.ensure_one()
         nueva = _sembrado_para(rubros)
         actual = self._l10n_pe_ne_cfg() or {}
@@ -204,7 +213,24 @@ class ResCompany(models.Model):
             mo.add("USD")
             conservados["monedas"].append("USD")
         nueva["monedas"] = {"activas": sorted(mo)}
-        return nueva, conservados
+
+        # Delta de PÉRDIDA: lo activo hoy que la config nueva ya no trae. Se calcula al final,
+        # sobre `nueva` ya fusionada, para que no cuente como retirado nada que la fusión
+        # rescató. Empresa sin config previa (`actual` vacío) no pierde nada por definición.
+        def _fuera(actuales, quedan):
+            return sorted(set(actuales or []) - set(quedan or []))
+
+        retirados = {
+            "unidades": _fuera((actual.get("unidades") or {}).get("activas"),
+                               nueva["unidades"]["activas"]),
+            "medios": _fuera((actual.get("medios") or {}).get("lista"),
+                             nueva["medios"]["lista"]),
+            "afectaciones": _fuera((actual.get("afectaciones") or {}).get("activas"),
+                                   nueva["afectaciones"]["activas"]),
+            "monedas": _fuera((actual.get("monedas") or {}).get("activas"),
+                              nueva["monedas"]["activas"]),
+        }
+        return nueva, conservados, retirados
 
     def _l10n_pe_ne_catalogos_todos(self):
         """Config «Todos — sin restricción»: TODO el maestro activo (unidades, afectaciones,
@@ -232,7 +258,7 @@ class ResCompany(models.Model):
     def _l10n_pe_ne_resembrar_catalogos(self, rubros):
         """Aplica la re-siembra calculada (cambio de tipo de negocio): escribe y audita."""
         self.ensure_one()
-        nueva, conservados = self._l10n_pe_ne_calc_resiembra(rubros)
+        nueva, conservados, _retirados = self._l10n_pe_ne_calc_resiembra(rubros)
         antes = self._l10n_pe_ne_cfg() or {}
         if antes != nueva:
             self.sudo().l10n_pe_ne_cfg_catalogos = json.dumps(nueva, ensure_ascii=False)

@@ -29,78 +29,161 @@ from odoo.tools import config
 # clientes, reportes y el registro de compras/consulta que exige la contabilidad).
 NUCLEO = ("E01", "E02", "E03", "E04", "G01", "G02", "G03", "G04", "G05", "C10", "C11")
 
-# codigo -> (nombre, categoría E/V/I/C/G/R, disponible hoy). `nucleo` se deriva de NUCLEO.
-# disponible=False: existe en el catálogo (y en defaults de rubro, para la fase 2)
-# pero la resolución lo filtra — no se puede activar lo que aún no está construido.
+# codigo -> (nombre, categoría E/V/I/C/G/R, disponible hoy, descripción). `nucleo` se
+# deriva de NUCLEO. disponible=False: existe en el catálogo (y en defaults de rubro, para
+# la fase 2) pero la resolución lo filtra — no se puede activar lo que aún no está construido.
+#
+# La DESCRIPCIÓN es contrato de producto, no comentario: viaja a la SPA y es lo único que
+# un dueño de PyME lee para decidir si necesita «IVAP» o «Bancarización». Regla al escribirla:
+# explica PARA QUÉ SIRVE en lenguaje de negocio, no qué es en lenguaje tributario. Una línea.
 MODULOS = {
     # Emisión electrónica
-    "E01": ("Factura electrónica", "E", True),
-    "E02": ("Boleta de venta electrónica", "E", True),
-    "E03": ("Nota de crédito", "E", True),
-    "E04": ("Nota de débito", "E", True),
-    "E05": ("Liquidación de compra", "E", True),
-    "E06": ("Comprobante de retención", "E", True),
-    "E07": ("Comprobante de percepción", "E", True),
-    "E08": ("Guía de remisión — remitente", "E", True),
-    "E09": ("Guía de remisión — transportista", "E", True),
-    "E10": ("Comunicación de baja", "E", True),
-    "E11": ("Resumen diario de boletas", "E", True),
-    "E12": ("Multi-moneda (PEN/USD)", "E", True),
-    "E13": ("Series por establecimiento", "E", True),
-    "E14": ("Emisión masiva desde Excel", "E", True),
+    "E01": ("Factura electrónica", "E", True,
+            "Para vender a empresas con RUC que necesitan usar el IGV como crédito fiscal."),
+    "E02": ("Boleta de venta electrónica", "E", True,
+            "Para vender al consumidor final. Es el comprobante del día a día en mostrador."),
+    "E03": ("Nota de crédito", "E", True,
+            "Para anular o corregir un comprobante ya emitido, o devolver mercadería."),
+    "E04": ("Nota de débito", "E", True,
+            "Para cobrar de más sobre un comprobante ya emitido: intereses, mora o un cargo omitido."),
+    "E05": ("Liquidación de compra", "E", True,
+            "Cuando TÚ le compras a un productor sin RUC (agro, reciclaje, artesanía) y emites por él."),
+    "E06": ("Comprobante de retención", "E", True,
+            "Solo si SUNAT te nombró agente de retención: retienes parte del pago a tus proveedores."),
+    "E07": ("Comprobante de percepción", "E", True,
+            "Solo si SUNAT te nombró agente de percepción: cobras un adelanto del IGV a tu cliente."),
+    "E08": ("Guía de remisión — remitente", "E", True,
+            "Documento que ampara el traslado de tu mercadería. Obligatorio para que viaje en regla."),
+    "E09": ("Guía de remisión — transportista", "E", True,
+            "Si tú prestas el servicio de transporte a terceros con tus propias unidades."),
+    "E10": ("Comunicación de baja", "E", True,
+            "Para dar de baja ante SUNAT un comprobante que no debió emitirse."),
+    "E11": ("Resumen diario de boletas", "E", True,
+            "Envía tus boletas del día a SUNAT en un solo lote. Si emites boletas, lo necesitas."),
+    "E12": ("Multi-moneda (PEN/USD)", "E", True,
+            "Para facturar en dólares con el tipo de cambio SUNAT del día."),
+    "E13": ("Series por establecimiento", "E", True,
+            "Numeración propia por local, para que dos tiendas no choquen de correlativo."),
+    "E14": ("Emisión masiva desde Excel", "E", True,
+            "Sube una planilla y emite cientos de comprobantes de una pasada."),
     # Ventas y cobro
-    "V01": ("Venta rápida (POS)", "V", True),
-    "V02": ("Ticket 80mm y representación A4", "V", True),
-    "V03": ("Nota de venta (documento interno)", "V", True),
-    "V04": ("Cotizaciones convertibles", "V", True),
-    "V05": ("Órdenes de taller / servicio", "V", True),
-    "V06": ("Venta a crédito con cuotas", "V", True),
-    "V07": ("Medios de pago (efectivo, Yape, tarjeta)", "V", True),
-    "V08": ("Redondeo de efectivo (Ley 29571)", "V", True),
-    "V09": ("Reserva / apartado (layaway)", "V", True),
-    "V10": ("Venta al peso con balanza (EAN-13)", "V", True),
-    "V11": ("Facturación recurrente / membresías", "V", True),
+    "V01": ("Venta rápida (POS)", "V", True,
+            "Pantalla de mostrador: cobras rápido con lector de código de barras y das vuelto."),
+    "V02": ("Ticket 80mm y representación A4", "V", True,
+            "Imprime en ticketera térmica o en hoja A4, según lo que pida el cliente."),
+    "V03": ("Nota de venta (documento interno)", "V", True,
+            "Comprobante interno que NO va a SUNAT: pedidos, adelantos o ventas aún sin facturar."),
+    "V04": ("Cotizaciones convertibles", "V", True,
+            "Pasas un presupuesto al cliente y, si acepta, se convierte en venta sin recargarlo."),
+    "V05": ("Órdenes de taller / servicio", "V", True,
+            "Sigues el trabajo desde que entra hasta que se entrega: recibido, en proceso, listo."),
+    "V06": ("Venta a crédito con cuotas", "V", True,
+            "Vendes al crédito con fechas de pago y llevas el control de lo que te deben."),
+    "V07": ("Medios de pago (efectivo, Yape, tarjeta)", "V", True,
+            "Divides un cobro entre varios medios y sabes cuánto entró por cada uno."),
+    "V08": ("Redondeo de efectivo (Ley 29571)", "V", True,
+            "Ajusta el vuelto al décimo cuando no hay monedas de 1 y 2 céntimos."),
+    "V09": ("Reserva / apartado (layaway)", "V", True,
+            "El cliente separa un producto con abonos y se lo lleva al terminar de pagarlo."),
+    "V10": ("Venta al peso con balanza (EAN-13)", "V", True,
+            "Lees la etiqueta de la balanza y el peso entra solo a la venta."),
+    "V11": ("Facturación recurrente / membresías", "V", True,
+            "Cobras lo mismo cada mes sin volver a cargarlo: mensualidades, planes, alquileres."),
     # Inventario
-    "I01": ("Stock perpetuo", "I", True),
-    "I02": ("Kardex por producto", "I", True),
-    "I03": ("Ajustes de inventario", "I", True),
-    "I04": ("Lotes con vencimiento (FEFO)", "I", True),
-    "I05": ("Fraccionamiento por sub-unidad", "I", True),
-    "I06": ("Importación masiva de productos", "I", True),
+    "I01": ("Stock perpetuo", "I", True,
+            "El sistema descuenta solo al vender y siempre sabes cuánto te queda."),
+    "I02": ("Kardex por producto", "I", True,
+            "El historial de entradas y salidas de cada producto, con saldo y costo."),
+    "I03": ("Ajustes de inventario", "I", True,
+            "Corriges el stock tras un conteo físico, una merma o una rotura."),
+    "I04": ("Lotes con vencimiento (FEFO)", "I", True,
+            "Controlas fechas de vencimiento y sale primero lo que vence antes."),
+    "I05": ("Fraccionamiento por sub-unidad", "I", True,
+            "Compras por caja y vendes por unidad, sin descuadrar el stock."),
+    "I06": ("Importación masiva de productos", "I", True,
+            "Cargas todo tu catálogo desde un Excel en vez de producto por producto."),
     # Contabilidad y SUNAT
-    "C01": ("Libro PLE — Registro de Ventas 14.1", "C", True),
-    "C02": ("Libro PLE — Registro de Compras 8.1", "C", True),
-    "C03": ("Libro PLE — Inventario Permanente 12.1", "C", True),
-    "C04": ("Detracción (SPOT)", "C", True),
-    "C05": ("Percepción del IGV", "C", True),
-    "C06": ("Retención del IGV", "C", True),
-    "C07": ("ISC (selectivo al consumo)", "C", True),
-    "C08": ("ICBPER (bolsas plásticas)", "C", True),
-    "C09": ("Bancarización (Ley 28194)", "C", True),
-    "C10": ("Registro de compras / crédito fiscal", "C", True),
-    "C11": ("Consulta pública de comprobantes", "C", True),
-    "C12": ("IVAP (arroz pilado)", "C", True),
-    "C13": ("Partes vinculadas / umbrales UIT", "C", True),
+    "C01": ("Libro PLE — Registro de Ventas 14.1", "C", True,
+            "Genera el archivo de ventas que tu contador presenta a SUNAT."),
+    "C02": ("Libro PLE — Registro de Compras 8.1", "C", True,
+            "Genera el archivo de compras que sustenta tu crédito fiscal."),
+    "C03": ("Libro PLE — Inventario Permanente 12.1", "C", True,
+            "Libro de inventario valorizado. Exigible al superar el tope de ingresos de SUNAT."),
+    "C04": ("Detracción (SPOT)", "C", True,
+            "Tu cliente deposita un % en tu cuenta de detracciones del Banco de la Nación."),
+    "C05": ("Percepción del IGV", "C", True,
+            "Cobras un adelanto del IGV al vender combustible u otros bienes del régimen."),
+    "C06": ("Retención del IGV", "C", True,
+            "Retienes parte del pago a tu proveedor y se lo entregas a SUNAT."),
+    "C07": ("ISC (selectivo al consumo)", "C", True,
+            "Impuesto extra sobre licores, cigarros, combustibles y bebidas azucaradas."),
+    "C08": ("ICBPER (bolsas plásticas)", "C", True,
+            "El impuesto por cada bolsa de plástico que entregas al cliente."),
+    "C09": ("Bancarización (Ley 28194)", "C", True,
+            "Desde S/ 2,000 el pago debe ser bancario para que el gasto sea deducible."),
+    "C10": ("Registro de compras / crédito fiscal", "C", True,
+            "Registras las facturas que recibes para descontar su IGV del que pagas."),
+    "C11": ("Consulta pública de comprobantes", "C", True,
+            "Tu cliente verifica en línea que el comprobante que le diste es real."),
+    "C12": ("IVAP (arroz pilado)", "C", True,
+            "Régimen especial del 4% que reemplaza al IGV solo en la venta de arroz pilado."),
+    "C13": ("Partes vinculadas / umbrales UIT", "C", True,
+            "Si vendes a empresas de tu mismo grupo, controla los topes que exige SUNAT."),
     # Gestión
-    "G01": ("Caja: apertura, cierre y arqueo", "G", True),
-    "G02": ("Roles y permisos por perfil", "G", True),
-    "G03": ("Clientes con padrón RUC/DNI", "G", True),
-    "G04": ("Catálogo de productos", "G", True),
-    "G05": ("Análisis de ventas y reportes", "G", True),
-    "G06": ("Multi-establecimiento", "G", True),
+    "G01": ("Caja: apertura, cierre y arqueo", "G", True,
+            "Abres y cierras el turno y cuadras cuánto efectivo debería haber."),
+    "G02": ("Roles y permisos por perfil", "G", True,
+            "Cada trabajador ve solo lo suyo: el cajero no entra a los reportes del dueño."),
+    "G03": ("Clientes con padrón RUC/DNI", "G", True,
+            "Escribes el RUC o DNI y los datos del cliente se completan solos."),
+    "G04": ("Catálogo de productos", "G", True,
+            "Tu lista de productos y servicios con precios, códigos y categorías."),
+    "G05": ("Análisis de ventas y reportes", "G", True,
+            "Qué se vende más, cuánto vendiste y cómo va el negocio frente al mes pasado."),
+    "G06": ("Multi-establecimiento", "G", True,
+            "Manejas varios locales desde una sola cuenta, cada uno con su stock y caja."),
     # Específicos de rubro
-    "R01": ("Placa de vehículo en la venta", "R", True),
-    "R02": ("Control de recetas médicas", "R", True),
-    "R03": ("Cola de atención FIFO", "R", True),
-    "R04": ("Cálculo por tiempo (horas/días)", "R", True),
-    "R05": ("Valorizaciones de obra", "R", True),
-    "R06": ("Gestión de flota", "R", True),
-    "R07": ("Exportación (DUA/DAM)", "R", True),
-    "R08": ("Contratación estatal", "R", True),
-    "R09": ("Cálculo por volumen/área (m³/m²)", "R", True),
-    "R10": ("Agenda de citas / turnos", "R", True),
-    "R11": ("Variantes de producto (talla/color)", "R", True),
+    "R01": ("Placa de vehículo en la venta", "R", True,
+            "Pide la placa al vender combustible: SUNAT la exige en el comprobante."),
+    "R02": ("Control de recetas médicas", "R", True,
+            "Registra la receta al vender medicamentos que la requieren."),
+    "R03": ("Cola de atención FIFO", "R", True,
+            "Atiendes en orden de llegada y ves quién sigue."),
+    "R04": ("Cálculo por tiempo (horas/días)", "R", True,
+            "El importe sale del tiempo: pones entrada y salida y calcula solo."),
+    "R05": ("Valorizaciones de obra", "R", True,
+            "Facturas por avance de obra, no todo al final."),
+    "R06": ("Gestión de flota", "R", True,
+            "Tus vehículos y conductores frecuentes, listos para la guía de remisión."),
+    "R07": ("Exportación (DUA/DAM)", "R", True,
+            "Facturas al exterior sin IGV, con el número de aduana en el comprobante."),
+    "R08": ("Contratación estatal", "R", True,
+            "Para vender al Estado: expediente, conformidad y penalidades del contrato."),
+    "R09": ("Cálculo por volumen/área (m³/m²)", "R", True,
+            "Pones medidas y calcula el volumen o el área a cobrar."),
+    "R10": ("Agenda de citas / turnos", "R", True,
+            "Agendas al cliente por día y hora y ves la agenda del local."),
+    "R11": ("Variantes de producto (talla/color)", "R", True,
+            "Un mismo producto en varias tallas o colores, cada uno con su stock."),
 }
+
+# Dependencias técnicas entre módulos: activar la clave exige activar sus valores.
+# No es preferencia de negocio, es coherencia: un Kardex sin Stock perpetuo no tiene de
+# dónde sacar los movimientos, y un Resumen diario sin Boleta no tiene qué resumir.
+# Se aplica en la RESOLUCIÓN (cierre transitivo), no al guardar: así un preset de rubro
+# incompleto se autocompleta en vez de producir una configuración rota.
+DEPENDENCIAS = {
+    "I02": ("I01",),          # Kardex necesita movimientos de stock
+    "I03": ("I01",),          # Ajustar inventario exige llevar inventario
+    "I04": ("I01",),          # Lotes/vencimiento se controlan sobre el stock
+    "I05": ("I01",),          # Fraccionar caja→unidad mueve stock
+    "V10": ("V01",),          # La balanza alimenta la venta rápida
+    "V08": ("V07",),          # Redondear efectivo exige distinguir medios de pago
+    "E09": ("E08",),          # La guía de transportista comparte el motor de la de remitente
+    "R06": ("E08",),          # La flota existe para las guías
+    "C03": ("I01",),          # El inventario permanente valorizado sale del stock
+}
+
 
 GRUPOS = {
     "comercio": "Comercio y retail",
@@ -179,7 +262,25 @@ RUBROS = {
     "otro": ("Personalizado / otro", "comodin", ()),
 }
 
-_DISPONIBLES = frozenset(c for c, (_n, _c, disp) in MODULOS.items() if disp)
+_DISPONIBLES = frozenset(c for c, (_n, _c, disp, _d) in MODULOS.items() if disp)
+
+
+def _con_dependencias(activos):
+    """Cierre transitivo de DEPENDENCIAS sobre un set de módulos.
+
+    Se aplica al RESOLVER (no al guardar) para que un preset de rubro incompleto o un
+    override suelto no produzcan una configuración imposible (Kardex sin Stock perpetuo).
+    El bucle converge: cada vuelta solo puede añadir, y el catálogo es finito."""
+    activos = set(activos)
+    while True:
+        extra = set()
+        for cod in activos:
+            for dep in DEPENDENCIAS.get(cod, ()):
+                if dep not in activos:
+                    extra.add(dep)
+        if not extra:
+            return activos
+        activos |= extra
 
 
 def _json_load(raw, default):
@@ -208,9 +309,14 @@ class ResCompany(models.Model):
     def l10n_pe_ne_modulos_efectivos(self):
         """Módulos activos de la empresa, o None si no configuró rubro (= sin gating).
 
-        NUCLEO ∪ unión(defaults de cada rubro) ∪ overrides-on − overrides-off,
-        con el núcleo inviolable y filtrado por disponibles. Multi-rubro suma, nunca
-        resta: la empresa Ferretería+Alquiler tiene los módulos de ambas."""
+        NUCLEO ∪ unión(defaults de cada rubro) ∪ overrides-on − overrides-off, más el
+        cierre de DEPENDENCIAS, con el núcleo inviolable y filtrado por disponibles.
+        Multi-rubro suma, nunca resta: la empresa Ferretería+Alquiler tiene los de ambas.
+
+        El cierre de dependencias va DESPUÉS de los overrides-off: apagar «Stock perpetuo»
+        teniendo «Kardex» encendido lo vuelve a encender, porque el Kardex sin movimientos
+        de stock no es una configuración válida sino una rota. Para apagarlo de verdad hay
+        que apagar antes lo que depende de él — y la UI lo dice."""
         self.ensure_one()
         rubros = [r for r in _json_load(self.l10n_pe_ne_rubros, []) if r in RUBROS]
         if not rubros:
@@ -226,7 +332,7 @@ class ResCompany(models.Model):
                 activos.add(cod)
             elif cod not in NUCLEO:   # el núcleo no se apaga ni a mano
                 activos.discard(cod)
-        return activos & _DISPONIBLES
+        return _con_dependencias(activos) & _DISPONIBLES
 
     def l10n_pe_ne_modulo_activo(self, cod):
         """True si el módulo está activo para la empresa (o si no hay rubro: legacy sin gating)."""
@@ -238,8 +344,15 @@ class ResCompany(models.Model):
         """Módulos con USO REAL en la historia de la empresa (fase 4 de la spec): comprobantes
         con detracción, guías emitidas, cotizaciones, membresías… Se usa al elegir rubro para
         PROTEGER lo que ya se usa (override automático) — elegir «Bodega» no puede empezar a
-        rechazar las detracciones que la empresa emite hace meses. Solo detecta lo que el motor
-        gatea (muro + menú); es un sondeo barato: un search limit=1 por módulo."""
+        rechazar las detracciones que la empresa emite hace meses. Es un sondeo barato: un
+        search limit=1 por módulo.
+
+        COBERTURA (importante, la UI depende de esto para no mentir): 27 de los 61 módulos
+        tienen un rastro persistente que se pueda sondear. El resto —los que no dejan dato
+        propio, como los libros PLE o la consulta pública— no es detectable y NO se protege
+        por esta vía; a esos los cubre la fusión de overrides de `l10n_pe_ne_set_rubro`, que
+        conserva lo que el dueño activó a mano. Al añadir un módulo con dato propio, añade
+        aquí su sondeo."""
         self.ensure_one()
         Move = self.env["account.move"].sudo()
         dom = [("company_id", "=", self.id)]
@@ -250,6 +363,12 @@ class ResCompany(models.Model):
 
         def hay_move(extra):
             return bool(Move.search(dom + extra, limit=1))
+
+        def hay_linea(extra):
+            # OJO: hay campos que viven en la LÍNEA, no en el move (placa por línea de
+            # combustible, fraccionamiento por línea). Sondearlos en account.move daría
+            # siempre False y el módulo quedaría desprotegido en silencio.
+            return bool(self.env["account.move.line"].sudo().search(dom + extra, limit=1))
 
         def hay_tax(code):
             taxes = self.env["account.tax"].sudo().search(
@@ -276,10 +395,37 @@ class ResCompany(models.Model):
             en_uso.add("C07")
         if hay_tax("1016"):
             en_uso.add("C12")
+        # ── Ampliación de cobertura ──────────────────────────────────────────
+        if hay_tax("7152"):                                        # bolsas plásticas
+            en_uso.add("C08")
+        # OJO: 'no_aplica' es un valor legítimo del selection, no ausencia. Sondear
+        # «!= False» marcaría C09 en uso para TODA empresa que haya tocado el campo.
+        if hay_move([("l10n_pe_ne_bancarizacion", "in", ("pendiente", "bancarizado"))]):
+            en_uso.add("C09")
+        if hay_move([("l10n_pe_ne_dua", "!=", False)]):
+            en_uso.add("R07")
+        # `l10n_pe_ne_cuotas` es Json y `_cuotas_display` es compute NO almacenado (no se
+        # puede buscar): la forma de pago es el rastro almacenado equivalente.
+        if hay_move([("l10n_pe_ne_forma_pago", "=", "Credito")]):
+            en_uso.add("V06")
+        if hay_move([("l10n_pe_ne_tipo_doc", "=", "20")]):
+            en_uso.add("E06")
+        if hay_move([("l10n_pe_ne_tipo_doc", "=", "40")]):
+            en_uso.add("E07")
+        if hay_linea([("l10n_pe_ne_placa", "!=", False)]):
+            en_uso.add("R01")
+        if hay_linea([("l10n_pe_ne_fraccionado", "=", True)]):
+            en_uso.add("I05")
+        if hay("stock.move"):                                      # llevó stock alguna vez
+            en_uso.add("I01")
+        if hay("stock.lot", [("expiration_date", "!=", False)]):
+            en_uso.add("I04")
         for cod, model in (("E08", "l10n_pe_ne.guia_remision"), ("V04", "l10n_pe_ne.cotizacion"),
                            ("V03", "l10n_pe_ne.nota_venta"), ("E14", "l10n_pe_ne.lote"),
                            ("V11", "l10n_pe_ne.recurrencia"), ("R10", "l10n_pe_ne.cita"),
-                           ("V09", "l10n_pe_ne.apartado")):
+                           ("V09", "l10n_pe_ne.apartado"), ("R06", "l10n_pe_ne.vehiculo"),
+                           ("G06", "l10n_pe_ne.establecimiento"),
+                           ("R05", "l10n_pe_ne.proyecto")):
             if hay(model):
                 en_uso.add(cod)
         return en_uso
@@ -317,8 +463,12 @@ class AccountMove(models.Model):
             ],
             "catalogoModulos": [
                 {"codigo": cod, "nombre": nombre, "categoria": cat,
-                 "nucleo": cod in NUCLEO, "disponible": disp}
-                for cod, (nombre, cat, disp) in MODULOS.items()
+                 "nucleo": cod in NUCLEO, "disponible": disp,
+                 # `descripcion` es lo que el dueño lee para decidir; `requiere` deja que la
+                 # UI explique por qué encender Kardex encendió también Stock perpetuo.
+                 "descripcion": desc,
+                 "requiere": list(DEPENDENCIAS.get(cod, ()))}
+                for cod, (nombre, cat, disp, desc) in MODULOS.items()
             ],
             "rubros": _json_load(company.l10n_pe_ne_rubros, []),
             "overrides": _json_load(company.l10n_pe_ne_modulos_override, {}),
@@ -371,16 +521,27 @@ class AccountMove(models.Model):
                 "funciones ve toda la empresa. Pídeselo al dueño o al supervisor."))
         payload = payload or {}
         rubros = payload.get("rubros") or []
-        overrides = payload.get("overrides") or {}
         desconocidos = [r for r in rubros if r not in RUBROS]
         if desconocidos:
             raise UserError(_("Rubro desconocido: %s") % ", ".join(desconocidos))
+
+        company = self.env.company
+        # ── Semántica de `overrides`: AUSENTE ≠ VACÍO ────────────────────────
+        # Ausente  → el llamador solo cambia de rubro: se CONSERVAN los ajustes manuales
+        #            que el dueño ya había hecho. Antes se reemplazaba por {} y cambiar de
+        #            tipo de negocio borraba en silencio todo lo activado a mano.
+        # Presente → es el estado autoritativo del ajuste fino (la pantalla manda el dict
+        #            completo, y quitar una clave es cómo se vuelve al default del rubro).
+        overrides = payload.get("overrides")
+        if overrides is None:
+            overrides = _json_load(company.l10n_pe_ne_modulos_override, {})
         malos = [c for c in overrides if c not in MODULOS]
         if malos:
             raise UserError(_("Módulo desconocido: %s") % ", ".join(malos))
-        overrides = {c: bool(v) for c, v in overrides.items()}
-
-        company = self.env.company
+        # Un override sobre el núcleo no tiene efecto (l10n_pe_ne_modulos_efectivos lo ignora):
+        # se descarta aquí para no persistir una intención falsa que además la bitácora
+        # rendería como «apagó Factura electrónica» — una traza de auditoría mintiendo.
+        overrides = {c: bool(v) for c, v in overrides.items() if c not in NUCLEO}
         # Fase 4 · protección de lo EN USO (spec: «con todos sus módulos actualmente en uso
         # marcados como activos (override), para que la migración nunca les oculte algo que ya
         # estaban usando»): si la selección dejaría fuera un módulo con historia real, se
@@ -397,7 +558,7 @@ class AccountMove(models.Model):
                     activos.add(cod)
                 elif cod not in NUCLEO:
                     activos.discard(cod)
-            efectivos_sim = activos & _DISPONIBLES
+            efectivos_sim = _con_dependencias(activos) & _DISPONIBLES
             en_uso = company.l10n_pe_ne_modulos_en_uso() & _DISPONIBLES
             protegidos = sorted(cod for cod in en_uso - efectivos_sim
                                 if overrides.get(cod) is not False)
@@ -460,8 +621,24 @@ class AccountMove(models.Model):
         company = self.env.company
         p = company.partner_id
         rubro_ok = bool([r for r in _json_load(company.l10n_pe_ne_rubros, []) if r in RUBROS])
-        series_ok = bool(self.env["l10n_pe_ne.serie"].sudo().search(
-            [("company_id", "=", company.id), ("activa", "=", True)], limit=1))
+        # «Series declaradas POR LOCAL»: el check debe verificar lo que su etiqueta promete.
+        # Antes era un search global limit=1: con dos locales y una sola serie daba ✓, y el
+        # segundo local descubría que no podía emitir recién al intentarlo.
+        Serie = self.env["l10n_pe_ne.serie"].sudo()
+        locales = self.env["l10n_pe_ne.establecimiento"].sudo().search(
+            [("company_id", "=", company.id), ("active", "=", True)])
+        if locales:
+            sin_serie = [loc for loc in locales
+                         if not any(s.activa for s in loc.serie_ids)]
+            series_ok = not sin_serie
+            series_detalle = ("Qué serie emite cada local (numeración fiscal)" if series_ok
+                              else "Sin serie activa: %s" % ", ".join(
+                                  loc.codigo or loc.direccion or "local" for loc in sin_serie[:3]))
+        else:
+            # Negocio de un solo punto de emisión: aún no declaró establecimientos anexos.
+            series_ok = bool(Serie.search(
+                [("company_id", "=", company.id), ("activa", "=", True)], limit=1))
+            series_detalle = "Qué serie emite tu negocio (numeración fiscal)"
         productos_ok = bool(self.env["product.template"].sudo().search(
             [("company_id", "in", (company.id, False)), ("sale_ok", "=", True)], limit=1))
         items = [
@@ -469,7 +646,7 @@ class AccountMove(models.Model):
              "detalle": "El menú y los catálogos se enfocan en tu rubro",
              "ruta": "/configuracion"},
             {"clave": "series", "titulo": "Series declaradas por local", "ok": series_ok,
-             "detalle": "Qué serie emite cada local (numeración fiscal)",
+             "detalle": series_detalle,
              "ruta": "/series"},
             {"clave": "logo", "titulo": "Logo del negocio", "ok": bool(company.logo),
              "detalle": "Sale en el ticket y la representación A4",
@@ -577,10 +754,19 @@ class AccountMove(models.Model):
         nuevos = set(NUCLEO)
         for r in rubros:
             nuevos.update(RUBROS[r][2])
-        nuevos &= _DISPONIBLES
+        # Los overrides YA guardados sobreviven al cambio de rubro (ver l10n_pe_ne_set_rubro),
+        # así que el preview debe contarlos o mentiría sobre lo que va a salir.
+        for cod, on in _json_load(company.l10n_pe_ne_modulos_override, {}).items():
+            if cod not in MODULOS:
+                continue
+            if on:
+                nuevos.add(cod)
+            elif cod not in NUCLEO:
+                nuevos.discard(cod)
+        nuevos = _con_dependencias(nuevos) & _DISPONIBLES
         en_uso = company.l10n_pe_ne_modulos_en_uso() & _DISPONIBLES
         protegidos = sorted(en_uso - nuevos)
-        efectivos_nuevos = nuevos | set(protegidos)
+        efectivos_nuevos = _con_dependencias(nuevos | set(protegidos)) & _DISPONIBLES
 
         def _nombres(cods):
             return [{"codigo": c, "nombre": MODULOS[c][0]} for c in sorted(cods)]

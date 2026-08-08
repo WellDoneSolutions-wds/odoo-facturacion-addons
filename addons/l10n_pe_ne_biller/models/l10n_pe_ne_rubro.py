@@ -472,6 +472,13 @@ class AccountMove(models.Model):
             ],
             "rubros": _json_load(company.l10n_pe_ne_rubros, []),
             "overrides": _json_load(company.l10n_pe_ne_modulos_override, {}),
+            # Quién puede editar lo decide el MISMO gate que corta el guardado, y viaja al
+            # cliente. Antes la SPA reimplementaba la regla a partir de los flags del perfil
+            # y lo hacía en sentido permisivo (`puedeSupervisar !== false` es true cuando el
+            # campo no viene): un usuario sin permiso veía los controles habilitados y solo
+            # descubría el muro al guardar. Duplicar una regla de permisos es pedir que se
+            # desincronice; esto la deja en un solo sitio.
+            "puedeEditar": self._l10n_pe_ne_puede_config_rubro(),
             "modulos": sorted(efectivos) if efectivos is not None else None,
             # Fase 4: módulos con historia real — la UI los marca «en uso» y el guardado los
             # protege con override automático si el rubro elegido no los trae.

@@ -149,16 +149,26 @@ El bloqueo por régimen va al lado.
 Seis tramos. El orden importa: **F0 bloquea a F3**, y todo lo demás depende de F1.
 
 ### F0 — Cerrar las dos preguntas abiertas
-*Bloqueante de F3 · beta SUNAT*
+*Bloqueante de F3 — **replanteado**, ver corrección*
 
-Ninguna de las dos se puede resolver leyendo normas: hay que probarlas contra beta hasta CDR 0.
-Detalle en la sección 6.
+> **Corrección al plan original.** Aquí decía que ambas preguntas se resolvían "probando contra beta
+> hasta CDR 0". **Es falso para la primera.** El CPE no lleva el régimen en ninguna parte — ni en el
+> UBL 2.1, ni en los XSD del SFS 2.4, ni en los XSL de validación. SUNAT **nunca** rechaza un
+> comprobante por el régimen del emisor, así que beta aceptará una NC de un NRUS igual que de
+> cualquier otro. Si el NRUS puede emitir NC/ND es una pregunta **legal**, no técnica: se resuelve
+> con consulta a SUNAT o criterio contable profesional.
+>
+> La contrapartida es buena noticia: **equivocarse en el régimen no rompe la emisión.** Es un dato de
+> UX y de validación L1, no de cumplimiento del XML. Por eso F1 y F2 pudieron avanzar sin esperar
+> nada, y por eso la decisión sobre NC/ND fue **permisivo y documentado**.
 
-- ¿El NRUS puede emitir nota de crédito y débito sobre boleta?
-- ¿Qué afectación de IGV y qué `TaxTotal` lleva una boleta NRUS en el XML?
+- ¿El NRUS puede emitir nota de crédito y débito sobre boleta? → **pregunta legal**, no de beta.
+  Decisión tomada: permitirlas.
+- ¿Qué afectación de IGV y qué `TaxTotal` lleva una boleta NRUS en el XML? → esta sí se valida
+  contra beta, pero "beta lo acepta" ≠ "es la representación legalmente correcta".
 
 ### F1 — El dato y el muro (aquí está el 80 % del valor)
-*2–3 días · odoo · web-bff*
+*✅ **HECHO** — rama `feat/regimen-tributario`, commit `6e79a51`*
 
 - `l10n_pe_ne_regimen` en `res.company`, con `regimen_fecha_inicio` y `nrus_categoria`.
   **Default vacío = legacy sin gating**, igual que hace el sistema de rubros: ausente ≠ prohibido.
@@ -169,7 +179,7 @@ Detalle en la sección 6.
 - Aceptar `regimen` en el provisioning del tenant, para que nazca ya restringido.
 
 ### F2 — Gating de UI (mecánico pero disperso)
-*2 días · web-bff*
+*✅ **HECHO** — rama `feat/regimen-tributario`, commit `dbed0503`*
 
 Los tipos de comprobante están **hardcodeados en 9 pantallas** y ninguna los pide al API. Hay que
 centralizar y filtrar.
@@ -246,6 +256,28 @@ puesto**, y en poder decir que el sistema cubre los cuatro regímenes de verdad.
 
 ---
 
+## 6-bis. Lo que aprendimos implementando F1 y F2
+
+Cuatro trampas que una revisión adversarial cazó y que no estaban en este plan. Quedan aquí porque
+cualquiera que toque este eje se las va a encontrar otra vez.
+
+- **El bypass de admin en el muro era un agujero real.** `admin@ne.com` es miembro de
+  `base.group_system` y es el login documentado de la SPA. Para 01/03/04 la regla L1 hace de red,
+  pero **20/40 son `account.payment`**: no pasan por el motor L1 y el pre-flight les devuelve
+  `{"findings": []}`, así que el muro era su única barrera. Criterio adoptado: **el bypass solo se
+  justifica donde otra capa hace de red; donde no la hay, no debe haber bypass.**
+- **Bloquear la familia de serie `F` bloquea las notas de crédito.** Una NC sobre una factura exige
+  prefijo `F`, así que el guard ingenuo por letra dejaba a un negocio recién acogido al NRUS sin
+  poder anular sus facturas anteriores — el daño exacto que quisimos evitar al permitir 07/08. Hay
+  que mirar el `tipo_doc` de la serie, no la letra, y no bloquear la **edición** de series
+  preexistentes.
+- **Parchear solo el front deja puertas tapiadas.** Cotización y orden de trabajo derivan a factura
+  **en el servidor** cuando el cliente tiene RUC. Con el muro puesto y sin degradación, la cola de
+  cobro de un NRUS quedaba inoperable: no es una puerta trasera, es una operación legítima que el
+  sistema impedía. Degradar a boleta, no reventar.
+- **Invalidar un caché por call site no escala.** El primer intento olvidó 5 de 6 puntos de
+  mutación. Se resolvió invalidando **por ruta**, en la capa del cliente HTTP.
+
 ## 7. Lo que no hay que hacer
 
 - **No modelar la desaparición del RER y el RMT.** El MEF la propuso en el Marco Macroeconómico
@@ -259,6 +291,17 @@ puesto**, y en poder decir que el sistema cubre los cuatro regímenes de verdad.
   diseño; forzarlo rompe la doctrina del aplicador.
 - **No resolver la regla tributaria en el front.** El servidor debe entregar la lista de tipos
   permitidos ya resuelta, igual que hoy entrega `puedeEditar`.
+- **No comprar una API para saber el régimen.** Revisadas la Consulta RUC pública de SUNAT, su API
+  oficial (OAuth2: solo GRE, SIRE y consulta de CPE), el Padrón Reducido, datos abiertos y nueve
+  proveedores del mercado (migo.pe, decolecta, apis.net.pe, json.pe, apiperu…): **ninguno devuelve el
+  régimen**. La única fuente que lo trae explícito es la Ficha RUC descargada desde SOL — manual y
+  con tope de 3 al día. Un proveedor dice ofrecerlo pero exige la Clave SOL del usuario: descartable
+  por seguridad. **El régimen se pregunta.**
+- **No inferir "sin factura autorizada ⇒ NRUS".** Las autorizaciones de la ficha RUC son históricas y
+  acumulativas: quien estuvo en Régimen General conserva FACTURA aunque hoy esté en NRUS. Y el campo
+  F.806/816 es solo impresión física, así que un emisor 100 % electrónico lo tiene vacío. Sirve para
+  **advertir**, nunca para decidir. La inferencia fiable es solo la inversa: factura autorizada ⇒ no
+  es NRUS.
 
 ---
 

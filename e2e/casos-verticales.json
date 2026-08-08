@@ -1,0 +1,105 @@
+[
+  {
+    "id": "PESO-KGM-BOL",
+    "doc": "boleta",
+    "title": "Venta al peso: boleta en KGM con cantidad decimal (balanza)",
+    "partner": "dni",
+    "lines": [{ "tax": "gravado", "price": 12.5, "qty": 2.345, "discount": 0, "uom": "KGM", "bags": 0 }],
+    "flags": { "serie": "B001" },
+    "expected": "accepted",
+    "source": "vertical venta al peso / balanza (EAN-13 con peso embebido)"
+  },
+  {
+    "id": "PESO-KGM-FAC",
+    "doc": "factura",
+    "title": "Venta al peso: factura en KGM con cantidad decimal",
+    "partner": "ruc",
+    "lines": [{ "tax": "gravado", "price": 8.9, "qty": 15.75, "discount": 0, "uom": "KGM", "bags": 0 }],
+    "flags": { "serie": "F001" },
+    "expected": "accepted",
+    "source": "vertical venta al peso / balanza"
+  },
+  {
+    "id": "FERR-MTR",
+    "doc": "factura",
+    "title": "Ferreteria: cable vendido por METRO (MTR)",
+    "partner": "ruc",
+    "lines": [{ "tax": "gravado", "price": 4.2, "qty": 32.5, "discount": 0, "uom": "MTR", "bags": 0 }],
+    "flags": { "serie": "F001" },
+    "expected": "accepted",
+    "source": "vertical ferreteria (MTR/MTK)"
+  },
+  {
+    "id": "FERR-MTK",
+    "doc": "factura",
+    "title": "Ferreteria: mayolica vendida por METRO CUADRADO (MTK)",
+    "partner": "ruc",
+    "lines": [{ "tax": "gravado", "price": 39.9, "qty": 18.4, "discount": 0, "uom": "MTK", "bags": 0 }],
+    "flags": { "serie": "F001" },
+    "expected": "accepted",
+    "source": "vertical ferreteria (MTR/MTK)"
+  },
+  {
+    "id": "MAD-MTQ",
+    "doc": "factura",
+    "title": "Maderera: madera vendida por METRO CUBICO (MTQ)",
+    "partner": "ruc",
+    "lines": [{ "tax": "gravado", "price": 850.0, "qty": 3.275, "discount": 0, "uom": "MTQ", "bags": 0 }],
+    "flags": { "serie": "F001" },
+    "expected": "accepted",
+    "source": "vertical maderera (calculadora de volumen MTQ)"
+  },
+  {
+    "id": "TEX-MTR",
+    "doc": "factura",
+    "title": "Textil: tela vendida por METRO (MTR)",
+    "partner": "ruc",
+    "lines": [{ "tax": "gravado", "price": 22.0, "qty": 45.0, "discount": 0, "uom": "MTR", "bags": 0 }],
+    "flags": { "serie": "F001" },
+    "expected": "accepted",
+    "source": "vertical textil (MTR + docena DZN)"
+  },
+  {
+    "id": "TEX-DZN",
+    "doc": "factura",
+    "title": "Textil: polos vendidos por DOCENA (DZN, antes DPC)",
+    "partner": "ruc",
+    "lines": [{ "tax": "gravado", "price": 180.0, "qty": 6, "discount": 0, "uom": "DZN", "bags": 0 }],
+    "flags": { "serie": "F001" },
+    "expected": "accepted",
+    "source": "vertical textil — el codigo correcto de docena es DZN, no DPC"
+  },
+  {
+    "id": "SERV-HUR",
+    "doc": "factura",
+    "title": "Servicios por tiempo: consultoria facturada por HORA (HUR)",
+    "partner": "ruc",
+    "lines": [{ "tax": "gravado", "price": 120.0, "qty": 7.5, "discount": 0, "uom": "HUR", "bags": 0 }],
+    "flags": { "serie": "F001" },
+    "expected": "accepted",
+    "source": "vertical servicios por hora/dia (rango horario -> HUR)"
+  },
+  {
+    "id": "SERV-DAY",
+    "doc": "factura",
+    "title": "Servicios por tiempo: alquiler de equipo por DIA (DAY)",
+    "partner": "ruc",
+    "lines": [{ "tax": "gravado", "price": 350.0, "qty": 12, "discount": 0, "uom": "DAY", "bags": 0 }],
+    "flags": { "serie": "F001" },
+    "expected": "accepted",
+    "source": "vertical servicios por hora/dia (rango fechas -> DAY)"
+  },
+  {
+    "id": "ALQ-DETR-019",
+    "doc": "factura",
+    "title": "Alquiler: factura con detraccion 019 arrendamiento al 10%",
+    "partner": "ruc",
+    "lines": [{ "tax": "gravado", "price": 5000.0, "qty": 1, "discount": 0, "uom": "ZZ", "bags": 0 }],
+    "flags": {
+      "serie": "F001",
+      "detraccion": { "code": "019", "rate": 10.0, "medio_pago": "001" }
+    },
+    "expected": "accepted",
+    "source": "vertical alquiler/rental — preset detraccion arrendamiento 019 (10%)"
+  }
+]

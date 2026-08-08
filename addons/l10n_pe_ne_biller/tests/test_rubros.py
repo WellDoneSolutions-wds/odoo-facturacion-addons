@@ -282,6 +282,27 @@ class TestRubros(L10nPeSeedMixin, TransactionCase):
         self._set(["bodega"])
         self.assertTrue(user.with_user(user).l10n_pe_ne_perfil()["rubroConfigurado"])
 
+    # --------------------------------------- robustez · permisos al cliente
+    def test_config_expone_puede_editar(self):
+        """`puedeEditar` sale del MISMO gate que corta el guardado.
+
+        La SPA reimplementaba la regla con los flags del perfil y en sentido permisivo
+        (`puedeSupervisar !== false` es true cuando el campo no viene): un usuario sin
+        permiso veía los controles habilitados y solo descubría el muro al guardar."""
+        AM = self.env["account.move"]
+        self.assertTrue(AM.l10n_pe_ne_rubro_config()["puedeEditar"])   # tests corren como admin
+
+        emisor = self._emisor()
+        cfg = AM.with_user(emisor).l10n_pe_ne_rubro_config()
+        self.assertFalse(cfg["puedeEditar"], "un emisor raso no configura el rubro")
+        # Y el valor coincide con el gate real, no con una heurística paralela.
+        self.assertEqual(
+            cfg["puedeEditar"],
+            AM.with_user(emisor)._l10n_pe_ne_puede_config_rubro())
+        # Coherencia dura: si dice que no puede, guardar debe cortar.
+        with self.assertRaises(AccessError):
+            AM.with_user(emisor).l10n_pe_ne_set_rubro({"rubros": ["bodega"]})
+
     # ------------------------------------- robustez · fusión de overrides
     def test_cambio_de_rubro_conserva_los_ajustes_manuales(self):
         """El bug que rompía la promesa «lo que ya usas nunca se pierde».

@@ -23,6 +23,10 @@ from odoo import _, api, fields, models, SUPERUSER_ID
 from odoo.exceptions import AccessError, UserError
 from odoo.tools import config
 
+# El régimen tributario es un eje ORTOGONAL al rubro (ver l10n_pe_ne_regimen.py), pero comparte
+# la bitácora: el historial de configuración es uno solo para el dueño.
+from .l10n_pe_ne_regimen import REGIMENES, TIPO_NOMBRE, regimen_label
+
 # ─────────────────────────────────────────────────────── catálogo de módulos
 # Núcleo: activos para el 100% de los rubros, sin excepción y sin apagado posible.
 # Son la obligación mínima de cualquier emisor (facturar, notas, caja, catálogo,
@@ -716,6 +720,16 @@ class AccountMove(models.Model):
                 cod = campo.split(":", 1)[1]
                 titulo = "Rechazo de seguridad (muro)"
                 resumen = "intento de usar %s sin el módulo activo" % MODULOS.get(cod, (cod,))[0]
+            elif campo == "regimen":
+                titulo = "Cambio de régimen tributario"
+                resumen = "%s → %s" % (regimen_label(_json_load(f.antes, {})),
+                                       regimen_label(_json_load(f.despues, {})))
+            elif campo.startswith("rechazo-regimen:"):
+                cod = campo.split(":", 1)[1]
+                reg = REGIMENES.get(f.antes or "", ("sin régimen",))[0]
+                titulo = "Rechazo de seguridad (régimen tributario)"
+                resumen = "intento de emitir %s, no permitido en el %s" % (
+                    TIPO_NOMBRE.get(cod, cod), reg)
             else:
                 titulo = campo
                 resumen = ""
@@ -723,7 +737,9 @@ class AccountMove(models.Model):
                 "id": f.id, "titulo": titulo, "resumen": resumen,
                 "usuario": f.user_id.name or "—",
                 "fecha": fields.Datetime.to_string(f.create_date),
-                "esRechazo": campo.startswith("rechazo:"),
+                # startswith("rechazo") y no ("rechazo:"): cubre también los del muro de
+                # régimen tributario ("rechazo-regimen:01"), que la UI destaca igual.
+                "esRechazo": campo.startswith("rechazo"),
             })
         return out
 
@@ -808,6 +824,34 @@ class AccountMove(models.Model):
         }
 
     # ------------------------------------------------------- muro de emisión
+    def _l10n_pe_ne_bitacora_segura(self, vals):
+        """Escribe una fila de bitácora que debe SOBREVIVIR al rollback provocado por el
+        UserError que viene inmediatamente después (la transacción del request se revierte y
+        se llevaría la evidencia): se escribe en un cursor APARTE.
+
+        EXCEPTO en tests: ahí registry.cursor() devuelve el MISMO cursor del test y el `with`
+        lo cerraría, rompiendo todo lo posterior — se escribe con el env normal.
+
+        La bitácora nunca debe impedir el mensaje al usuario: de ahí el except amplio. Lo
+        comparten el muro de módulos (rubro) y el muro de régimen tributario.
+
+        NO escribe en PRE-FLIGHT. El pre-flight simula la emisión (quick_emit + rollback por
+        savepoint) solo para poder AVISAR, y el usuario que abre un borrador no ha intentado
+        emitir nada; como esta fila se escribe en un cursor aparte, sobreviviría al rollback y
+        el historial se llenaría de «intentos» que nunca existieron —y un intento real dejaría
+        DOS filas, la del pre-flight y la de la emisión—. La bitácora es para intentos de
+        emisión reales."""
+        if self.env.context.get("l10n_pe_ne_preflight"):
+            return
+        try:
+            if config["test_enable"]:
+                self.env["l10n_pe_ne.rubro_auditoria"].sudo().create(vals)
+            else:
+                with self.env.registry.cursor() as cr:
+                    api.Environment(cr, SUPERUSER_ID, {})["l10n_pe_ne.rubro_auditoria"].create(vals)
+        except Exception:  # noqa: BLE001
+            pass
+
     def _l10n_pe_ne_check_modulo(self, cod, etiqueta):
         """Muro por módulo en la EMISIÓN: si la empresa configuró rubro y el payload trae un
         régimen cuyo módulo no está activo, se corta ANTES de armar el move. Vive en el
@@ -822,26 +866,13 @@ class AccountMove(models.Model):
             return
         if company.l10n_pe_ne_modulo_activo(cod):
             return
-        # La fila debe SOBREVIVIR al rollback que provoca el propio UserError (la transacción
-        # del request se revierte y se llevaría la evidencia): se escribe en un cursor APARTE.
-        # EXCEPTO en tests: ahí registry.cursor() devuelve el MISMO cursor del test y el `with`
-        # lo cerraría (rompiendo todo lo posterior) — se escribe con el env normal.
-        # La bitácora nunca debe impedir el mensaje al usuario — de ahí el except amplio.
-        vals = {
+        self._l10n_pe_ne_bitacora_segura({
             "company_id": company.id,
             "user_id": self.env.user.id,
             "campo": "rechazo:%s" % cod,
             "antes": "",
             "despues": etiqueta,
-        }
-        try:
-            if config["test_enable"]:
-                self.env["l10n_pe_ne.rubro_auditoria"].sudo().create(vals)
-            else:
-                with self.env.registry.cursor() as cr:
-                    api.Environment(cr, SUPERUSER_ID, {})["l10n_pe_ne.rubro_auditoria"].create(vals)
-        except Exception:  # noqa: BLE001
-            pass
+        })
         raise UserError(_(
             "«%(etiqueta)s» no está activo para el rubro de tu negocio. "
             "Actívalo en Datos del negocio → Rubro, o pídeselo al dueño.",

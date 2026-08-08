@@ -246,6 +246,30 @@ class L10nPeNeSerie(models.Model):
             if ocupada and ocupada.establecimiento_id != estab:
                 self._l10n_pe_ne_error_serie_ocupada(codigo, ocupada)
             rec = ocupada
+        # Régimen tributario (F1): dar de ALTA una serie de FACTURA en un régimen que no
+        # permite facturar es preparar el error que el muro de emisión va a rechazar después —
+        # mejor cortarlo aquí, donde el dueño todavía está configurando y no hay un cliente
+        # esperando en el mostrador.
+        #
+        # Mira el TIPO de la serie, no su letra. La letra 'F' NO implica factura: una nota de
+        # crédito SOBRE una factura exige serie con prefijo F (_FAMILIA arriba, y
+        # `_l10n_pe_serie_prefix` hereda la familia del documento afectado). Bloquear por letra
+        # dejaba al negocio que pasó de RER a NRUS en enero sin poder declarar su FC01 para
+        # anular las facturas de diciembre: la NC quedaba inemitible, justo lo contrario de lo
+        # que se buscó al permitir 07/08 en el NRUS.
+        #
+        # Y solo en el ALTA (`not rec`): una serie F preexistente se tiene que poder seguir
+        # editando —corregirle el local, apagarla, quitarle el «predeterminada»— después de
+        # cambiar de régimen. Prohibir la edición no borra la serie, solo impide ordenarla.
+        if not rec and tipo_doc == '01' \
+                and not self.env.company.l10n_pe_ne_tipo_permitido('01'):
+            raise UserError(_(
+                "La serie «%(serie)s» es de FACTURA y tu régimen tributario no permite "
+                "emitir facturas. Declárala como serie de BOLETA (empieza con B), o corrige "
+                "el régimen en Configuración → Régimen tributario. Para anular facturas "
+                "antiguas no necesitas esto: da de alta la serie como NOTA DE CRÉDITO, que sí "
+                "puedes emitir y sí lleva prefijo F.",
+                serie=codigo))
         # 'activa' NO se toca al editar salvo que lo pidan: el editor cambia serie/tipo/local/
         # predeterminada, y una serie apagada no debe revivir por corregirle el local. Encenderla
         # o apagarla es la acción explícita de l10n_pe_ne_serie_toggle.

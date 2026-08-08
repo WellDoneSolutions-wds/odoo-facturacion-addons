@@ -8,6 +8,11 @@
       <field name="vat" position="after">
         <field name="l10n_pe_ne_cuenta_detraccion"/>
         <field name="l10n_pe_ne_api_key" password="True"/>
+        <!-- Régimen tributario (F1). Vacío = sin gating (legacy): la empresa emite todo,
+             que es como se comportaba antes de que estos campos existieran. -->
+        <field name="l10n_pe_ne_regimen"/>
+        <field name="l10n_pe_ne_regimen_fecha" invisible="not l10n_pe_ne_regimen"/>
+        <field name="l10n_pe_ne_nrus_categoria" invisible="l10n_pe_ne_regimen != 'nrus'"/>
       </field>
     </field>
   </record>

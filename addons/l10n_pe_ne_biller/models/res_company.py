@@ -7,6 +7,11 @@ from markupsafe import Markup, escape
 from odoo import _, api, fields, models
 from odoo.exceptions import AccessError, UserError
 
+# Catálogo de regímenes tributarios (fuente única; la resolución vive en l10n_pe_ne_regimen.py).
+# Se importa para construir el Selection desde el catálogo y no tener dos listas que diverjan.
+from .l10n_pe_ne_regimen import NRUS_CATEGORIAS, REGIMEN_SELECTION
+from .l10n_pe_ne_regimen import REGIMENES as REGIMEN_CODIGOS
+
 _logger = logging.getLogger(__name__)
 
 # API pública gratuita de tipo de cambio SUNAT (configurable por parámetro del
@@ -280,6 +285,38 @@ class ResCompany(models.Model):
              "(por resolución). Activa la detección/sugerencia de percepción en Emitir para "
              "los bienes del Apéndice 1; sin esto, el toggle manual sigue disponible.",
     )
+    # ─────────────────────────────────────────────── Régimen tributario (F1)
+    # Mismo molde que l10n_pe_ne_agente_percepcion (arriba): dato tributario del EMISOR que
+    # viaja al front y habilita/deshabilita controles. La resolución de qué comprobantes
+    # permite cada régimen vive en l10n_pe_ne_regimen.py (catálogo en Python).
+    #
+    # Default False = SIN régimen configurado = legacy = SIN gating. Es innegociable: ninguna
+    # compañía existente puede perder la capacidad de emitir por un upgrade. «Ausente ≠
+    # prohibido», la misma doctrina del sistema de rubros y del menú por rol.
+    l10n_pe_ne_regimen = fields.Selection(
+        REGIMEN_SELECTION,
+        string="Régimen tributario",
+        help="Régimen del emisor ante SUNAT. Decide qué comprobantes puede emitir: el Nuevo "
+             "RUS tiene PROHIBIDO emitir factura (emitir una lo saca del régimen de forma "
+             "retroactiva). Vacío = sin restricción (compatibilidad con emisores ya dados de "
+             "alta).")
+    # DECLARATIVO, no operativo: el gating NO lo mira (ver el comentario `# F4:` en
+    # l10n_pe_ne_tipos_permitidos). Se guarda porque el dueño necesita anotar desde cuándo
+    # rige su régimen —bajar a NRUS o RER solo surte efecto con la declaración de enero— y
+    # porque es el dato que un juicio por fecha necesitará el día que se implemente. Prometer
+    # aquí que «explica por qué un comprobante antiguo se juzgó con otro régimen» sería
+    # mentira: hoy todos los comprobantes se juzgan con el régimen vigente.
+    l10n_pe_ne_regimen_fecha = fields.Date(
+        string="Vigente desde",
+        help="Fecha desde la que rige el régimen elegido, para tu registro. Opcional y solo "
+             "informativa: el sistema aplica siempre el régimen que tengas guardado ahora, "
+             "también a los comprobantes con fecha anterior.")
+    l10n_pe_ne_nrus_categoria = fields.Selection(
+        list(NRUS_CATEGORIAS),
+        string="Categoría del Nuevo RUS",
+        help="Categoría del NRUS (D. Leg. 937 art. 7): fija la cuota y el tope MENSUAL de "
+             "ingresos y compras. Solo aplica con régimen Nuevo RUS.")
+
     # Redondeo de efectivo (Ley 29571 / retiro de monedas < S/ 0.10). Activo por defecto: cobrar
     # exacto una fracción que no existe en efectivo expone al negocio ante INDECOPI si redondea en su
     # favor; el modo 'favor' (hacia abajo) es el seguro. Solo afecta el efectivo, nunca el XML.
@@ -381,6 +418,20 @@ class ResCompany(models.Model):
             cvals['l10n_pe_ne_api_key'] = vals['apiKey']
         if vals.get('cuentaDetraccion'):
             cvals['l10n_pe_ne_cuenta_detraccion'] = vals['cuentaDetraccion']
+        # Régimen tributario (F1): el tenant puede NACER ya restringido, para que un NRUS no
+        # llegue nunca a ver el botón de factura. Ausente = legacy = sin gating (no se toca lo
+        # que ya tuviera la compañía: el alta idempotente no debe borrar su régimen).
+        if vals.get('regimen'):
+            regimen = str(vals['regimen']).strip().lower()
+            if regimen not in REGIMEN_CODIGOS:
+                raise UserError(_("Régimen tributario desconocido: %s") % vals['regimen'])
+            cvals['l10n_pe_ne_regimen'] = regimen
+            if regimen == 'nrus' and vals.get('nrusCategoria'):
+                categoria = str(vals['nrusCategoria']).strip().lower()
+                if categoria not in dict(NRUS_CATEGORIAS):
+                    raise UserError(
+                        _("Categoría del Nuevo RUS desconocida: %s") % vals['nrusCategoria'])
+                cvals['l10n_pe_ne_nrus_categoria'] = categoria
         # Capa 1 (rubro): el alta puede traer el/los rubro(s) del negocio para que el tenant
         # nazca con sus módulos ya resueltos (spec §10 — flujo de onboarding). Import tardío:
         # res_company se importa antes que l10n_pe_ne_rubro en __init__.

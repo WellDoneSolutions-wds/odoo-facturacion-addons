@@ -18,6 +18,10 @@ from datetime import date, datetime
 from odoo import _, api, fields, models, tools
 from odoo.exceptions import UserError, ValidationError
 
+# Nombres de tipo de comprobante para los mensajes: el catálogo del régimen tributario es la
+# fuente única (l10n_pe_ne_regimen.py), así el lote no mantiene una lista paralela.
+from .l10n_pe_ne_regimen import TIPO_NOMBRE as _TIPO_NOMBRE
+
 # Cabeceras de la plantilla/hoja 'Ventas' (orden exacto; el parseo lee por NOMBRE normalizado,
 # no por posición, pero la plantilla las escribe en este orden).
 _HEADERS = ["venta", "tipo", "serie", "fecha", "tipo doc cliente", "num doc cliente",
@@ -255,6 +259,19 @@ class L10nPeNeLote(models.Model):
         if not tipo:
             for f in bloque:
                 local.append((f["filaExcel"], _("Tipo no soportado en emisión masiva; usa el formulario individual")))
+        # Régimen tributario (F1): el muro de emisión corta fila por fila en
+        # _l10n_pe_ne_procesar_fila, pero para entonces el lote ya se marcó 'validado' y el
+        # usuario ve 200 filas caer a 'error' una por una. La validación previa existe
+        # exactamente para eso: decirlo ANTES, con el archivo todavía corregible. Aquí NO se
+        # degrada a boleta (a diferencia de cobrar una cotización): en el Excel el tipo lo
+        # ELIGIÓ el usuario, columna por columna, y cambiárselo en silencio emitiría 200
+        # comprobantes que no pidió.
+        elif not self.env.company.l10n_pe_ne_tipo_permitido(tipo):
+            msg = _("Tu régimen tributario no permite emitir %s") % _TIPO_NOMBRE.get(tipo, tipo)
+            if self.env.company.l10n_pe_ne_tipo_permitido("03"):
+                msg += _("; cambia la columna 'tipo' a BOLETA")
+            for f in bloque:
+                local.append((f["filaExcel"], msg))
         for f in bloque[1:]:
             mismo = ((f["tipo"], f["serie"], f["cli_num"], f["moneda"]) ==
                      (first["tipo"], first["serie"], first["cli_num"], first["moneda"])

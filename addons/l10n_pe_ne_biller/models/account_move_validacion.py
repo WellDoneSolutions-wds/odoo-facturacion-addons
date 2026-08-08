@@ -39,6 +39,9 @@ class AccountMove(models.Model):
             self._l10n_pe_ne_regla_convenio_cubierto,   # convenio: cubierto ≤ importe a cobrar
             self._l10n_pe_ne_regla_controlado_receta,   # farma: controlado exige receta retenida
             self._l10n_pe_ne_regla_linea_valor_cero,    # SUNAT 2028: línea onerosa con importe 0
+            self._l10n_pe_ne_regla_regimen_tipo_doc,    # régimen: tipo de comprobante no permitido
+            self._l10n_pe_ne_regla_regimen_exportacion, # régimen: NRUS no exporta con factura
+            self._l10n_pe_ne_regla_regimen_detraccion,  # régimen: boleta NRUS exceptuada del SPOT
         ):
             findings += regla() or []
         return findings
@@ -263,6 +266,66 @@ class AccountMove(models.Model):
                 ),
             }]
         return []
+
+    # ------------------------------------------------- régimen tributario del emisor (F1)
+    # Estas tres reglas son la cara DECLARATIVA del gating por régimen: el muro de
+    # account_move_api corta la emisión, y estas hacen que el pre-flight de la SPA lo avise
+    # antes de gastar un envío, con un `code` propio que el front puede enganchar a la
+    # pantalla de configuración. Empresa sin régimen configurado no dispara ninguna.
+    def _l10n_pe_ne_regla_regimen_tipo_doc(self):
+        """El régimen del emisor no permite ese tipo de comprobante. El caso caro es el NRUS
+        emitiendo factura: no es una multa, es la INCLUSIÓN retroactiva en el RMT/General
+        (D. Leg. 937 art. 16.2)."""
+        company = self._l10n_pe_ne_regimen_company()
+        tipo = self._l10n_pe_document_type()
+        if company.l10n_pe_ne_tipo_permitido(tipo):
+            return []
+        return [{
+            "code": "regimen-tipo-doc", "campo": "tipoDoc", "nivel": "error",
+            "mensaje": self._l10n_pe_ne_regimen_mensaje(tipo, company=company),
+        }]
+
+    def _l10n_pe_ne_regla_regimen_exportacion(self):
+        """Exportación (tipOperacion 0200) en NRUS. El RCP art. 4 le manda emitir BOLETA por su
+        exportación: la factura de exportación es justamente el documento que no puede emitir.
+        Regla propia (y no solo la de tipo de documento) porque el 0200 se DERIVA de las
+        afectaciones de las líneas —el usuario nunca eligió «factura», eligió exportar— y el
+        mensaje tiene que hablar de eso."""
+        company = self._l10n_pe_ne_regimen_company()
+        if company.l10n_pe_ne_regimen != "nrus":
+            return []
+        if self._l10n_pe_tipo_operacion() != "0200":
+            return []
+        return [{
+            "code": "regimen-exportacion", "campo": "tipOperacion", "nivel": "error",
+            "mensaje": _(
+                "Tu negocio está en el Nuevo RUS y no puede emitir una factura de exportación. "
+                "El Reglamento de Comprobantes de Pago (art. 4) le manda sustentar la "
+                "exportación con una BOLETA de venta. Quita la afectación de exportación de "
+                "las líneas o emite el comprobante como boleta."
+            ),
+        }]
+
+    def _l10n_pe_ne_regla_regimen_detraccion(self):
+        """Detracción (SPOT) en una venta del NRUS. La operación está EXCEPTUADA del sistema
+        cuando el comprobante no permite sustentar crédito fiscal (RS 183-2004 art. 8), que es
+        el caso de la boleta del NRUS.
+
+        Es AVISO y no error a propósito: la excepción tiene su propia excepción —cuando el
+        adquirente es del Sector Público la detracción sí procede—, y bloquear una operación
+        legítima con el Estado sería peor que dejar pasar una detracción de más."""
+        company = self._l10n_pe_ne_regimen_company()
+        if company.l10n_pe_ne_regimen != "nrus" or not self.l10n_pe_ne_detraccion:
+            return []
+        return [{
+            "code": "regimen-detraccion", "campo": "detraccion", "nivel": "aviso",
+            "mensaje": _(
+                "Tu negocio está en el Nuevo RUS: sus ventas suelen estar EXCEPTUADAS de la "
+                "detracción (SPOT), porque la boleta no sustenta crédito fiscal. Solo "
+                "corresponde detraer si el comprador es una entidad del Sector Público "
+                "Nacional. Verifica antes de emitir."
+            ),
+        }]
 
     def _l10n_pe_ne_regla_vencidos(self, hoy=None):
         """Farma / perecibles: avisa si la venta despachó un lote VENCIDO. Lee el lote que la

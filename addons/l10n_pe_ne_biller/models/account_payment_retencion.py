@@ -347,6 +347,9 @@ class AccountPayment(models.Model):
         de compra, registra el pago reconciliado (3% IGV) con el wizard estándar de Odoo y lo envía a
         SUNAT. Devuelve el resultado. Lo consume el BFF stateless por /json/2."""
         AM = self.env['account.move']
+        # Muro por régimen: el NRUS no declara IGV, así que no puede operar como agente de
+        # retención por más que se lo pidan. Empresa sin régimen configurado pasa (legacy).
+        AM._l10n_pe_ne_check_regimen('20')
         prov = AM._l10n_pe_ne_quick_partner(payload.get('proveedor') or payload.get('cliente') or {})
         if not prov.supplier_rank:
             prov.supplier_rank = 1
@@ -365,6 +368,8 @@ class AccountPayment(models.Model):
         """Emite una Percepción (40) desde un payload plano: halla/crea el cliente y sus ventas, registra
         el cobro reconciliado (2%) y lo envía a SUNAT."""
         AM = self.env['account.move']
+        # Muro por régimen: ídem retención — el NRUS no puede ser agente de percepción.
+        AM._l10n_pe_ne_check_regimen('40')
         cli = AM._l10n_pe_ne_quick_partner(payload.get('cliente') or {})
         invs = self._l10n_pe_ne_quick_related(payload, cli, 'out_invoice')
         if not invs:

@@ -69,9 +69,10 @@ class TestRubros(L10nPeSeedMixin, TransactionCase):
         from unittest.mock import patch
         from ..models import l10n_pe_ne_rubro as R
         self._set(["educacion"], {"R10": True})
-        with patch.dict(R.MODULOS, {"R10": ("Agenda de citas / turnos", "R", False)}), \
+        with patch.dict(R.MODULOS, {"R10": ("Agenda de citas / turnos", "R", False,
+                                            "Agendas al cliente por día y hora.")}), \
                 patch.object(R, "_DISPONIBLES",
-                             frozenset(c for c, (_n, _c, d) in R.MODULOS.items() if d)):
+                             frozenset(c for c, (_n, _c, d, _x) in R.MODULOS.items() if d)):
             efectivos = self.env.company.l10n_pe_ne_modulos_efectivos()
             self.assertNotIn("R10", efectivos)
         # Sin el parche, R10 (ya construido en fase 2) pasa el filtro normalmente.
@@ -280,3 +281,90 @@ class TestRubros(L10nPeSeedMixin, TransactionCase):
         self.assertFalse(user.with_user(user).l10n_pe_ne_perfil()["rubroConfigurado"])
         self._set(["bodega"])
         self.assertTrue(user.with_user(user).l10n_pe_ne_perfil()["rubroConfigurado"])
+
+    # ------------------------------------- robustez · fusión de overrides
+    def test_cambio_de_rubro_conserva_los_ajustes_manuales(self):
+        """El bug que rompía la promesa «lo que ya usas nunca se pierde».
+
+        Antes, aplicar un tipo de negocio mandaba overrides={} y el backend REEMPLAZABA:
+        todo lo que el dueño había activado a mano desaparecía en silencio. Ahora, si el
+        payload no trae la clave `overrides`, se conservan los guardados."""
+        AM = self.env["account.move"]
+        self._set(["bodega"], {"I04": True})          # activó Lotes/vencimiento a mano
+        estado = AM.l10n_pe_ne_set_rubro({"rubros": ["consultoria"]})   # sin clave overrides
+        self.assertTrue(estado["overrides"].get("I04"),
+                        "el override manual debe sobrevivir al cambio de rubro")
+        self.assertIn("I04", estado["modulos"])
+
+    def test_overrides_presente_es_autoritativo(self):
+        """El ajuste fino manda el dict completo: quitar una clave vuelve al default del
+        rubro. Un {} explícito sigue significando «sin overrides» (no se fusiona)."""
+        AM = self.env["account.move"]
+        self._set(["bodega"], {"I04": True})
+        estado = AM.l10n_pe_ne_set_rubro({"rubros": ["bodega"], "overrides": {}})
+        self.assertNotIn("I04", estado["overrides"])
+        self.assertNotIn("I04", estado["modulos"])
+
+    def test_override_sobre_nucleo_no_se_persiste(self):
+        """Apagar el núcleo no tiene efecto; antes se guardaba igual y la bitácora lo
+        reportaba como «apagó Factura electrónica» — una traza de auditoría mintiendo."""
+        AM = self.env["account.move"]
+        estado = AM.l10n_pe_ne_set_rubro({"rubros": ["bodega"], "overrides": {"E01": False}})
+        self.assertNotIn("E01", estado["overrides"])
+        self.assertIn("E01", estado["modulos"])       # sigue activo, como debe
+
+    # ------------------------------------------- robustez · dependencias
+    def test_dependencias_se_autocompletan(self):
+        """Maderera trae Kardex (I02) pero su preset no lista Stock perpetuo (I01): un
+        kardex sin movimientos de stock no es configuración válida, es configuración rota."""
+        self._set(["maderera"])
+        efectivos = self.env.company.l10n_pe_ne_modulos_efectivos()
+        self.assertIn("I02", efectivos)
+        self.assertIn("I01", efectivos)
+
+    def test_dependencia_revierte_un_apagado_incoherente(self):
+        self._set(["ferreteria"], {"I01": False})     # apagar la base teniendo el kardex
+        efectivos = self.env.company.l10n_pe_ne_modulos_efectivos()
+        self.assertIn("I01", efectivos, "I02/I05 dependen de I01: no puede quedar apagado")
+
+    def test_dependencias_apuntan_a_modulos_existentes(self):
+        from ..models.l10n_pe_ne_rubro import DEPENDENCIAS
+        for cod, deps in DEPENDENCIAS.items():
+            self.assertIn(cod, MODULOS)
+            for d in deps:
+                self.assertIn(d, MODULOS)
+                self.assertNotEqual(cod, d, "una dependencia sobre sí mismo cuelga el cierre")
+
+    # ------------------------------------------------ robustez · didáctica
+    def test_todo_modulo_tiene_descripcion_util(self):
+        """La descripción es contrato de producto: es lo único que un dueño de PyME lee
+        para decidir si necesita «IVAP». Un módulo sin ella llega mudo a la pantalla."""
+        for cod, (nombre, _cat, _disp, desc) in MODULOS.items():
+            self.assertTrue(desc and desc.strip(), "%s (%s) sin descripción" % (cod, nombre))
+            self.assertGreater(len(desc), 25, "%s: descripción demasiado corta" % cod)
+            self.assertNotEqual(desc.strip(), nombre.strip())
+
+    def test_catalogo_modulos_expone_descripcion_y_requiere(self):
+        cfg = self.env["account.move"].l10n_pe_ne_rubro_config()
+        por_cod = {m["codigo"]: m for m in cfg["catalogoModulos"]}
+        self.assertTrue(por_cod["C12"]["descripcion"])
+        self.assertEqual(por_cod["I02"]["requiere"], ["I01"])
+        self.assertEqual(por_cod["E01"]["requiere"], [])
+
+    # ----------------------------------------------- robustez · salud real
+    def test_salud_series_exige_serie_en_cada_local(self):
+        """El check se llama «Series declaradas por local»: con dos locales y una sola
+        serie daba ✓, y el segundo local descubría que no podía emitir al intentarlo."""
+        Est = self.env["l10n_pe_ne.establecimiento"].sudo()
+        comp = self.env.company
+        e1 = Est.create({"codigo": "0000", "ubigeo": "150101", "direccion": "Av. Uno 123",
+                         "company_id": comp.id})
+        Est.create({"codigo": "0001", "ubigeo": "150101", "direccion": "Av. Dos 456",
+                    "company_id": comp.id})
+        self.env["l10n_pe_ne.serie"].sudo().create({
+            "codigo": "F001", "tipo_doc": "01", "establecimiento_id": e1.id,
+            "activa": True, "company_id": comp.id})
+        item = next(i for i in self.env["account.move"].l10n_pe_ne_salud()["items"]
+                    if i["clave"] == "series")
+        self.assertFalse(item["ok"], "falta la serie del segundo local")
+        self.assertIn("0001", item["detalle"])

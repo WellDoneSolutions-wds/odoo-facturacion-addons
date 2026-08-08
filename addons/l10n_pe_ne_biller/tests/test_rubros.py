@@ -282,6 +282,48 @@ class TestRubros(L10nPeSeedMixin, TransactionCase):
         self._set(["bodega"])
         self.assertTrue(user.with_user(user).l10n_pe_ne_perfil()["rubroConfigurado"])
 
+    # ------------------------------ robustez · el preview no puede mentir
+    def test_preview_respeta_el_apagado_explicito_igual_que_el_guardado(self):
+        """El preview calculaba `protegidos` sin mirar los overrides guardados y el guardado
+        sí: un módulo EN USO pero apagado a mano a sabiendas salía en el preview como
+        «conservado» y al aplicar desaparecía. El preview mentía sobre la promesa que vende."""
+        self._con_detraccion_en_historia()          # C04 queda en uso
+        AM = self.env["account.move"]
+        self._set(["bodega"], {"C04": False})        # ...pero apagado explícitamente
+        prev = AM.l10n_pe_ne_rubro_preview({"rubros": ["bodega"]})
+        protegidos = [m["codigo"] for m in prev["modulos"]["protegidos"]]
+        self.assertNotIn("C04", protegidos, "el preview no debe prometer conservar lo apagado a mano")
+        self.assertNotIn("C04", prev["efectivos"])
+        # Y coincide con lo que hace el guardado de verdad.
+        estado = AM.l10n_pe_ne_set_rubro({"rubros": ["bodega"], "overrides": {"C04": False}})
+        self.assertNotIn("C04", estado["protegidos"])
+        self.assertNotIn("C04", estado["modulos"])
+
+    def test_preview_declara_que_catalogos_se_retiran(self):
+        """La re-siembra pisa el JSON entero y es irreversible: lo activado a mano sin rastro
+        persistente se pierde. El preview mostraba solo los contadores del DESTINO, así que
+        el usuario nunca veía la pérdida."""
+        comp = self.env.company
+        # Config actual con una unidad y una moneda que la bodega no trae y que no están en uso.
+        comp.sudo().l10n_pe_ne_cfg_catalogos = json.dumps({
+            "unidades": {"activas": ["NIU", "MTQ"], "default": "NIU"},
+            "medios": {"lista": ["Efectivo"], "default": "Efectivo"},
+            "afectaciones": {"activas": ["1000"], "gratuitas": [], "default": "1000"},
+            "monedas": {"activas": ["PEN", "USD"]},
+        })
+        prev = self.env["account.move"].l10n_pe_ne_rubro_preview({"rubros": ["bodega"]})
+        ret = prev["catalogosRetirados"]
+        self.assertIn("MTQ", ret["unidades"], "una unidad activada a mano y sin uso se pierde")
+        self.assertIn("USD", ret["monedas"], "USD sin comprobantes en dólares se pierde")
+        # Y lo retirado es EXACTAMENTE lo que desaparece de la config nueva.
+        self.assertNotIn("MTQ", prev["catalogos"]["unidades"]["activas"])
+        self.assertNotIn("USD", prev["catalogos"]["monedas"]["activas"])
+
+    def test_preview_todos_no_retira_nada(self):
+        prev = self.env["account.move"].l10n_pe_ne_rubro_preview({"rubros": []})
+        self.assertEqual(prev["catalogosRetirados"],
+                         {"unidades": [], "medios": [], "afectaciones": [], "monedas": []})
+
     # --------------------------------------- robustez · permisos al cliente
     def test_config_expone_puede_editar(self):
         """`puedeEditar` sale del MISMO gate que corta el guardado.

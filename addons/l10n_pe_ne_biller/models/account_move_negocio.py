@@ -35,6 +35,15 @@ class AccountMove(models.Model):
         efectivos = self.env.company.l10n_pe_ne_modulos_efectivos()
         if efectivos is not None:
             cfg["modulos"] = sorted(efectivos)
+        # Régimen tributario (F1): la SPA gatea los tipos de comprobante con `tiposPermitidos`,
+        # que viaja YA RESUELTO desde el servidor — el front NO reimplementa la regla
+        # tributaria (si lo hiciera, la UI y la emisión divergirían el primer día que cambie).
+        # Ambas claves solo viajan con régimen configurado: ausente = legacy = sin gating,
+        # mismo contrato que `modulos`.
+        tipos = self.env.company.l10n_pe_ne_tipos_permitidos()
+        if tipos is not None:
+            cfg["regimen"] = self.env.company.l10n_pe_ne_regimen
+            cfg["tiposPermitidos"] = sorted(tipos)
         # Capa 1.5 (catálogos): unidades/medios/afectaciones/monedas del NEGOCIO. A diferencia
         # de los módulos, esto NO es un permiso sino la configuración operativa — aplica a todos
         # los usuarios (admin incluido: cobrar con los medios del negocio no es un bypass).

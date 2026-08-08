@@ -57,6 +57,11 @@ class ResUsers(models.Model):
         # `modulos` (que el admin no recibe), este flag es un DATO de la empresa y viaja a
         # todos — dispara el asistente de bienvenida del dueño/supervisor la primera vez.
         perfil["rubroConfigurado"] = self.company_id.l10n_pe_ne_modulos_efectivos() is not None
+        # Régimen tributario (F1): igual que `rubroConfigurado`, es un DATO de la empresa y
+        # viaja a todos (admin incluido) — dispara el paso del wizard de bienvenida donde el
+        # dueño elige régimen. `regimen` en None = legacy = sin gating.
+        perfil["regimen"] = self.company_id.l10n_pe_ne_regimen or None
+        perfil["regimenConfigurado"] = bool(self.company_id.l10n_pe_ne_regimen)
         return perfil
 
     def _l10n_pe_ne_puede_config_series(self):

@@ -46,6 +46,13 @@ class AccountMove(models.Model):
                     "La nota de venta %s ya fue convertida en el comprobante %s; no se puede emitir otro."
                 ) % (nv.name or nv.id, nv._l10n_pe_ne_comprobante_numero() or "—"))
         tipo = payload.get("tipoDoc") or "01"
+        # Muro por RÉGIMEN TRIBUTARIO (F1): el NRUS tiene PROHIBIDO emitir factura y hacerlo lo
+        # saca del régimen retroactivamente (D. Leg. 937 art. 16.2) — es el error más caro que
+        # un facturador peruano puede dejar cometer. Va aquí arriba, junto a la validación de
+        # «FACTURA (01) exige RUC» pero ANTES de resolver el documento afectado: se corta sin
+        # tocar nada, y cubre también las notas (07/08), que aquel bloque —dentro del `else` de
+        # `origin`— no alcanza. Empresa sin régimen configurado pasa siempre (legacy).
+        self._l10n_pe_ne_check_regimen(tipo)
         # NC motivo 03 = "Corrección por error en la descripción": SOLO corrige el texto,
         # NO cambia importes. La nota va con importe 0.00 (la factura original conserva su
         # valor). Se fuerza aquí para que la correctitud fiscal no dependa del front.
@@ -394,6 +401,9 @@ class AccountMove(models.Model):
         como Supplier), así que el payload reusa el mismo build de factura.
 
         `enviar=False` arma y postea sin enviar (lo usa el pre-flight)."""
+        # Muro por régimen: la liquidación de compra otorga crédito fiscal, así que cae bajo la
+        # misma prohibición que la factura para el NRUS (D. Leg. 937 art. 16.2).
+        self._l10n_pe_ne_check_regimen("04")
         company = self.env.company
         journal = self.env["account.journal"].search(
             [("type", "=", "purchase"), ("company_id", "=", company.id)], limit=1)
@@ -506,7 +516,14 @@ class AccountMove(models.Model):
         try:
             with self.env.cr.savepoint():
                 try:
-                    move = self.l10n_pe_ne_quick_emit(payload, enviar=False)
+                    # `l10n_pe_ne_preflight` en el contexto: esto es una SIMULACIÓN. Los muros
+                    # (rubro / régimen tributario) escriben su bitácora en un cursor aparte
+                    # para que sobreviva al rollback del UserError — y aquí el rollback es
+                    # deliberado, así que esa fila mentiría: nadie intentó emitir. El flag les
+                    # dice que se callen; ver `_l10n_pe_ne_bitacora_segura`.
+                    move = self.with_context(
+                        l10n_pe_ne_preflight=True
+                    ).l10n_pe_ne_quick_emit(payload, enviar=False)
                     findings = move._l10n_pe_ne_validaciones()
                 except UserError as e:
                     findings = [{"code": "bloqueo", "campo": "", "nivel": "error",

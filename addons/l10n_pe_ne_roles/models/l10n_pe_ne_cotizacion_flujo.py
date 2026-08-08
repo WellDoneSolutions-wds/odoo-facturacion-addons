@@ -263,6 +263,12 @@ class L10nPeNeCotizacionFlujo(models.Model):
         # heurística por longitud. Sin esto un CE/pasaporte se declaraba DNI.
         vat_code = p.l10n_latam_identification_type_id.l10n_pe_vat_code or ""
         tipo_doc = "01" if (vat_code == "6" or (p.vat and len(p.vat) == 11)) else "03"
+        # Régimen tributario (F1): «cliente con RUC ⇒ factura» es una heurística NUESTRA, no una
+        # elección del cajero. Un NRUS con una cotización aceptada a un cliente con RUC chocaría
+        # contra el muro de emisión al pulsar «Cobrar» y la venta quedaría inejecutable por esta
+        # pantalla — sin alternativa, porque aquí no hay selector de tipo. Se degrada a boleta,
+        # igual que ya hace la SPA (Cotizaciones.tsx). Sin régimen (legacy) devuelve lo mismo.
+        tipo_doc = self.company_id.l10n_pe_ne_degradar_tipo(tipo_doc)
         lineas = []
         for l in self.line_ids:
             base = round(l.precio_unitario / (1 + IGV_RATE), 6) if l.afecto_igv else l.precio_unitario

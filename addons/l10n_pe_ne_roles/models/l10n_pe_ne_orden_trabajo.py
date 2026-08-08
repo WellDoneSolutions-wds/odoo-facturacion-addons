@@ -496,6 +496,14 @@ class L10nPeNeOrdenTrabajo(models.Model):
         p = self.partner_id
         vat_code = p.l10n_latam_identification_type_id.l10n_pe_vat_code or ""
         tipo_doc = "01" if (vat_code == "6" or (p.vat and len(p.vat) == 11)) else "03"
+        # Régimen tributario (F1): la derivación de arriba es una heurística NUESTRA, no una
+        # elección del usuario, y en un NRUS armaría un tipoDoc '01' que el muro de emisión
+        # rechaza — dejando la orden sin forma de cobrarse (ni el saldo final ni el anticipo de
+        # la Vía A, que comparten este método). Se degrada a boleta. Sin régimen (legacy) el
+        # resultado es idéntico al de siempre.
+        # Nota: al degradar, `_l10n_pe_ne_anticipo_es_factura()` verá una boleta y el bloque
+        # 'anticipo' del final irá con tipo '03', que es justo lo correcto (boleta↔boleta).
+        tipo_doc = self.company_id.l10n_pe_ne_degradar_tipo(tipo_doc)
         cliente = {"clienteId": p.id,
                    "tipoDoc": vat_code or ("6" if tipo_doc == "01" else "1"),
                    "numDoc": p.vat or "", "razonSocial": p.name or ""}

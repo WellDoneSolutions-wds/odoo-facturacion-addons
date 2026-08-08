@@ -731,6 +731,27 @@ class L10nPeNeApi(http.Controller):
         except Exception as e:  # noqa: BLE001
             return self._fail(e)
 
+    # ------------------------------------------- régimen tributario (F1)
+    @http.route("/ne/api/regimen", **_GET)
+    def regimen(self, **kw):
+        """Régimen tributario del emisor + catálogo + tipos de comprobante permitidos ya
+        resueltos en el servidor (pantalla Configuración / wizard de bienvenida)."""
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        try:
+            return self._json(self._move(uid).l10n_pe_ne_regimen_config())
+        except Exception as e:  # noqa: BLE001
+            return self._fail(e)
+
+    @http.route("/ne/api/regimen", **_POST)
+    def set_regimen(self, **kw):
+        """Guarda el régimen. El muro (dueño/supervisor/admin) y la validación viven en el modelo."""
+        uid = self._identify()
+        if not uid:
+            return self._unauth()
+        return self._run(lambda: self._move(uid).l10n_pe_ne_set_regimen(self._body()))
+
     @http.route("/ne/api/salud", **_GET)
     def salud(self, **kw):
         """B · checklist de completitud del negocio."""

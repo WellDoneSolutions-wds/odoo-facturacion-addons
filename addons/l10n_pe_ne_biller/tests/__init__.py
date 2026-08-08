@@ -54,3 +54,4 @@ from . import test_variantes
 from . import test_apartado
 from . import test_config_catalogos
 from . import test_datos_pago_marcado
+from . import test_regimen

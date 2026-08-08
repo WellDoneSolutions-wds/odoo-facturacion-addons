@@ -10,3 +10,4 @@ from . import test_orden_trabajo
 from . import test_cn01_http
 from . import test_cn02_http
 from . import test_caja_descuadre_aviso
+from . import test_regimen_flujos
